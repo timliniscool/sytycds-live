@@ -1,0 +1,33 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "sytycds-live",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-09-09",
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SHOW_COORDINATOR",
+        "class_name": "ShowCoordinator",
+      },
+    ],
+  },
+  "exports": {
+    "ShowCoordinator": {
+      "type": "durable-object",
+      "storage": "sqlite",
+    },
+  },
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "sytycds-media",
+    },
+  ],
+  "observability": {
+    "enabled": true,
+  },
+}
