@@ -853,6 +853,7 @@ export class ShowCoordinator extends DurableObject<Env> {
 
   webSocketClose(): void {
     // Hibernation-safe connections are discovered from attachments; no memory cleanup is required.
+    this.broadcastConnectionCount();
   }
 
   private async handleHello(
@@ -884,6 +885,7 @@ export class ShowCoordinator extends DurableObject<Env> {
       adminSessionHash: attachment.adminSessionHash,
     } satisfies ReadyAttachment);
     this.sendSnapshot(ws, role);
+    this.broadcastConnectionCount();
   }
 
   private handleAdminCommand(
@@ -1127,6 +1129,21 @@ export class ShowCoordinator extends DurableObject<Env> {
         this.sendSnapshot(ws, attachment.role);
       }
     }
+  }
+
+  private broadcastConnectionCount(): void {
+    let audience = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (attachment?.phase === "ready" && attachment.role.kind === "audience")
+        audience += 1;
+    }
+    this.broadcastAdmin({
+      type: "connection_count",
+      protocolVersion: PROTOCOL_VERSION,
+      revision: this.currentRevision(),
+      audience,
+    });
   }
 
   private currentRevision(): ReturnType<typeof showRevision> {

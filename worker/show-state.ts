@@ -541,6 +541,13 @@ function executeTransition(
   const activeActId = assertActiveAct(show);
   switch (command.type) {
     case "SELECT_ACT":
+      if (show.audience_vote_state === "OPEN") {
+        return {
+          accepted: false,
+          reason: "Close audience voting before changing the current act",
+          changes: [],
+        };
+      }
       if (!loadAct(sql, show.id, command.actId)) {
         return {
           accepted: false,
@@ -555,6 +562,13 @@ function executeTransition(
       );
       return { accepted: true, changes: ["act"] };
     case "NEXT_ACT": {
+      if (show.audience_vote_state === "OPEN") {
+        return {
+          accepted: false,
+          reason: "Close audience voting before changing the current act",
+          changes: [],
+        };
+      }
       const next = selectedActForDirection(sql, show, "next");
       if (!next) {
         return { accepted: false, reason: "There is no next act", changes: [] };
@@ -567,6 +581,13 @@ function executeTransition(
       return { accepted: true, changes: ["act"] };
     }
     case "PREVIOUS_ACT": {
+      if (show.audience_vote_state === "OPEN") {
+        return {
+          accepted: false,
+          reason: "Close audience voting before changing the current act",
+          changes: [],
+        };
+      }
       const previous = selectedActForDirection(sql, show, "previous");
       if (!previous) {
         return {

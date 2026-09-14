@@ -165,6 +165,11 @@ export interface ProjectorAcknowledgementMessage extends RevisionedServerMessage
   detail?: string;
 }
 
+export interface ConnectionCountMessage extends RevisionedServerMessage {
+  type: "connection_count";
+  audience: number;
+}
+
 export interface ProtocolErrorMessage extends RevisionedServerMessage {
   type: "protocol_error";
   code:
@@ -191,6 +196,7 @@ export type ServerMessage =
   | ResultRevealMessage
   | CommandAcknowledgementMessage
   | ProjectorAcknowledgementMessage
+  | ConnectionCountMessage
   | ProtocolErrorMessage
   | ForceResyncMessage;
 

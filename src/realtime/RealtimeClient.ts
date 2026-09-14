@@ -29,6 +29,7 @@ export interface RealtimeState {
   judgePermission: JudgePermissionState | null;
   lastMediaCommand: MediaCommandMessage | null;
   lastCommandAcknowledgement: CommandAcknowledgementMessage | null;
+  audienceConnections: number;
   lastError: string | null;
 }
 
@@ -64,6 +65,7 @@ const INITIAL_STATE: RealtimeState = {
   judgePermission: null,
   lastMediaCommand: null,
   lastCommandAcknowledgement: null,
+  audienceConnections: 0,
   lastError: null,
 };
 
@@ -451,6 +453,7 @@ export class RealtimeClient {
     let judgePermission = this.state.judgePermission;
     let lastMediaCommand = this.state.lastMediaCommand;
     let lastCommandAcknowledgement = this.state.lastCommandAcknowledgement;
+    let audienceConnections = this.state.audienceConnections;
 
     switch (message.type) {
       case "state_patch":
@@ -500,6 +503,10 @@ export class RealtimeClient {
         lastCommandAcknowledgement = message;
         break;
       case "projector_acknowledgement":
+        break;
+      case "connection_count":
+        audienceConnections = message.audience;
+        break;
       case "protocol_error":
         break;
     }
@@ -518,6 +525,7 @@ export class RealtimeClient {
       judgePermission,
       lastMediaCommand,
       lastCommandAcknowledgement,
+      audienceConnections,
       lastError: message.type === "protocol_error" ? message.detail : null,
     });
   }
