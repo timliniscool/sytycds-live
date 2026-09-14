@@ -357,6 +357,52 @@ describe("browser realtime client", () => {
     vi.useRealTimers();
   });
 
+  it("keeps the missing-show state until a snapshot arrives", () => {
+    const socket = new FakeSocket();
+    const client = new RealtimeClient({
+      url: "ws://example.test/api/ws",
+      hello: {
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        requestedRole: "admin",
+      },
+      createSocket: () => socket,
+    });
+    client.connect();
+    socket.open();
+    socket.receive(
+      serialiseServerMessage({
+        type: "protocol_error",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(0),
+        code: "show_unavailable",
+        detail: "No show has been created",
+      }),
+    );
+    // Routine housekeeping must not hide the provisioning step.
+    socket.receive(
+      serialiseServerMessage({
+        type: "connection_count",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(0),
+        audience: 0,
+        judgeIds: [],
+      }),
+    );
+    expect(client.getState().showUnavailable).toBe(true);
+    expect(client.getState().connection).toBe("LIVE");
+    socket.receive(
+      serialiseServerMessage({
+        type: "snapshot",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(0),
+        projection: snapshotProjection,
+      }),
+    );
+    expect(client.getState().showUnavailable).toBe(false);
+    client.destroy();
+  });
+
   it("uses one reconnect timer after a closed socket", () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

@@ -138,6 +138,10 @@ function Console() {
   );
   const connection = useRealtimeSelector(client, (state) => state.connection);
   const lastError = useRealtimeSelector(client, (state) => state.lastError);
+  const showUnavailable = useRealtimeSelector(
+    client,
+    (state) => state.showUnavailable,
+  );
   // Every revisioned message advances this, while the projection keeps the
   // revision it was snapshotted at. Commands must be stamped with the former or
   // the second command of a snapshot is always rejected as stale.
@@ -228,13 +232,21 @@ function Console() {
   if (!projection)
     return (
       <main className="admin-console admin-console--loading">
-        {lastError?.includes("unavailable") ? (
+        {showUnavailable ? (
           // A fresh deployment: the coordinator is up but no show exists yet.
           <ShowIdentityPanel current={null} />
         ) : (
           <p className="admin-loading">
             <span className="admin-mark">SYTYCDS / CONTROL</span>
-            Connecting to the show coordinator…
+            {connection === "UNAUTHORISED"
+              ? "The coordinator refused this operator session. Sign out and in again."
+              : connection === "INCOMPATIBLE"
+                ? "This console is out of date. Reload the page."
+                : "Connecting to the show coordinator…"}
+            <small>
+              {connection.toLowerCase()}
+              {lastError ? ` · ${lastError}` : ""}
+            </small>
           </p>
         )}
       </main>

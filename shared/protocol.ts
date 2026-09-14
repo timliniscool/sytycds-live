@@ -251,7 +251,9 @@ export interface ProtocolErrorMessage extends RevisionedServerMessage {
     | "invalid_message"
     | "unauthorised"
     | "incompatible_protocol"
-    | "unsupported_action";
+    | "unsupported_action"
+    /** The coordinator is fine but no show has been created yet. */
+    | "show_unavailable";
   detail: string;
 }
 

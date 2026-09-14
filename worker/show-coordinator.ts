@@ -1330,7 +1330,13 @@ export class ShowCoordinator extends DurableObject<Env> {
   private sendSnapshot(ws: WebSocket, role: ConnectionRole): void {
     const projection = this.project(role);
     if (!projection) {
-      this.sendProtocolError(ws, "unauthorised", "Show or role is unavailable");
+      // A missing show is a provisioning state, not a refused credential;
+      // the console turns it into the "create the show" step.
+      this.sendProtocolError(
+        ws,
+        this.showExists() ? "unauthorised" : "show_unavailable",
+        this.showExists() ? "Role is unavailable" : "No show has been created",
+      );
       return;
     }
     this.sendOne(ws, {
@@ -1384,6 +1390,17 @@ export class ShowCoordinator extends DurableObject<Env> {
     });
   }
 
+  private showExists(): boolean {
+    return (
+      this.ctx.storage.sql
+        .exec<{ present: number }>(
+          "SELECT 1 AS present FROM shows WHERE id = ?",
+          PRIMARY_SHOW_ID,
+        )
+        .toArray().length > 0
+    );
+  }
+
   private currentRevision(): ReturnType<typeof showRevision> {
     const row = this.ctx.storage.sql
       .exec<{ revision: number }>(
@@ -1411,11 +1428,7 @@ export class ShowCoordinator extends DurableObject<Env> {
 
   private sendProtocolError(
     ws: WebSocket,
-    code:
-      | "invalid_message"
-      | "unauthorised"
-      | "incompatible_protocol"
-      | "unsupported_action",
+    code: Extract<ServerMessage, { type: "protocol_error" }>["code"],
     detail: string,
   ): void {
     this.sendOne(ws, {

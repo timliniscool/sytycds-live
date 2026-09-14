@@ -53,6 +53,11 @@ export interface RealtimeState {
   audienceConnections: number;
   judgeConnections: ReadonlySet<string>;
   lastError: string | null;
+  /**
+   * The coordinator answered but no show exists yet. Sticky until a snapshot
+   * arrives, so later housekeeping messages cannot hide the provisioning step.
+   */
+  showUnavailable: boolean;
 }
 
 export interface WebSocketLike {
@@ -95,6 +100,7 @@ const INITIAL_STATE: RealtimeState = {
   audienceConnections: 0,
   judgeConnections: new Set(),
   lastError: null,
+  showUnavailable: false,
 };
 
 const OPEN = 1;
@@ -521,6 +527,7 @@ export class RealtimeClient {
             ? message.projection.permission
             : null,
         lastError: null,
+        showUnavailable: false,
       });
       this.retryAttempt = 0;
       return;
@@ -684,6 +691,10 @@ export class RealtimeClient {
       audienceConnections,
       judgeConnections,
       lastError: message.type === "protocol_error" ? message.detail : null,
+      showUnavailable:
+        message.type === "protocol_error"
+          ? message.code === "show_unavailable" || this.state.showUnavailable
+          : this.state.showUnavailable,
     });
   }
 
