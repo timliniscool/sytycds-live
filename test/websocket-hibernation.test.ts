@@ -18,6 +18,11 @@ describe("hibernatable coordinator sockets", () => {
     const client = response.webSocket;
     expect(client).not.toBeNull();
     client?.accept();
+    // The hello is processed asynchronously; the coordinator answers it with
+    // either a snapshot or a protocol error, and only then is the role fixed.
+    const answered = new Promise<void>((resolve) => {
+      client?.addEventListener("message", () => resolve(), { once: true });
+    });
     client?.send(
       JSON.stringify({
         type: "hello",
@@ -25,6 +30,7 @@ describe("hibernatable coordinator sockets", () => {
         requestedRole: "audience",
       }),
     );
+    await answered;
 
     await runInDurableObject(stub, (_instance, state) => {
       const socket = state.getWebSockets()[0];

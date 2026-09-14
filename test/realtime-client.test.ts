@@ -41,12 +41,16 @@ const snapshotProjection: AudienceShowProjection = {
   role: "audience",
   show: {
     title: "Show",
+    intermissionMessage: "",
+    emergencyMessage: "",
     displayMode: "LOBBY",
     activeActId: null,
     audienceVoteState: "CLOSED",
     revision: showRevision(0),
   },
   activeAct: null,
+  revealedResult: null,
+  publicResults: null,
 };
 
 describe("browser realtime client", () => {
@@ -204,7 +208,16 @@ describe("browser realtime client", () => {
         type: "state_patch",
         protocolVersion: PROTOCOL_VERSION,
         revision: showRevision(1),
-        patches: [{ kind: "display", displayMode: "HOLD", blackScreen: false }],
+        patches: [
+          {
+            kind: "display",
+            displayMode: "HOLD",
+            blackScreen: false,
+            intermissionMessage: "",
+            emergencyMessage: "",
+            emergencyPresentation: "BLACK",
+          },
+        ],
       }),
     );
     // Commands must be stamped from `revision`, never from the snapshot copy,

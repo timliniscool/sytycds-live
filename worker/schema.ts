@@ -298,6 +298,27 @@ const CUE_REFERENCE_INTEGRITY_SCHEMA: SchemaMigration = {
   ],
 };
 
+/**
+ * Public text and the results stage are show configuration and operational
+ * state respectively; neither may live only in a browser or in isolate memory.
+ * Withdrawal is a timestamp so the act's history stays intact and auditable.
+ */
+const PUBLIC_MODES_AND_RESULTS_SCHEMA: SchemaMigration = {
+  version: 8,
+  name: "public_messages_emergency_results_stage_withdrawal",
+  statements: [
+    "ALTER TABLE shows ADD COLUMN intermission_message TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE shows ADD COLUMN emergency_message TEXT NOT NULL DEFAULT ''",
+    `ALTER TABLE show_runtime ADD COLUMN emergency_presentation TEXT NOT NULL DEFAULT 'BLACK'
+      CHECK (emergency_presentation IN ('BLACK', 'TEXT'))`,
+    `ALTER TABLE show_runtime ADD COLUMN results_stage TEXT NOT NULL DEFAULT 'HIDDEN'
+      CHECK (results_stage IN ('HIDDEN', 'LEADERBOARD', 'STAGED', 'TOP_THREE', 'WINNER'))`,
+    `ALTER TABLE show_runtime ADD COLUMN results_revealed_groups INTEGER NOT NULL DEFAULT 0
+      CHECK (results_revealed_groups >= 0)`,
+    "ALTER TABLE acts ADD COLUMN withdrawn_at TEXT",
+  ],
+};
+
 export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -306,6 +327,7 @@ export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   RESULTS_ACTS_MEDIA_SCHEMA,
   SHOW_IDENTITY_SCHEMA,
   CUE_REFERENCE_INTEGRITY_SCHEMA,
+  PUBLIC_MODES_AND_RESULTS_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

@@ -37,12 +37,16 @@ describe("realtime protocol", () => {
       role: "audience",
       show: {
         title: "Show",
+        intermissionMessage: "",
+        emergencyMessage: "",
         displayMode: "LOBBY",
         activeActId: null,
         audienceVoteState: "CLOSED",
         revision: showRevision(2),
       },
       activeAct: null,
+      revealedResult: null,
+      publicResults: null,
     };
     const wire = serialiseServerMessage({
       type: "snapshot",

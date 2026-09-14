@@ -21,6 +21,11 @@
       "storage": "sqlite",
     },
   },
+  // Canonical audience origin for the lobby QR. Leave empty to use each
+  // client's own origin (correct for local development); set it per deployment.
+  "vars": {
+    "PUBLIC_ORIGIN": "",
+  },
   "r2_buckets": [
     {
       "binding": "MEDIA",

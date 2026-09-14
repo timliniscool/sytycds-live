@@ -1,12 +1,18 @@
 import { useMemo } from "react";
 
-import type { PublicAct } from "../../shared/domain";
+import type { EmergencyPresentation, PublicAct } from "../../shared/domain";
 import { encodeQr, qrPath } from "./qr";
 
 /** Quiet zone in modules, as required for a scannable symbol. */
 const QUIET_ZONE = 4;
 
-export function JoinCode({ url }: { url: string }) {
+export function JoinCode({
+  url,
+  className = "lobby__qr",
+}: {
+  url: string;
+  className?: string;
+}) {
   // Encoding walks eight mask candidates, so it is computed once per URL
   // rather than on every projector re-render.
   const code = useMemo(() => {
@@ -21,9 +27,11 @@ export function JoinCode({ url }: { url: string }) {
     return <p className="lobby__qr-fallback">{displayUrl(url)}</p>;
   }
   const span = code.size + QUIET_ZONE * 2;
+  // Pure black on pure white, square corners, no logo: every one of those
+  // would cost scan reliability from the back of a hall.
   return (
     <svg
-      className="lobby__qr"
+      className={className}
       viewBox={`0 0 ${span} ${span}`}
       role="img"
       aria-label={`Voting link: ${displayUrl(url)}`}
@@ -89,14 +97,69 @@ export function ActCardGraphic({ act }: { act: PublicAct }) {
 export function HoldingGraphic({
   kicker,
   headline,
+  detail,
 }: {
   kicker: string;
   headline: string;
+  detail?: string;
 }) {
   return (
     <section className="stage holding" key={headline}>
       <p className="stage__kicker">{kicker}</p>
       <h1 className="holding__headline">{headline}</h1>
+      {detail && <p className="holding__detail">{detail}</p>}
+    </section>
+  );
+}
+
+/** A cue-driven caption on black; the visual channel's own title card. */
+export function TitleCardGraphic({ title }: { title: string }) {
+  return (
+    <section className="stage title-card" key={title}>
+      <h1 className="title-card__title">{title}</h1>
+    </section>
+  );
+}
+
+export function IntermissionGraphic({ message }: { message: string }) {
+  return (
+    <section className="stage holding intermission" key="intermission">
+      <p className="stage__kicker">Back shortly</p>
+      <h1 className="holding__headline">Intermission</h1>
+      {message && <p className="holding__detail">{message}</p>}
+    </section>
+  );
+}
+
+/** Calm and static: a technical hold should not look like a graphic. */
+export function HoldGraphic() {
+  return (
+    <section className="stage holding hold" key="hold">
+      <p className="stage__kicker">One moment</p>
+      <h1 className="holding__headline">Please stand by</h1>
+    </section>
+  );
+}
+
+/**
+ * Nothing moves and nothing decorates. BLACK is exactly that; TEXT is the
+ * operator's message, or a plain instruction when none is configured.
+ */
+export function EmergencyGraphic({
+  presentation,
+  message,
+}: {
+  presentation: EmergencyPresentation;
+  message: string;
+}) {
+  if (presentation === "BLACK") {
+    return <section className="stage emergency emergency--black" />;
+  }
+  return (
+    <section className="stage emergency" key="emergency-text">
+      <h1 className="emergency__headline">
+        {message || "Please follow staff instructions"}
+      </h1>
     </section>
   );
 }

@@ -45,6 +45,18 @@ export type JudgePermissionState = "OPEN" | "CLOSED";
 export type ResultRevealState = "HIDDEN" | "REVEALED";
 export type MediaTransportState = "STOPPED" | "PREPARED" | "PLAYING" | "PAUSED";
 
+/** Emergency is black by default; text is a deliberate second step. */
+export type EmergencyPresentation = "BLACK" | "TEXT";
+
+/**
+ * How much of the completed-show ranking the public may currently see. This is
+ * independent from the per-act scoreboard reveal.
+ */
+export type ResultsStage =
+  "HIDDEN" | "LEADERBOARD" | "STAGED" | "TOP_THREE" | "WINNER";
+
+export const MAX_PUBLIC_MESSAGE_LENGTH = 200;
+
 /** What a projector's own media elements report, as opposed to operator intent. */
 export type MediaPlaybackState =
   "IDLE" | "LOADED" | "PLAYING" | "PAUSED" | "ENDED" | "ERROR";
@@ -59,11 +71,18 @@ export type VisualCueKind =
   "TITLE_CARD" | "IMAGE" | "SLIDES" | "VIDEO" | "BLACK" | "CLEAR";
 export type AudioCueKind = "AUDIO" | "VIDEO_AUDIO";
 
+/**
+ * `contain` preserves the whole slide inside a black frame and is the default.
+ * `cover` crops to fill and is only honoured where the cue explicitly asks.
+ */
+export type ImageFit = "contain" | "cover";
+
 /** Visual and backing-audio channels are intentionally independent. */
 export interface VisualCue {
   kind: VisualCueKind;
   sourceKey: string | null;
   title: string | null;
+  fit?: ImageFit;
 }
 
 export interface AudioCue {
@@ -123,6 +142,8 @@ export interface PublicAct {
   actName: string;
   actType: string;
   publicDescription: string;
+  /** A withdrawn act keeps its history but leaves the running order and rankings. */
+  withdrawn: boolean;
 }
 
 export interface AdminAct extends PublicAct {
@@ -135,6 +156,10 @@ export interface PersistedShow {
   title: string;
   /** Optional second line for lobby graphics; empty when the show sets none. */
   tagline: string;
+  /** Short operator-configured public text for the INTERMISSION graphic. */
+  intermissionMessage: string;
+  /** Short public text shown only in the TEXT emergency presentation. */
+  emergencyMessage: string;
   displayMode: DisplayMode;
   audienceVoteState: AudienceVoteState;
   resultRevealState: ResultRevealState;
@@ -153,6 +178,10 @@ export interface ShowRuntimeState {
   visualTransport: MediaTransportState;
   audioTransport: MediaTransportState;
   blackScreen: boolean;
+  emergencyPresentation: EmergencyPresentation;
+  resultsStage: ResultsStage;
+  /** STAGED reveal: how many rank groups, counted from last place, are public. */
+  resultsRevealedGroups: number;
 }
 
 export type AudienceScore = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
@@ -220,6 +249,58 @@ export type OperationalResult =
   | { kind: "provisional"; value: number }
   | { kind: "finalised"; value: number; finalisedAt: string };
 
+/** A judge's public scoreboard tile: raw text as typed plus the score that counts. */
+export interface ScoreboardJudge {
+  slot: number;
+  displayName: string;
+  submission: {
+    raw: string;
+    parsed: ParsedJudgeScore;
+    effectiveScore: EffectiveJudgeScore;
+  } | null;
+}
+
+/**
+ * Live scoreboard inputs for the current act. The final score is deliberately
+ * absent: it travels only as `revealedResult` after the operator reveals it.
+ */
+export interface ProjectorScoreboard {
+  audience: AudienceAggregate | null;
+  judges: readonly ScoreboardJudge[];
+}
+
+/** One finalised act in the completed-show ranking. */
+export interface RankingEntry {
+  actId: ActId;
+  /** Competition ranking: equal stored scores share a rank and skip the next. */
+  rank: number;
+  tied: boolean;
+  finalScore: number;
+  performerName: string;
+  actName: string;
+  schoolYear: string;
+  actType: string;
+}
+
+/**
+ * The public slice of the ranking under the current results stage. `pending`
+ * counts rank groups the STAGED reveal has not reached; `total` is every ranked
+ * group so the projector can draw the empty slots.
+ */
+export interface PublicResults {
+  stage: Exclude<ResultsStage, "HIDDEN">;
+  entries: readonly RankingEntry[];
+  pendingGroups: number;
+  totalGroups: number;
+}
+
+/** The operator's complete ranking picture, including acts that cannot rank. */
+export interface AdminRanking {
+  ranked: readonly RankingEntry[];
+  incomplete: readonly PublicAct[];
+  withdrawn: readonly PublicAct[];
+}
+
 export interface AdminShowProjection {
   role: "admin";
   show: PersistedShow;
@@ -228,13 +309,20 @@ export interface AdminShowProjection {
   runtime: ShowRuntimeState;
   results: Readonly<Record<string, OperationalResult>>;
   judges: readonly AdminJudgeState[];
+  ranking: AdminRanking;
 }
 
 export interface ProjectorShowProjection {
   role: "projector";
   show: Pick<
     PersistedShow,
-    "title" | "tagline" | "displayMode" | "activeActId" | "revision"
+    | "title"
+    | "tagline"
+    | "intermissionMessage"
+    | "emergencyMessage"
+    | "displayMode"
+    | "activeActId"
+    | "revision"
   >;
   activeAct: PublicAct | null;
   activeCues: readonly ProjectorCue[];
@@ -246,9 +334,15 @@ export interface ProjectorShowProjection {
     | "visualTransport"
     | "audioTransport"
     | "blackScreen"
+    | "emergencyPresentation"
   >;
+  scoreboard: ProjectorScoreboard;
   /** Present only after the operator has publicly revealed a finalised result. */
-  revealedResult?: number | null;
+  revealedResult: number | null;
+  /** Null while the results stage is HIDDEN. */
+  publicResults: PublicResults | null;
+  /** Canonical audience URL when the deployment configures one; else the client uses its own origin. */
+  joinUrl: string | null;
 }
 
 export interface AudienceShowProjection {
@@ -256,10 +350,17 @@ export interface AudienceShowProjection {
   /** `displayMode` is already public on the projector, so phones may mirror it. */
   show: Pick<
     PersistedShow,
-    "title" | "displayMode" | "activeActId" | "audienceVoteState" | "revision"
+    | "title"
+    | "intermissionMessage"
+    | "emergencyMessage"
+    | "displayMode"
+    | "activeActId"
+    | "audienceVoteState"
+    | "revision"
   >;
   activeAct: PublicAct | null;
-  revealedResult?: number | null;
+  revealedResult: number | null;
+  publicResults: PublicResults | null;
 }
 
 export interface JudgeShowProjection {

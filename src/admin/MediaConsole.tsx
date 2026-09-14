@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { AdminCommandType } from "../../shared/admin-command";
-import type { AdminAct, ShowRuntimeState } from "../../shared/domain";
+import type {
+  AdminAct,
+  DisplayMode,
+  ShowRuntimeState,
+} from "../../shared/domain";
 import type {
   CommandAcknowledgementMessage,
   ProjectorAcknowledgementMessage,
@@ -11,6 +15,7 @@ import type {
 export interface MediaConsoleProps {
   act: AdminAct | null;
   runtime: ShowRuntimeState;
+  displayMode: DisplayMode;
   telemetry: ProjectorPlaybackStatus | null;
   projectorAcknowledgement: ProjectorAcknowledgementMessage | null;
   commandAcknowledgement: CommandAcknowledgementMessage | null;
@@ -32,9 +37,18 @@ function clock(milliseconds: number | null): string {
   return `${minutes}:${String(total % 60).padStart(2, "0")}`;
 }
 
+/** Modes whose own graphics are the public output; the visual layer stays hidden. */
+const VISUAL_LAYER_HIDDEN: ReadonlySet<DisplayMode> = new Set([
+  "HOLD",
+  "EMERGENCY",
+  "SCOREBOARD",
+  "FINAL_RESULTS",
+]);
+
 export function MediaConsole({
   act,
   runtime,
+  displayMode,
   telemetry,
   projectorAcknowledgement,
   commandAcknowledgement,
@@ -126,6 +140,12 @@ export function MediaConsole({
       {telemetry && !telemetry.armed && (
         <p className="media-console__warn">
           Projector audio is not armed. Press ARM SHOW on the projector.
+        </p>
+      )}
+      {runtime.activeVisualCueId && VISUAL_LAYER_HIDDEN.has(displayMode) && (
+        <p className="media-console__warn">
+          The visual layer is hidden while the projector shows{" "}
+          {displayMode.replaceAll("_", " ")}; audio continues.
         </p>
       )}
 

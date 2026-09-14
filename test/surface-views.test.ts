@@ -20,6 +20,7 @@ const act: PublicAct = {
   actName: "Escape act",
   actType: "Variety",
   publicDescription: "",
+  withdrawn: false,
 };
 
 function audience(
@@ -30,6 +31,8 @@ function audience(
     role: "audience",
     show: {
       title: "Show",
+      intermissionMessage: "Back in 15 minutes",
+      emergencyMessage: "",
       displayMode: "PERFORMANCE",
       activeActId: activeAct?.id ?? null,
       audienceVoteState: "CLOSED",
@@ -37,6 +40,8 @@ function audience(
       ...overrides,
     },
     activeAct,
+    revealedResult: null,
+    publicResults: null,
   };
 }
 
@@ -113,11 +118,18 @@ describe("audience view state", () => {
     ).toBe("CLOSED");
   });
 
-  it("mirrors the projector for intermission, hold and final results", () => {
+  it("mirrors the projector for intermission, hold, emergency and final results", () => {
+    expect(
+      deriveVoteView({
+        connection: "LIVE",
+        projection: audience({ displayMode: "INTERMISSION" }),
+        submission: idle,
+        sawVotingOpen: false,
+      }),
+    ).toEqual({ kind: "INTERMISSION", message: "Back in 15 minutes" });
     for (const [displayMode, expected] of [
-      ["INTERMISSION", "INTERMISSION"],
       ["HOLD", "HOLD"],
-      ["EMERGENCY", "HOLD"],
+      ["EMERGENCY", "EMERGENCY"],
       ["FINAL_RESULTS", "RESULTS"],
     ] as const) {
       expect(

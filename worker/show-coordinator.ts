@@ -56,6 +56,8 @@ import {
   serveMediaAsset,
   uploadMediaAsset,
 } from "./media-assets";
+import { preflightAssetRequests, runServerPreflight } from "./preflight";
+import { configuredPublicOrigin } from "./public-origin";
 import { hasSameOrigin } from "./security";
 import { initialiseSchema, readSchemaVersion } from "./schema";
 import { authenticateSocketRole } from "./socket-auth";
@@ -158,6 +160,9 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
     if (url.pathname === "/api/admin/command" && request.method === "POST") {
       return this.handleAdminHttpCommand(request);
+    }
+    if (url.pathname === "/api/admin/preflight" && request.method === "GET") {
+      return this.handlePreflight(request, url);
     }
     if (url.pathname === "/api/admin/judges" && request.method === "GET") {
       return this.handleListJudges(request);
@@ -310,6 +315,46 @@ export class ShowCoordinator extends DurableObject<Env> {
     return Response.json(execution.acknowledgement);
   }
 
+  /** Role projections always carry the deployment's canonical public origin. */
+  private project(role: ConnectionRole) {
+    return projectShowState(this.ctx.storage, PRIMARY_SHOW_ID, role, {
+      publicOrigin: configuredPublicOrigin(this.env),
+    });
+  }
+
+  private socketInventory() {
+    let projectors = 0;
+    const projectorProtocolVersions: number[] = [];
+    const connectedJudgeIds = new Set<string>();
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (attachment?.phase !== "ready") continue;
+      if (attachment.role.kind === "projector") {
+        projectors += 1;
+        projectorProtocolVersions.push(attachment.protocolVersion);
+      }
+      if (attachment.role.kind === "judge")
+        connectedJudgeIds.add(attachment.role.judgeId);
+    }
+    return { projectors, projectorProtocolVersions, connectedJudgeIds };
+  }
+
+  private async handlePreflight(request: Request, url: URL): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    const only = url.searchParams.get("only");
+    const items = await runServerPreflight({
+      sql: this.ctx.storage.sql,
+      bucket: this.env.MEDIA,
+      env: this.env,
+      showIdentifier: PRIMARY_SHOW_ID,
+      sockets: this.socketInventory(),
+      only: only && /^[a-z_]{1,40}$/u.test(only) ? only : undefined,
+    });
+    return Response.json({ items });
+  }
+
   private async handleListJudges(request: Request): Promise<Response> {
     if (!(await this.authenticatedAdmin(request, false))) {
       return Response.json({ error: "Unauthorised" }, { status: 401 });
@@ -399,21 +444,28 @@ export class ShowCoordinator extends DurableObject<Env> {
     return Response.json({ judgeId: requestedJudgeId, active: false });
   }
 
+  /**
+   * Also the audience onboarding call: a first visit with no act yet still
+   * establishes the anonymous voter cookie, so the identity exists before the
+   * first vote is ever attempted.
+   */
   private async handleVoteStatus(
     request: Request,
     url: URL,
   ): Promise<Response> {
     const actIdentifier = url.searchParams.get("actId");
-    if (!actIdentifier || !/^[A-Za-z0-9_-]{1,128}$/u.test(actIdentifier)) {
+    if (actIdentifier && !/^[A-Za-z0-9_-]{1,128}$/u.test(actIdentifier)) {
       return Response.json({ locked: false }, { status: 400 });
     }
     const identity = await resolveVoterIdentity(request);
-    const score = audienceVoteScore(
-      this.ctx.storage.sql,
-      PRIMARY_SHOW_ID,
-      actIdentifier,
-      identity.hash,
-    );
+    const score = actIdentifier
+      ? audienceVoteScore(
+          this.ctx.storage.sql,
+          PRIMARY_SHOW_ID,
+          actIdentifier,
+          identity.hash,
+        )
+      : null;
     const response = Response.json({ locked: score !== null, score });
     if (identity.setCookie) {
       response.headers.set("Set-Cookie", identity.setCookie);
@@ -807,6 +859,46 @@ export class ShowCoordinator extends DurableObject<Env> {
       return;
     }
 
+    if (parsed.message.type === "preflight_request") {
+      if (attachment.role.kind !== "admin") {
+        this.sendProtocolError(
+          ws,
+          "unauthorised",
+          "Only the operator may request preflight",
+        );
+        return;
+      }
+      // Relayed, never persisted: the projector probes its own media pipeline
+      // and answers to admin through the coordinator.
+      this.broadcastProjector({
+        type: "preflight_request",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: this.currentRevision(),
+        requestId: parsed.message.requestId,
+        assets: preflightAssetRequests(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+      });
+      return;
+    }
+
+    if (parsed.message.type === "projector_preflight") {
+      if (attachment.role.kind !== "projector") {
+        this.sendProtocolError(
+          ws,
+          "unauthorised",
+          "Only a projector may report preflight",
+        );
+        return;
+      }
+      this.broadcastAdmin({
+        type: "projector_preflight_report",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: this.currentRevision(),
+        requestId: parsed.message.requestId,
+        report: parsed.message.report,
+      });
+      return;
+    }
+
     if (parsed.message.type === "projector_status") {
       if (attachment.role.kind !== "projector") {
         this.sendProtocolError(
@@ -857,9 +949,11 @@ export class ShowCoordinator extends DurableObject<Env> {
       if (outcome.ok) {
         this.sendSnapshot(ws, attachment.role);
         if (outcome.accepted) {
+          // The scoreboard must be current the moment the operator switches
+          // to it, so the projector learns of every submission, not only those
+          // that arrive while it is already showing scores.
           this.broadcastSnapshots("admin");
-          if (this.currentDisplayMode() === "SCOREBOARD")
-            this.broadcastSnapshots("projector");
+          this.broadcastSnapshots("projector");
         }
       }
       return;
@@ -937,13 +1031,19 @@ export class ShowCoordinator extends DurableObject<Env> {
     changes: readonly StateChange[],
     command: AdminCommand,
   ): void {
-    const audience = projectShowState(this.ctx.storage, PRIMARY_SHOW_ID, {
-      kind: "audience",
-    });
+    const audience = this.project({ kind: "audience" });
     if (!audience || audience.role !== "audience") {
       return;
     }
     const revision = audience.show.revision;
+
+    if (changes.includes("acts")) {
+      // The act list itself changed shape; every role re-derives from it.
+      this.broadcastSnapshots("admin");
+      this.broadcastSnapshots("projector");
+      this.broadcastSnapshots("audience");
+      this.broadcastSnapshots("judge");
+    }
 
     if (changes.includes("act")) {
       const message: ServerMessage = {
@@ -964,9 +1064,7 @@ export class ShowCoordinator extends DurableObject<Env> {
       this.broadcastJudges(message);
     }
 
-    const projector = projectShowState(this.ctx.storage, PRIMARY_SHOW_ID, {
-      kind: "projector",
-    });
+    const projector = this.project({ kind: "projector" });
     if (projector && projector.role === "projector") {
       if (changes.includes("display")) {
         const message: ServerMessage = {
@@ -978,11 +1076,17 @@ export class ShowCoordinator extends DurableObject<Env> {
               kind: "display",
               displayMode: projector.show.displayMode,
               blackScreen: projector.runtime.blackScreen,
+              intermissionMessage: projector.show.intermissionMessage,
+              emergencyMessage: projector.show.emergencyMessage,
+              emergencyPresentation: projector.runtime.emergencyPresentation,
             },
           ],
         };
         this.broadcastAdmin(message);
         this.broadcastProjector(message);
+        // Phones mirror the public display for intermission, hold and
+        // emergency, so they need the same patch.
+        this.broadcastAudience(message);
       }
       if (changes.includes("media")) {
         const mediaPatch: ServerMessage = {
@@ -1035,16 +1139,38 @@ export class ShowCoordinator extends DurableObject<Env> {
       this.broadcastAudience(message);
     }
     if (changes.includes("result_reveal")) {
-      const message: ServerMessage = {
+      const state = this.currentResultRevealState();
+      const publicMessage: ServerMessage = {
         type: "result_reveal",
         protocolVersion: PROTOCOL_VERSION,
         revision,
-        state: this.currentResultRevealState(),
+        state,
+        // Both public projections withhold the number until revealed.
+        revealedResult: audience.revealedResult,
       };
-      this.broadcastAdmin(message);
+      this.broadcastAdmin({
+        type: "result_reveal",
+        protocolVersion: PROTOCOL_VERSION,
+        revision,
+        state,
+        revealedResult: null,
+      });
+      this.broadcastProjector(publicMessage);
+      this.broadcastAudience(publicMessage);
+      this.broadcastJudges(publicMessage);
+      // Finalising changes the operator's result map and ranking preview.
+      if (command.type === "FINALISE_RESULT") this.broadcastSnapshots("admin");
+    }
+    if (changes.includes("results")) {
+      const message: ServerMessage = {
+        type: "public_results",
+        protocolVersion: PROTOCOL_VERSION,
+        revision,
+        results: audience.publicResults,
+      };
       this.broadcastProjector(message);
       this.broadcastAudience(message);
-      this.broadcastJudges(message);
+      if (!changes.includes("acts")) this.broadcastSnapshots("admin");
     }
     if (changes.includes("judge_permission")) {
       this.broadcastJudgePermissionUpdates(revision);
@@ -1114,11 +1240,7 @@ export class ShowCoordinator extends DurableObject<Env> {
         continue;
       }
       judgesSent.add(attachment.role.judgeId);
-      const projection = projectShowState(
-        this.ctx.storage,
-        PRIMARY_SHOW_ID,
-        attachment.role,
-      );
+      const projection = this.project(attachment.role);
       if (projection && projection.role === "judge") {
         this.sendJudge(attachment.role.judgeId, {
           type: "judge_permission_update",
@@ -1131,11 +1253,7 @@ export class ShowCoordinator extends DurableObject<Env> {
   }
 
   private sendSnapshot(ws: WebSocket, role: ConnectionRole): void {
-    const projection = projectShowState(
-      this.ctx.storage,
-      PRIMARY_SHOW_ID,
-      role,
-    );
+    const projection = this.project(role);
     if (!projection) {
       this.sendProtocolError(ws, "unauthorised", "Show or role is unavailable");
       return;
@@ -1197,16 +1315,6 @@ export class ShowCoordinator extends DurableObject<Env> {
       )
       .toArray()[0];
     return row?.result_reveal_state === "REVEALED" ? "REVEALED" : "HIDDEN";
-  }
-
-  private currentDisplayMode(): string {
-    const row = this.ctx.storage.sql
-      .exec<{ display_mode: string }>(
-        "SELECT display_mode FROM shows WHERE id = ?",
-        PRIMARY_SHOW_ID,
-      )
-      .toArray()[0];
-    return row?.display_mode ?? "LOBBY";
   }
 
   private socketAttachment(ws: WebSocket): SocketAttachment | null {

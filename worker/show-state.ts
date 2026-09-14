@@ -16,19 +16,26 @@ import {
   type ClientProjection,
   type ConnectionRole,
   type DisplayMode,
+  type EmergencyPresentation,
   type JudgePermissionState,
   type JudgeShowProjection,
   type MediaTransportState,
+  type ParsedJudgeScore,
   type PersistedCue,
   type PersistedShow,
   type ProjectorCue,
   type ProjectorShowProjection,
   type PublicAct,
+  type ResultsStage,
   type ShowRuntimeState,
   type AudioCueKind,
   type CueOperation,
+  type VisualCue,
   type VisualCueKind,
 } from "../shared/domain";
+import { rankGroups } from "../shared/ranking";
+import { audienceJoinUrl } from "./public-origin";
+import { loadPublicResults, loadRanking } from "./rankings";
 import {
   finaliseResult,
   operationalResult,
@@ -39,11 +46,18 @@ export const PRIMARY_SHOW_ID = showId("primary");
 
 export type StateChange =
   | "act"
+  | "acts"
   | "display"
   | "audience_voting"
   | "judge_permission"
   | "result_reveal"
+  | "results"
   | "media";
+
+export interface ProjectionOptions {
+  /** Canonical audience origin from deployment configuration, if any. */
+  publicOrigin: string | null;
+}
 
 export interface CommandExecutionResult {
   acknowledgement: AdminCommandAcknowledgement;
@@ -54,6 +68,8 @@ interface ShowRow extends Record<string, SqlStorageValue> {
   id: string;
   title: string;
   tagline: string;
+  intermission_message: string;
+  emergency_message: string;
   display_mode: string;
   audience_vote_state: string;
   result_reveal_state: string;
@@ -70,6 +86,9 @@ interface RuntimeRow extends Record<string, SqlStorageValue> {
   visual_transport: string;
   audio_transport: string;
   black_screen: number;
+  emergency_presentation: string;
+  results_stage: string;
+  results_revealed_groups: number;
 }
 
 interface ActRow extends Record<string, SqlStorageValue> {
@@ -81,6 +100,21 @@ interface ActRow extends Record<string, SqlStorageValue> {
   act_type: string;
   public_description: string;
   internal_notes: string;
+  withdrawn_at: string | null;
+}
+
+const ACT_COLUMNS = `id, order_index, performer_name, school_year, act_name, act_type,
+                public_description, internal_notes, withdrawn_at`;
+
+interface JudgeSubmissionRow extends Record<string, SqlStorageValue> {
+  id: string;
+  slot: number;
+  display_name: string;
+  raw_input: string | null;
+  parsed_classification: string | null;
+  finite_value: number | null;
+  effective_score: number | null;
+  submitted_at: string | null;
 }
 
 interface CueRow extends Record<string, SqlStorageValue> {
@@ -124,6 +158,28 @@ const TRANSPORT_STATES = new Set<MediaTransportState>([
   "PAUSED",
 ]);
 
+const RESULTS_STAGES = new Set<ResultsStage>([
+  "HIDDEN",
+  "LEADERBOARD",
+  "STAGED",
+  "TOP_THREE",
+  "WINNER",
+]);
+
+function requireResultsStage(value: string): ResultsStage {
+  if (!RESULTS_STAGES.has(value as ResultsStage)) {
+    throw new Error(`Corrupt results stage in SQLite: ${value}`);
+  }
+  return value as ResultsStage;
+}
+
+function requireEmergencyPresentation(value: string): EmergencyPresentation {
+  if (value !== "BLACK" && value !== "TEXT") {
+    throw new Error(`Corrupt emergency presentation in SQLite: ${value}`);
+  }
+  return value;
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -153,8 +209,9 @@ function loadShow(sql: SqlStorage, id: string): ShowRow | null {
   return (
     sql
       .exec<ShowRow>(
-        `SELECT id, title, tagline, display_mode, audience_vote_state,
-                result_reveal_state, active_act_id, revision
+        `SELECT id, title, tagline, intermission_message, emergency_message,
+                display_mode, audience_vote_state, result_reveal_state,
+                active_act_id, revision
          FROM shows WHERE id = ?`,
         id,
       )
@@ -177,7 +234,8 @@ function ensureRuntime(sql: SqlStorage, id: string): RuntimeRow {
     .exec<RuntimeRow>(
       `SELECT previous_display_mode, global_judge_permission, prepared_cue_id,
               active_visual_cue_id, active_audio_cue_id, visual_transport,
-              audio_transport, black_screen
+              audio_transport, black_screen, emergency_presentation,
+              results_stage, results_revealed_groups
        FROM show_runtime WHERE show_id = ?`,
       id,
     )
@@ -205,6 +263,11 @@ function runtimeState(id: string, row: RuntimeRow): ShowRuntimeState {
     visualTransport: requireTransportState(row.visual_transport),
     audioTransport: requireTransportState(row.audio_transport),
     blackScreen: row.black_screen === 1,
+    emergencyPresentation: requireEmergencyPresentation(
+      row.emergency_presentation,
+    ),
+    resultsStage: requireResultsStage(row.results_stage),
+    resultsRevealedGroups: row.results_revealed_groups,
   };
 }
 
@@ -213,6 +276,8 @@ function persistedShow(row: ShowRow): PersistedShow {
     id: showId(row.id),
     title: row.title,
     tagline: row.tagline,
+    intermissionMessage: row.intermission_message,
+    emergencyMessage: row.emergency_message,
     displayMode: requireDisplayMode(row.display_mode),
     audienceVoteState: row.audience_vote_state === "OPEN" ? "OPEN" : "CLOSED",
     resultRevealState:
@@ -231,6 +296,7 @@ function toPublicAct(row: ActRow): PublicAct {
     actName: row.act_name,
     actType: row.act_type,
     publicDescription: row.public_description,
+    withdrawn: row.withdrawn_at !== null,
   };
 }
 
@@ -259,18 +325,25 @@ function toCue(showIdentifier: string, row: CueRow): PersistedCue {
         assetId: row.audio_source_key,
       });
   }
+  // The legacy columns mirror the first visual operation but carry no fit
+  // policy, so the operation itself is the source of the visual where present.
+  const visualOperation = operations.find(
+    (operation): operation is Extract<CueOperation, { kind: "visual" }> =>
+      operation.kind === "visual",
+  );
+  const legacyVisual: VisualCue | null = row.visual_kind
+    ? {
+        kind: row.visual_kind as VisualCueKind,
+        sourceKey: row.visual_source_key,
+        title: row.visual_title,
+      }
+    : null;
   return {
     id: cueId(row.id),
     showId: showId(showIdentifier),
     actId: actId(row.act_id),
     position: row.position,
-    visual: row.visual_kind
-      ? {
-          kind: row.visual_kind as VisualCueKind,
-          sourceKey: row.visual_source_key,
-          title: row.visual_title,
-        }
-      : null,
+    visual: visualOperation?.visual ?? legacyVisual,
     audio: row.audio_kind
       ? {
           kind: row.audio_kind as AudioCueKind,
@@ -292,9 +365,7 @@ function loadAct(
   return (
     sql
       .exec<ActRow>(
-        `SELECT id, order_index, performer_name, school_year, act_name, act_type,
-                public_description, internal_notes
-         FROM acts WHERE show_id = ? AND id = ?`,
+        `SELECT ${ACT_COLUMNS} FROM acts WHERE show_id = ? AND id = ?`,
         showIdentifier,
         id,
       )
@@ -457,12 +528,14 @@ function selectedActForDirection(
   const comparator = direction === "next" ? ">" : "<";
   const sort = direction === "next" ? "ASC" : "DESC";
   const currentOrder = current?.order_index ?? -1;
+  // A withdrawn act is skipped by NEXT/PREVIOUS; it can still be selected
+  // deliberately, which is how an operator reviews it.
   return (
     sql
       .exec<ActRow>(
-        `SELECT id, order_index, performer_name, school_year, act_name, act_type,
-                public_description, internal_notes
+        `SELECT ${ACT_COLUMNS}
          FROM acts WHERE show_id = ? AND order_index ${comparator} ?
+           AND withdrawn_at IS NULL
          ORDER BY order_index ${sort} LIMIT 1`,
         show.id,
         currentOrder,
@@ -536,6 +609,51 @@ function isSafeDisplayMode(mode: DisplayMode): boolean {
   return mode !== "HOLD" && mode !== "EMERGENCY";
 }
 
+/**
+ * HOLD and EMERGENCY are overlays: the show underneath is preserved so the
+ * operator can return to it. EMERGENCY additionally pauses anything audible,
+ * which is runtime state the same RESUME control brings back; nothing
+ * persistent is touched.
+ */
+function enterOverrideMode(
+  sql: SqlStorage,
+  show: ShowRow,
+  runtime: RuntimeRow,
+  mode: "HOLD" | "EMERGENCY",
+  presentation: EmergencyPresentation | null,
+): readonly StateChange[] {
+  const currentMode = requireDisplayMode(show.display_mode);
+  const previousMode = isSafeDisplayMode(currentMode)
+    ? currentMode
+    : runtime.previous_display_mode;
+  runtimeUpdate(sql, show.id, "previous_display_mode = ?", previousMode);
+  sql.exec("UPDATE shows SET display_mode = ? WHERE id = ?", mode, show.id);
+  if (mode === "HOLD") return ["display"];
+
+  const changes: StateChange[] = ["display"];
+  if (presentation) {
+    runtimeUpdate(sql, show.id, "emergency_presentation = ?", presentation);
+  }
+  if (
+    runtime.visual_transport === "PLAYING" ||
+    runtime.audio_transport === "PLAYING"
+  ) {
+    runtimeUpdate(
+      sql,
+      show.id,
+      "visual_transport = ?, audio_transport = ?",
+      runtime.visual_transport === "PLAYING"
+        ? "PAUSED"
+        : runtime.visual_transport,
+      runtime.audio_transport === "PLAYING"
+        ? "PAUSED"
+        : runtime.audio_transport,
+    );
+    changes.push("media");
+  }
+  return changes;
+}
+
 function executeTransition(
   sql: SqlStorage,
   show: ShowRow,
@@ -565,6 +683,54 @@ function executeTransition(
         show.id,
       );
       return { accepted: true, changes: ["act"] };
+    case "WITHDRAW_ACT": {
+      const act = loadAct(sql, show.id, command.actId);
+      if (!act) {
+        return {
+          accepted: false,
+          reason: "Act does not belong to this show",
+          changes: [],
+        };
+      }
+      if (act.id === show.active_act_id) {
+        return {
+          accepted: false,
+          reason: "Select a different act before withdrawing the current one",
+          changes: [],
+        };
+      }
+      if (act.withdrawn_at !== null) {
+        return { accepted: true, changes: [] };
+      }
+      sql.exec(
+        "UPDATE acts SET withdrawn_at = ?, updated_at = ? WHERE show_id = ? AND id = ?",
+        now(),
+        now(),
+        show.id,
+        act.id,
+      );
+      return { accepted: true, changes: ["acts", "results"] };
+    }
+    case "REINSTATE_ACT": {
+      const act = loadAct(sql, show.id, command.actId);
+      if (!act) {
+        return {
+          accepted: false,
+          reason: "Act does not belong to this show",
+          changes: [],
+        };
+      }
+      if (act.withdrawn_at === null) {
+        return { accepted: true, changes: [] };
+      }
+      sql.exec(
+        "UPDATE acts SET withdrawn_at = NULL, updated_at = ? WHERE show_id = ? AND id = ?",
+        now(),
+        show.id,
+        act.id,
+      );
+      return { accepted: true, changes: ["acts", "results"] };
+    }
     case "NEXT_ACT": {
       if (show.audience_vote_state === "OPEN") {
         return {
@@ -608,12 +774,11 @@ function executeTransition(
       return { accepted: true, changes: ["act"] };
     }
     case "SET_DISPLAY_MODE": {
-      const currentMode = requireDisplayMode(show.display_mode);
-      const previousMode = isSafeDisplayMode(currentMode)
-        ? currentMode
-        : runtime.previous_display_mode;
       if (command.mode === "HOLD" || command.mode === "EMERGENCY") {
-        runtimeUpdate(sql, show.id, "previous_display_mode = ?", previousMode);
+        return {
+          accepted: true,
+          changes: enterOverrideMode(sql, show, runtime, command.mode, null),
+        };
       }
       sql.exec(
         "UPDATE shows SET display_mode = ? WHERE id = ?",
@@ -622,6 +787,80 @@ function executeTransition(
       );
       return { accepted: true, changes: ["display"] };
     }
+    case "ACTIVATE_EMERGENCY":
+      return {
+        accepted: true,
+        changes: enterOverrideMode(
+          sql,
+          show,
+          runtime,
+          "EMERGENCY",
+          command.presentation,
+        ),
+      };
+    case "SET_INTERMISSION_MESSAGE":
+      sql.exec(
+        "UPDATE shows SET intermission_message = ? WHERE id = ?",
+        command.text,
+        show.id,
+      );
+      return { accepted: true, changes: ["display"] };
+    case "SET_EMERGENCY_MESSAGE":
+      sql.exec(
+        "UPDATE shows SET emergency_message = ? WHERE id = ?",
+        command.text,
+        show.id,
+      );
+      return { accepted: true, changes: ["display"] };
+    case "SET_RESULTS_STAGE": {
+      if (
+        command.stage !== "HIDDEN" &&
+        loadRanking(sql, show.id).ranked.length === 0
+      ) {
+        return {
+          accepted: false,
+          reason: "No act has a finalised result to rank yet",
+          changes: [],
+        };
+      }
+      // Leaving STAGED forgets the reveal position so the next staged run
+      // starts from last place again.
+      runtimeUpdate(
+        sql,
+        show.id,
+        "results_stage = ?, results_revealed_groups = ?",
+        command.stage,
+        command.stage === "STAGED" ? runtime.results_revealed_groups : 0,
+      );
+      return { accepted: true, changes: ["results"] };
+    }
+    case "REVEAL_NEXT_RESULT": {
+      if (runtime.results_stage !== "STAGED") {
+        return {
+          accepted: false,
+          reason: "Staged reveal is not the active results stage",
+          changes: [],
+        };
+      }
+      const groups = rankGroups(loadRanking(sql, show.id).ranked).length;
+      if (runtime.results_revealed_groups >= groups) {
+        return {
+          accepted: false,
+          reason: "Every rank has been revealed",
+          changes: [],
+        };
+      }
+      runtimeUpdate(
+        sql,
+        show.id,
+        "results_revealed_groups = ?",
+        runtime.results_revealed_groups + 1,
+      );
+      return { accepted: true, changes: ["results"] };
+    }
+    case "RESET_RESULTS_REVEAL":
+      runtimeUpdate(sql, show.id, "results_revealed_groups = 0");
+      return { accepted: true, changes: ["results"] };
     case "RESTORE_DISPLAY": {
       if (
         (show.display_mode !== "HOLD" && show.display_mode !== "EMERGENCY") ||
@@ -1084,6 +1323,85 @@ function toProjectorCue(cue: PersistedCue): ProjectorCue {
   };
 }
 
+function parsedFromRow(
+  classification: string,
+  finiteValue: number | null,
+): ParsedJudgeScore {
+  return classification === "FINITE"
+    ? { classification: "FINITE", finiteValue: finiteValue ?? 0 }
+    : classification === "POSITIVE_INFINITY"
+      ? { classification: "POSITIVE_INFINITY", finiteValue: null }
+      : { classification: "NEGATIVE_INFINITY", finiteValue: null };
+}
+
+/** Every active judge with their submission for the current act, if any. */
+function loadJudgeStates(
+  sql: SqlStorage,
+  show: ShowRow,
+  runtime: RuntimeRow,
+): AdminJudgeState[] {
+  return sql
+    .exec<JudgeSubmissionRow>(
+      `SELECT j.id, j.slot, j.display_name, s.raw_input, s.parsed_classification,
+              s.finite_value, s.effective_score, s.submitted_at
+       FROM judges j LEFT JOIN judge_submissions s
+         ON s.show_id = j.show_id AND s.judge_id = j.id AND s.act_id = ?
+       WHERE j.show_id = ? AND j.revoked_at IS NULL ORDER BY j.slot`,
+      show.active_act_id ?? "",
+      show.id,
+    )
+    .toArray()
+    .map((judge): AdminJudgeState => ({
+      id: judgeId(judge.id),
+      slot: judge.slot,
+      displayName: judge.display_name,
+      permission: permissionForJudge(sql, show, runtime, judge.id),
+      submission:
+        judge.raw_input !== null &&
+        judge.parsed_classification !== null &&
+        judge.effective_score !== null &&
+        judge.submitted_at !== null
+          ? {
+              showId: showId(show.id),
+              actId: actId(show.active_act_id ?? ""),
+              judgeId: judgeId(judge.id),
+              input: { raw: judge.raw_input },
+              parsed: parsedFromRow(
+                judge.parsed_classification,
+                judge.finite_value,
+              ),
+              effectiveScore: judge.effective_score,
+              submittedAt: judge.submitted_at,
+            }
+          : null,
+    }));
+}
+
+function loadAggregate(
+  sql: SqlStorage,
+  show: ShowRow,
+  actIdentifier: string,
+): AudienceAggregate | null {
+  const row = sql
+    .exec<AggregateRow>(
+      `SELECT act_id, vote_count, weighted_sum, total_weight, weighted_mean
+       FROM audience_aggregates WHERE show_id = ? AND act_id = ?`,
+      show.id,
+      actIdentifier,
+    )
+    .toArray()[0];
+  return row
+    ? {
+        showId: showId(show.id),
+        actId: actId(row.act_id),
+        voteCount: row.vote_count,
+        weightedSum: row.weighted_sum,
+        totalWeight: row.total_weight,
+        weightedMean: row.weighted_mean,
+      }
+    : null;
+}
+
 function permissionForJudge(
   sql: SqlStorage,
   show: ShowRow,
@@ -1115,6 +1433,7 @@ export function projectShowState(
   storage: DurableObjectStorage,
   showIdentifier: string,
   role: ConnectionRole,
+  options: ProjectionOptions = { publicOrigin: null },
 ): ClientProjection | null {
   const show = loadShow(storage.sql, showIdentifier);
   if (!show) {
@@ -1124,12 +1443,15 @@ export function projectShowState(
   const persisted = persistedShow(show);
   const active = activeAct(storage.sql, show);
   const publicActive = active ? toPublicAct(active) : null;
+  const revealed = persisted.resultRevealState === "REVEALED";
 
   if (role.kind === "audience") {
     const projection: AudienceShowProjection = {
       role: "audience",
       show: {
         title: persisted.title,
+        intermissionMessage: persisted.intermissionMessage,
+        emergencyMessage: persisted.emergencyMessage,
         displayMode: persisted.displayMode,
         activeActId: persisted.activeActId,
         audienceVoteState: persisted.audienceVoteState,
@@ -1140,7 +1462,13 @@ export function projectShowState(
         storage.sql,
         show.id,
         show.active_act_id,
-        persisted.resultRevealState === "REVEALED",
+        revealed,
+      ),
+      publicResults: loadPublicResults(
+        storage.sql,
+        show.id,
+        requireResultsStage(runtime.results_stage),
+        runtime.results_revealed_groups,
       ),
     };
     return projection;
@@ -1152,6 +1480,8 @@ export function projectShowState(
       show: {
         title: persisted.title,
         tagline: persisted.tagline,
+        intermissionMessage: persisted.intermissionMessage,
+        emergencyMessage: persisted.emergencyMessage,
         displayMode: persisted.displayMode,
         activeActId: persisted.activeActId,
         revision: persisted.revision,
@@ -1173,13 +1503,41 @@ export function projectShowState(
         visualTransport: requireTransportState(runtime.visual_transport),
         audioTransport: requireTransportState(runtime.audio_transport),
         blackScreen: runtime.black_screen === 1,
+        emergencyPresentation: requireEmergencyPresentation(
+          runtime.emergency_presentation,
+        ),
+      },
+      // Judge tiles carry the raw text and the tapered score; the final number
+      // is withheld until revealed, so it is never in projector state early.
+      scoreboard: {
+        audience: active ? loadAggregate(storage.sql, show, active.id) : null,
+        judges: loadJudgeStates(storage.sql, show, runtime).map((judge) => ({
+          slot: judge.slot,
+          displayName: judge.displayName,
+          submission: judge.submission
+            ? {
+                raw: judge.submission.input.raw,
+                parsed: judge.submission.parsed,
+                effectiveScore: judge.submission.effectiveScore,
+              }
+            : null,
+        })),
       },
       revealedResult: revealedFinalScore(
         storage.sql,
         show.id,
         show.active_act_id,
-        persisted.resultRevealState === "REVEALED",
+        revealed,
       ),
+      publicResults: loadPublicResults(
+        storage.sql,
+        show.id,
+        requireResultsStage(runtime.results_stage),
+        runtime.results_revealed_groups,
+      ),
+      joinUrl: options.publicOrigin
+        ? audienceJoinUrl(options.publicOrigin)
+        : null,
     };
     return projection;
   }
@@ -1220,15 +1578,10 @@ export function projectShowState(
             actId: actId(show.active_act_id ?? ""),
             judgeId: judgeId(role.judgeId),
             input: { raw: submission.raw_input },
-            parsed:
-              submission.parsed_classification === "FINITE"
-                ? {
-                    classification: "FINITE",
-                    finiteValue: submission.finite_value ?? 0,
-                  }
-                : submission.parsed_classification === "POSITIVE_INFINITY"
-                  ? { classification: "POSITIVE_INFINITY", finiteValue: null }
-                  : { classification: "NEGATIVE_INFINITY", finiteValue: null },
+            parsed: parsedFromRow(
+              submission.parsed_classification,
+              submission.finite_value,
+            ),
             effectiveScore: submission.effective_score,
             submittedAt: submission.submitted_at,
           }
@@ -1239,9 +1592,7 @@ export function projectShowState(
 
   const acts = storage.sql
     .exec<ActRow>(
-      `SELECT id, order_index, performer_name, school_year, act_name, act_type,
-              public_description, internal_notes
-       FROM acts WHERE show_id = ? ORDER BY order_index`,
+      `SELECT ${ACT_COLUMNS} FROM acts WHERE show_id = ? ORDER BY order_index`,
       show.id,
     )
     .toArray()
@@ -1277,61 +1628,8 @@ export function projectShowState(
         operationalResult(storage.sql, show.id, act.id),
       ]),
     ),
-    judges: storage.sql
-      .exec<{
-        id: string;
-        slot: number;
-        display_name: string;
-        raw_input: string | null;
-        parsed_classification: string | null;
-        finite_value: number | null;
-        effective_score: number | null;
-        submitted_at: string | null;
-      }>(
-        `SELECT j.id, j.slot, j.display_name, s.raw_input, s.parsed_classification,
-                s.finite_value, s.effective_score, s.submitted_at
-         FROM judges j LEFT JOIN judge_submissions s
-           ON s.show_id = j.show_id AND s.judge_id = j.id AND s.act_id = ?
-         WHERE j.show_id = ? AND j.revoked_at IS NULL ORDER BY j.slot`,
-        show.active_act_id ?? "",
-        show.id,
-      )
-      .toArray()
-      .map((judge): AdminJudgeState => ({
-        id: judgeId(judge.id),
-        slot: judge.slot,
-        displayName: judge.display_name,
-        permission: permissionForJudge(storage.sql, show, runtime, judge.id),
-        submission:
-          judge.raw_input !== null &&
-          judge.parsed_classification !== null &&
-          judge.effective_score !== null &&
-          judge.submitted_at !== null
-            ? {
-                showId: showId(show.id),
-                actId: actId(show.active_act_id ?? ""),
-                judgeId: judgeId(judge.id),
-                input: { raw: judge.raw_input },
-                parsed:
-                  judge.parsed_classification === "FINITE"
-                    ? {
-                        classification: "FINITE",
-                        finiteValue: judge.finite_value ?? 0,
-                      }
-                    : judge.parsed_classification === "POSITIVE_INFINITY"
-                      ? {
-                          classification: "POSITIVE_INFINITY",
-                          finiteValue: null,
-                        }
-                      : {
-                          classification: "NEGATIVE_INFINITY",
-                          finiteValue: null,
-                        },
-                effectiveScore: judge.effective_score,
-                submittedAt: judge.submitted_at,
-              }
-            : null,
-      })),
+    judges: loadJudgeStates(storage.sql, show, runtime),
+    ranking: loadRanking(storage.sql, show.id),
   };
   return projection;
 }

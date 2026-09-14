@@ -3,14 +3,17 @@ import {
   commandId,
   cueId,
   judgeId,
+  MAX_PUBLIC_MESSAGE_LENGTH,
   PROTOCOL_VERSION,
   showRevision,
   type ActId,
   type CommandId,
   type CueId,
   type DisplayMode,
+  type EmergencyPresentation,
   type JudgeId,
   type ProtocolVersion,
+  type ResultsStage,
   type ShowRevision,
 } from "./domain";
 import { isRecord } from "./trust";
@@ -41,7 +44,15 @@ export type AdminCommandType =
   | "SEEK_MEDIA"
   | "NEXT_CUE"
   | "PREVIOUS_CUE"
-  | "BLACK_SCREEN";
+  | "BLACK_SCREEN"
+  | "SET_INTERMISSION_MESSAGE"
+  | "SET_EMERGENCY_MESSAGE"
+  | "ACTIVATE_EMERGENCY"
+  | "SET_RESULTS_STAGE"
+  | "REVEAL_NEXT_RESULT"
+  | "RESET_RESULTS_REVEAL"
+  | "WITHDRAW_ACT"
+  | "REINSTATE_ACT";
 
 interface AdminCommandBase {
   protocolVersion: ProtocolVersion;
@@ -75,7 +86,18 @@ export type AdminCommand =
   | (AdminCommandBase & { type: "SEEK_MEDIA"; positionMs: number })
   | (AdminCommandBase & { type: "NEXT_CUE" })
   | (AdminCommandBase & { type: "PREVIOUS_CUE" })
-  | (AdminCommandBase & { type: "BLACK_SCREEN" });
+  | (AdminCommandBase & { type: "BLACK_SCREEN" })
+  | (AdminCommandBase & { type: "SET_INTERMISSION_MESSAGE"; text: string })
+  | (AdminCommandBase & { type: "SET_EMERGENCY_MESSAGE"; text: string })
+  | (AdminCommandBase & {
+      type: "ACTIVATE_EMERGENCY";
+      presentation: EmergencyPresentation;
+    })
+  | (AdminCommandBase & { type: "SET_RESULTS_STAGE"; stage: ResultsStage })
+  | (AdminCommandBase & { type: "REVEAL_NEXT_RESULT" })
+  | (AdminCommandBase & { type: "RESET_RESULTS_REVEAL" })
+  | (AdminCommandBase & { type: "WITHDRAW_ACT"; actId: ActId })
+  | (AdminCommandBase & { type: "REINSTATE_ACT"; actId: ActId });
 
 export type CommandStatus =
   "accepted" | "rejected" | "stale" | "invalid" | "unauthorised" | "conflict";
@@ -129,9 +151,32 @@ const COMMAND_TYPES: ReadonlySet<AdminCommandType> = new Set([
   "NEXT_CUE",
   "PREVIOUS_CUE",
   "BLACK_SCREEN",
+  "SET_INTERMISSION_MESSAGE",
+  "SET_EMERGENCY_MESSAGE",
+  "ACTIVATE_EMERGENCY",
+  "SET_RESULTS_STAGE",
+  "REVEAL_NEXT_RESULT",
+  "RESET_RESULTS_REVEAL",
+  "WITHDRAW_ACT",
+  "REINSTATE_ACT",
+]);
+
+const RESULTS_STAGES: ReadonlySet<ResultsStage> = new Set([
+  "HIDDEN",
+  "LEADERBOARD",
+  "STAGED",
+  "TOP_THREE",
+  "WINNER",
 ]);
 
 const IDENTIFIER = /^[A-Za-z0-9_-]{1,128}$/;
+
+/** Public text is plain, single-purpose and short enough to read from the back. */
+function parsePublicMessage(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const text = value.replace(/\s+/gu, " ").trim();
+  return text.length <= MAX_PUBLIC_MESSAGE_LENGTH ? text : null;
+}
 
 function parseCommandId(value: unknown): CommandId | null {
   return typeof value === "string" && IDENTIFIER.test(value)
@@ -225,14 +270,16 @@ export function parseAdminCommand(value: unknown): AdminCommandParseResult {
   }
 
   switch (base.base.type) {
-    case "SELECT_ACT": {
+    case "SELECT_ACT":
+    case "WITHDRAW_ACT":
+    case "REINSTATE_ACT": {
       const selectedActId = parseIdentifier(base.value.actId, "act");
       return selectedActId
         ? {
             ok: true,
             command: {
               ...base.base,
-              type: "SELECT_ACT",
+              type: base.base.type,
               actId: selectedActId as ActId,
             },
           }
@@ -242,6 +289,50 @@ export function parseAdminCommand(value: unknown): AdminCommandParseResult {
             commandId: base.base.commandId,
           };
     }
+    case "SET_INTERMISSION_MESSAGE":
+    case "SET_EMERGENCY_MESSAGE": {
+      const text = parsePublicMessage(base.value.text);
+      return text !== null
+        ? { ok: true, command: { ...base.base, type: base.base.type, text } }
+        : {
+            ok: false,
+            reason:
+              "Public message must be plain text of 200 characters or fewer",
+            commandId: base.base.commandId,
+          };
+    }
+    case "ACTIVATE_EMERGENCY":
+      return base.value.presentation === "BLACK" ||
+        base.value.presentation === "TEXT"
+        ? {
+            ok: true,
+            command: {
+              ...base.base,
+              type: "ACTIVATE_EMERGENCY",
+              presentation: base.value.presentation,
+            },
+          }
+        : {
+            ok: false,
+            reason: "Invalid emergency presentation",
+            commandId: base.base.commandId,
+          };
+    case "SET_RESULTS_STAGE":
+      return typeof base.value.stage === "string" &&
+        RESULTS_STAGES.has(base.value.stage as ResultsStage)
+        ? {
+            ok: true,
+            command: {
+              ...base.base,
+              type: "SET_RESULTS_STAGE",
+              stage: base.value.stage as ResultsStage,
+            },
+          }
+        : {
+            ok: false,
+            reason: "Invalid results stage",
+            commandId: base.base.commandId,
+          };
     case "SET_DISPLAY_MODE":
       return typeof base.value.mode === "string" &&
         DISPLAY_MODES.has(base.value.mode as DisplayMode)
@@ -332,6 +423,8 @@ export function parseAdminCommand(value: unknown): AdminCommandParseResult {
     case "NEXT_CUE":
     case "PREVIOUS_CUE":
     case "BLACK_SCREEN":
+    case "REVEAL_NEXT_RESULT":
+    case "RESET_RESULTS_REVEAL":
       return {
         ok: true,
         command: { ...base.base, type: base.base.type },

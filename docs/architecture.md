@@ -76,6 +76,58 @@ the revision embedded in its last snapshot, and one media command is in flight a
 a time. The optimistic revision check in the coordinator remains the authority; a
 duplicate delivery is absorbed by the command log.
 
+## Projector presentation, public modes and results
+
+The projector draws two layers. The base is chosen by display mode (lobby, act
+card, empty stage, scoreboard, intermission, hold, emergency, final results).
+The visual layer is whatever the commanded visual channel asks for: a media
+frame, a title card, black, or nothing. `src/projector/scene.ts` derives both
+from the projection alone, so the surface only renders. The media layer is
+hidden, never stopped, under HOLD, EMERGENCY, SCOREBOARD and FINAL_RESULTS,
+because those graphics are the commanded public output; audio is unaffected.
+
+`ProjectorMediaEngine` owns image, video and audio elements outside React and
+converges them on the authoritative runtime (`reconcile`). Every snapshot and
+media patch reconciles, so a reconnect or reload restores the presentation
+without restarting media that already matches. Commands add only what state
+cannot express (seek, restart from the top, replay) and are executed once per
+execution ID. Images load off-DOM and swap only once decoded, so a failed asset
+leaves the previous frame in place and never shows a broken icon; video
+elements carry no controls, picture-in-picture or remote playback. Image fit is
+`contain` by default and `cover` only where a cue explicitly asks (IMAGE only).
+Operator diagnostics on the projector are behind the `D` key.
+
+The scoreboard receives judge tiles (raw text, parsed classification and the
+tapered score) and the live audience aggregate; the final score reaches the
+projector and phones only as `revealedResult`, inside the `result_reveal`
+message or a snapshot, after the operator reveals it. Number motion is
+representational: the authoritative value never changes through animation.
+
+INTERMISSION and EMERGENCY text are show configuration (`shows`); the emergency
+presentation (BLACK or TEXT) and the results stage live in `show_runtime`.
+Entering HOLD or EMERGENCY records the safe mode to restore; EMERGENCY also
+pauses any playing transport, which the ordinary RESUME brings back. Nothing
+persistent is destroyed by an override. The display patch now reaches phones as
+well, so they mirror intermission, hold and emergency.
+
+Rankings are computed from `finalised_results` only (`shared/ranking.ts`),
+never from live aggregates. Equal stored scores share a rank and skip the next;
+the tie is represented, never broken. Withdrawn acts (`acts.withdrawn_at`) leave
+the ranking and are skipped by NEXT/PREVIOUS but keep their history. The public
+sees the ranking only through the results stage (HIDDEN, LEADERBOARD, STAGED,
+TOP_THREE, WINNER); the projection removes everything the stage withholds, and
+the operator's console shows the complete picture.
+
+`PUBLIC_ORIGIN` (a Worker variable) is the canonical audience origin for the
+lobby QR; when unset each client uses its own origin, which is right in
+development. Judge links never appear in a public projection and are managed
+from the SETUP view of the console, where they are shown once when issued or
+rotated. Preflight (`worker/preflight.ts`, `src/admin/PreflightPanel.tsx`) runs
+coordinator, browser, realtime and projector probes; the projector probes its
+own media pipeline in reply to a relayed `preflight_request` and answers with a
+`projector_preflight` report that is relayed to admin and never persisted. A
+required failure blocks READY; warnings never masquerade as failure.
+
 ## State lifetime
 
 Persistent state belongs in coordinator SQLite: show configuration, acts and cues, display/voting state, hashed identities and credentials, accepted submissions, aggregates, revisions, idempotency records, and result publication state. R2 persists media bytes.

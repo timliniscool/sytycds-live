@@ -66,15 +66,21 @@ export default function VoteSurface() {
 
   // A new act is a new vote. The locked state is then restored from the server
   // rather than trusted from this phone, so a reload cannot unlock anything.
+  // With no act yet the same call still establishes the anonymous voter
+  // identity, so the cookie exists before the first vote is attempted.
   useEffect(() => {
     setSubmission({ kind: "idle" });
     setSawVotingOpen(false);
-    if (!actId) return;
     const controller = new AbortController();
-    void fetch(`/api/vote/status?actId=${encodeURIComponent(actId)}`, {
-      credentials: "same-origin",
-      signal: controller.signal,
-    })
+    void fetch(
+      actId
+        ? `/api/vote/status?actId=${encodeURIComponent(actId)}`
+        : "/api/vote/status",
+      {
+        credentials: "same-origin",
+        signal: controller.signal,
+      },
+    )
       .then((response) => (response.ok ? response.json() : null))
       .then((result: VoteResponse | null) => {
         if (result?.locked) {
@@ -166,10 +172,19 @@ export default function VoteSurface() {
         />
       )}
       {view.kind === "INTERMISSION" && (
-        <Message body="Intermission" detail="Voting resumes after the break." />
+        <Message
+          body="Intermission"
+          detail={view.message || "Voting resumes after the break."}
+        />
       )}
       {view.kind === "HOLD" && (
         <Message body="Please wait" detail="The show is paused for a moment." />
+      )}
+      {view.kind === "EMERGENCY" && (
+        <Message
+          body={view.message || "Please follow staff instructions"}
+          detail="Keep this page open."
+        />
       )}
       {view.kind === "ACT" && (
         <Message body="Enjoy the act" detail="Voting opens shortly." />
@@ -180,7 +195,7 @@ export default function VoteSurface() {
           detail="Scores for this act are locked in."
         />
       )}
-      {view.kind === "RESULTS" && (
+      {view.kind === "RESULTS" && !view.publicResults && (
         <Message
           body="Final results"
           detail={
@@ -189,6 +204,43 @@ export default function VoteSurface() {
               : `${view.act?.actName ?? "This act"} scored ${view.revealedResult.toFixed(2)}.`
           }
         />
+      )}
+      {view.kind === "RESULTS" && view.publicResults && (
+        <section className="vote__results" aria-label="Final results">
+          <p className="vote__message-body">
+            {view.publicResults.stage === "WINNER"
+              ? view.publicResults.entries.length > 1
+                ? "Joint winners"
+                : "Winner"
+              : view.publicResults.stage === "TOP_THREE"
+                ? "Top three"
+                : "Final results"}
+          </p>
+          <ol className="vote__results-list">
+            {view.publicResults.entries.map((entry) => (
+              <li key={entry.actId}>
+                <span className="vote__results-rank">
+                  {entry.tied ? "=" : ""}
+                  {entry.rank}
+                </span>
+                <span className="vote__results-who">
+                  <b>{entry.performerName}</b>
+                  <small>{entry.actName}</small>
+                </span>
+                <span className="vote__results-score">
+                  {entry.finalScore.toFixed(2)}
+                </span>
+              </li>
+            ))}
+          </ol>
+          {view.publicResults.pendingGroups > 0 && (
+            <p className="vote__message-detail">
+              {view.publicResults.pendingGroups} place
+              {view.publicResults.pendingGroups === 1 ? "" : "s"} still to be
+              revealed on the main screen.
+            </p>
+          )}
+        </section>
       )}
       {view.kind === "LOCKED" && (
         <section className="vote__locked">

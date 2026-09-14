@@ -83,7 +83,7 @@ export function createAct(
       timestamp,
       showIdentifier,
     );
-    return { id: actId(id), order, ...input, cues: [] };
+    return { id: actId(id), order, ...input, withdrawn: false, cues: [] };
   });
 }
 

@@ -62,12 +62,18 @@ export function parseCueInput(value: unknown): CueInput | null {
     ) {
       const sourceKey = operation.visual.sourceKey;
       if (typeof sourceKey === "string" && !assetId(sourceKey)) return null;
+      // Cropping is opt-in per cue and only meaningful for a full-frame image.
+      const fit = operation.visual.fit;
+      if (fit !== undefined && fit !== "contain" && fit !== "cover")
+        return null;
+      if (fit === "cover" && operation.visual.kind !== "IMAGE") return null;
       operations.push({
         kind: "visual",
         visual: {
           kind: operation.visual.kind as VisualCueKind,
           sourceKey,
           title: operation.visual.title,
+          ...(fit === "cover" ? { fit } : {}),
         },
       });
     } else if (

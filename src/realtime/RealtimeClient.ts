@@ -15,8 +15,10 @@ import {
   type CommandAcknowledgementMessage,
   type JudgeSubmissionUpdateMessage,
   type MediaCommandMessage,
+  type PreflightRequestMessage,
   type ProjectorAcknowledgementMessage,
   type ProjectorPlaybackStatus,
+  type ProjectorPreflightReportMessage,
   type ServerMessage,
 } from "../../shared/protocol";
 
@@ -44,6 +46,10 @@ export interface RealtimeState {
   lastProjectorAcknowledgement: ProjectorAcknowledgementMessage | null;
   lastJudgeSubmission: JudgeSubmissionUpdateMessage | null;
   projectorTelemetry: ProjectorPlaybackStatus | null;
+  /** Projector only: the operator wants this browser to probe its media. */
+  lastPreflightRequest: PreflightRequestMessage | null;
+  /** Admin only: the projector's most recent self-report. */
+  lastPreflightReport: ProjectorPreflightReportMessage | null;
   audienceConnections: number;
   judgeConnections: ReadonlySet<string>;
   lastError: string | null;
@@ -84,6 +90,8 @@ const INITIAL_STATE: RealtimeState = {
   lastProjectorAcknowledgement: null,
   lastJudgeSubmission: null,
   projectorTelemetry: null,
+  lastPreflightRequest: null,
+  lastPreflightReport: null,
   audienceConnections: 0,
   judgeConnections: new Set(),
   lastError: null,
@@ -101,6 +109,12 @@ function defaultSocketFactory(url: string): WebSocketLike {
 function aggregateMap(
   projection: ClientProjection,
 ): ReadonlyMap<string, AudienceAggregate> {
+  if (projection.role === "projector") {
+    // The scoreboard seeds from the snapshot and then follows coalesced
+    // aggregate updates, so a reloaded projector never shows a stale mean.
+    const audience = projection.scoreboard.audience;
+    return audience ? new Map([[audience.actId, audience]]) : new Map();
+  }
   if (projection.role !== "admin") {
     return new Map();
   }
@@ -168,8 +182,14 @@ function applyPatches(
           show: {
             ...next.show,
             displayMode: patch.displayMode as typeof next.show.displayMode,
+            intermissionMessage: patch.intermissionMessage,
+            emergencyMessage: patch.emergencyMessage,
           },
-          runtime: { ...next.runtime, blackScreen: patch.blackScreen },
+          runtime: {
+            ...next.runtime,
+            blackScreen: patch.blackScreen,
+            emergencyPresentation: patch.emergencyPresentation,
+          },
         };
       } else if (next.role === "projector") {
         next = {
@@ -177,8 +197,14 @@ function applyPatches(
           show: {
             ...next.show,
             displayMode: patch.displayMode as typeof next.show.displayMode,
+            intermissionMessage: patch.intermissionMessage,
+            emergencyMessage: patch.emergencyMessage,
           },
-          runtime: { ...next.runtime, blackScreen: patch.blackScreen },
+          runtime: {
+            ...next.runtime,
+            blackScreen: patch.blackScreen,
+            emergencyPresentation: patch.emergencyPresentation,
+          },
         };
       } else if (next.role === "audience") {
         next = {
@@ -186,6 +212,8 @@ function applyPatches(
           show: {
             ...next.show,
             displayMode: patch.displayMode as typeof next.show.displayMode,
+            intermissionMessage: patch.intermissionMessage,
+            emergencyMessage: patch.emergencyMessage,
           },
         };
       }
@@ -501,6 +529,8 @@ export class RealtimeClient {
     let lastProjectorAcknowledgement = this.state.lastProjectorAcknowledgement;
     let lastJudgeSubmission = this.state.lastJudgeSubmission;
     let projectorTelemetry = this.state.projectorTelemetry;
+    let lastPreflightRequest = this.state.lastPreflightRequest;
+    let lastPreflightReport = this.state.lastPreflightReport;
     let audienceConnections = this.state.audienceConnections;
     let judgeConnections = this.state.judgeConnections;
 
@@ -547,6 +577,32 @@ export class RealtimeClient {
             show: { ...projection.show, resultRevealState: message.state },
           };
         }
+        // Public roles receive the number only once revealed; hiding it
+        // removes it from client state again rather than masking it.
+        if (
+          projection?.role === "projector" ||
+          projection?.role === "audience"
+        ) {
+          projection = {
+            ...projection,
+            revealedResult:
+              message.state === "REVEALED" ? message.revealedResult : null,
+          };
+        }
+        break;
+      case "public_results":
+        if (
+          projection?.role === "projector" ||
+          projection?.role === "audience"
+        ) {
+          projection = { ...projection, publicResults: message.results };
+        }
+        break;
+      case "preflight_request":
+        lastPreflightRequest = message;
+        break;
+      case "projector_preflight_report":
+        lastPreflightReport = message;
         break;
       case "command_ack":
         lastCommandAcknowledgement = message;
@@ -587,6 +643,8 @@ export class RealtimeClient {
       lastProjectorAcknowledgement,
       lastJudgeSubmission,
       projectorTelemetry,
+      lastPreflightRequest,
+      lastPreflightReport,
       audienceConnections,
       judgeConnections,
       lastError: message.type === "protocol_error" ? message.detail : null,

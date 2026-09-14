@@ -12,14 +12,21 @@ import {
   type ClientProjection,
   type CommandId,
   type CueId,
+  type EmergencyPresentation,
   type JudgePermissionState,
   type JudgeRawInput,
   type MediaPlaybackState,
   type ProtocolVersion,
   type PublicAct,
+  type PublicResults,
   type ResultRevealState,
   type ShowRevision,
 } from "./domain";
+import type {
+  PreflightAssetRequest,
+  ProjectorPreflightAsset,
+  ProjectorPreflightReport,
+} from "./preflight";
 import { isJudgeRawInput, isRecord } from "./trust";
 
 export interface ProtocolEnvelope {
@@ -79,13 +86,28 @@ export interface ResyncRequest extends ProtocolEnvelope {
   lastRevision: ShowRevision;
 }
 
+/** Admin asks the coordinator to have the projector probe itself. */
+export interface PreflightRequest extends ProtocolEnvelope {
+  type: "preflight_request";
+  requestId: CommandId;
+}
+
+/** The projector's answer, relayed to admin and never persisted. */
+export interface ProjectorPreflightMessage extends ProtocolEnvelope {
+  type: "projector_preflight";
+  requestId: CommandId;
+  report: ProjectorPreflightReport;
+}
+
 export type ClientMessage =
   | ClientHello
   | AdminCommandMessage
   | JudgeSubmitMessage
   | ProjectorAcknowledgement
   | ProjectorStatusMessage
-  | ResyncRequest;
+  | ResyncRequest
+  | PreflightRequest
+  | ProjectorPreflightMessage;
 
 export interface SnapshotMessage extends RevisionedServerMessage {
   type: "snapshot";
@@ -98,7 +120,14 @@ export type ShowStatePatch =
       activeActId: string | null;
       activeAct: PublicAct | null;
     }
-  | { kind: "display"; displayMode: string; blackScreen: boolean }
+  | {
+      kind: "display";
+      displayMode: string;
+      blackScreen: boolean;
+      intermissionMessage: string;
+      emergencyMessage: string;
+      emergencyPresentation: EmergencyPresentation;
+    }
   | {
       kind: "media";
       preparedCueId: CueId | null;
@@ -163,6 +192,30 @@ export interface MediaCommandMessage extends RevisionedServerMessage {
 export interface ResultRevealMessage extends RevisionedServerMessage {
   type: "result_reveal";
   state: ResultRevealState;
+  /**
+   * The revealed final score, projected per role: public roles receive it only
+   * once revealed; the operator already holds the result and receives null.
+   */
+  revealedResult: number | null;
+}
+
+/** Public ranking slice for the current results stage; null when hidden. */
+export interface PublicResultsMessage extends RevisionedServerMessage {
+  type: "public_results";
+  results: PublicResults | null;
+}
+
+/** Relayed to the projector with the assets the coordinator wants probed. */
+export interface PreflightRequestMessage extends RevisionedServerMessage {
+  type: "preflight_request";
+  requestId: CommandId;
+  assets: readonly PreflightAssetRequest[];
+}
+
+export interface ProjectorPreflightReportMessage extends RevisionedServerMessage {
+  type: "projector_preflight_report";
+  requestId: CommandId;
+  report: ProjectorPreflightReport;
 }
 
 export interface CommandAcknowledgementMessage extends RevisionedServerMessage {
@@ -212,6 +265,9 @@ export type ServerMessage =
   | JudgeSubmissionUpdateMessage
   | MediaCommandMessage
   | ResultRevealMessage
+  | PublicResultsMessage
+  | PreflightRequestMessage
+  | ProjectorPreflightReportMessage
   | CommandAcknowledgementMessage
   | ProjectorAcknowledgementMessage
   | ProjectorTelemetryMessage
@@ -270,6 +326,57 @@ function parseProjectorStatus(value: unknown): ProjectorPlaybackStatus | null {
     armed: value.armed,
     black: value.black,
     error: detail === null ? null : detail.slice(0, 200),
+  };
+}
+
+const MAX_PREFLIGHT_ASSETS = 500;
+const ASSET_KINDS: ReadonlySet<string> = new Set(["image", "audio", "video"]);
+
+function parsePreflightAsset(value: unknown): ProjectorPreflightAsset | null {
+  if (
+    !isRecord(value) ||
+    typeof value.id !== "string" ||
+    !IDENTIFIER.test(value.id) ||
+    typeof value.kind !== "string" ||
+    !ASSET_KINDS.has(value.kind) ||
+    typeof value.ok !== "boolean" ||
+    typeof value.detail !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: value.id,
+    kind: value.kind as ProjectorPreflightAsset["kind"],
+    ok: value.ok,
+    detail: value.detail.slice(0, 200),
+    durationMs: parseMilliseconds(value.durationMs),
+  };
+}
+
+function parsePreflightReport(value: unknown): ProjectorPreflightReport | null {
+  if (
+    !isRecord(value) ||
+    typeof value.protocolVersion !== "number" ||
+    typeof value.engineReady !== "boolean" ||
+    typeof value.armed !== "boolean" ||
+    typeof value.cacheStorage !== "boolean" ||
+    !Array.isArray(value.assets) ||
+    value.assets.length > MAX_PREFLIGHT_ASSETS
+  ) {
+    return null;
+  }
+  const assets: ProjectorPreflightAsset[] = [];
+  for (const entry of value.assets) {
+    const asset = parsePreflightAsset(entry);
+    if (!asset) return null;
+    assets.push(asset);
+  }
+  return {
+    protocolVersion: value.protocolVersion,
+    engineReady: value.engineReady,
+    armed: value.armed,
+    cacheStorage: value.cacheStorage,
+    assets,
   };
 }
 
@@ -388,6 +495,34 @@ export function parseClientMessage(
             },
           }
         : { ok: false, reason: "Invalid resync request" };
+    case "preflight_request": {
+      const requestId = parseCommandIdentifier(value.requestId);
+      return requestId
+        ? {
+            ok: true,
+            message: {
+              type: "preflight_request",
+              protocolVersion: PROTOCOL_VERSION,
+              requestId,
+            },
+          }
+        : { ok: false, reason: "Invalid preflight request" };
+    }
+    case "projector_preflight": {
+      const requestId = parseCommandIdentifier(value.requestId);
+      const report = parsePreflightReport(value.report);
+      return requestId && report
+        ? {
+            ok: true,
+            message: {
+              type: "projector_preflight",
+              protocolVersion: PROTOCOL_VERSION,
+              requestId,
+              report,
+            },
+          }
+        : { ok: false, reason: "Invalid projector preflight report" };
+    }
     default:
       return { ok: false, reason: "Unknown protocol message" };
   }

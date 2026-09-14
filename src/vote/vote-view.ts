@@ -2,6 +2,7 @@ import type {
   AudienceScore,
   AudienceShowProjection,
   PublicAct,
+  PublicResults,
 } from "../../shared/domain";
 import type { RealtimeConnectionState } from "../realtime/RealtimeClient";
 
@@ -30,9 +31,15 @@ export type VoteView =
   | { kind: "VOTING"; act: PublicAct }
   | { kind: "LOCKED"; act: PublicAct | null; score: number | null }
   | { kind: "CLOSED"; act: PublicAct }
-  | { kind: "INTERMISSION" }
+  | { kind: "INTERMISSION"; message: string }
   | { kind: "HOLD" }
-  | { kind: "RESULTS"; act: PublicAct | null; revealedResult: number | null };
+  | { kind: "EMERGENCY"; message: string }
+  | {
+      kind: "RESULTS";
+      act: PublicAct | null;
+      revealedResult: number | null;
+      publicResults: PublicResults | null;
+    };
 
 export interface VoteInputs {
   connection: RealtimeConnectionState;
@@ -75,13 +82,18 @@ export function deriveVoteView(inputs: VoteInputs): VoteView {
       return {
         kind: "RESULTS",
         act,
-        revealedResult: projection.revealedResult ?? null,
+        revealedResult: projection.revealedResult,
+        publicResults: projection.publicResults,
       };
     case "INTERMISSION":
-      return { kind: "INTERMISSION" };
+      return {
+        kind: "INTERMISSION",
+        message: projection.show.intermissionMessage,
+      };
     case "HOLD":
-    case "EMERGENCY":
       return { kind: "HOLD" };
+    case "EMERGENCY":
+      return { kind: "EMERGENCY", message: projection.show.emergencyMessage };
     default:
       break;
   }
