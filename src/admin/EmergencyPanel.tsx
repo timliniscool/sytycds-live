@@ -116,6 +116,7 @@ export function EmergencyPanel({
           <button
             type="button"
             className={presentation === "BLACK" ? "is-active" : ""}
+            aria-pressed={presentation === "BLACK"}
             onClick={() =>
               send("ACTIVATE_EMERGENCY", { presentation: "BLACK" })
             }
@@ -125,6 +126,7 @@ export function EmergencyPanel({
           <button
             type="button"
             className={presentation === "TEXT" ? "is-active" : ""}
+            aria-pressed={presentation === "TEXT"}
             onClick={() => send("ACTIVATE_EMERGENCY", { presentation: "TEXT" })}
           >
             TEXT

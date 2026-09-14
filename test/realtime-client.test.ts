@@ -249,6 +249,114 @@ describe("browser realtime client", () => {
     client.destroy();
   });
 
+  it("ignores a duplicate delivery and applies public reveal messages once", () => {
+    const socket = new FakeSocket();
+    const client = new RealtimeClient({
+      url: "ws://example.test/api/ws",
+      hello: {
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        requestedRole: "audience",
+      },
+      createSocket: () => socket,
+    });
+    client.connect();
+    socket.open();
+    socket.receive(
+      serialiseServerMessage({
+        type: "snapshot",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(0),
+        projection: snapshotProjection,
+      }),
+    );
+    const reveal = serialiseServerMessage({
+      type: "result_reveal",
+      protocolVersion: PROTOCOL_VERSION,
+      revision: showRevision(1),
+      state: "REVEALED",
+      revealedResult: 8.25,
+    });
+    socket.receive(reveal);
+    socket.receive(reveal);
+    const projection = client.getState().projection;
+    expect(projection?.role === "audience" && projection.revealedResult).toBe(
+      8.25,
+    );
+    expect(Number(client.getState().revision)).toBe(1);
+    socket.receive(
+      serialiseServerMessage({
+        type: "result_reveal",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(2),
+        state: "HIDDEN",
+        revealedResult: null,
+      }),
+    );
+    const hidden = client.getState().projection;
+    expect(hidden?.role === "audience" && hidden.revealedResult).toBeNull();
+    client.destroy();
+  });
+
+  it("closes a socket that does not answer a resync probe so reconnect takes over", () => {
+    vi.useFakeTimers();
+    const sockets: FakeSocket[] = [];
+    const client = new RealtimeClient({
+      url: "ws://example.test/api/ws",
+      hello: {
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        requestedRole: "audience",
+      },
+      createSocket: () => {
+        const socket = new FakeSocket();
+        sockets.push(socket);
+        return socket;
+      },
+      random: () => 0,
+    });
+    client.connect();
+    sockets[0]?.open();
+    sockets[0]?.receive(
+      serialiseServerMessage({
+        type: "snapshot",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(3),
+        projection: snapshotProjection,
+      }),
+    );
+    client.probeConnection();
+    expect(sockets[0]?.sent.at(-1)).toContain("resync_request");
+    vi.advanceTimersByTime(5_100);
+    expect(client.getState().connection).toBe("RECONNECTING");
+    vi.advanceTimersByTime(600);
+    expect(sockets).toHaveLength(2);
+    // A probe that is answered leaves the socket alone.
+    sockets[1]?.open();
+    sockets[1]?.receive(
+      serialiseServerMessage({
+        type: "snapshot",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(3),
+        projection: snapshotProjection,
+      }),
+    );
+    client.probeConnection();
+    sockets[1]?.receive(
+      serialiseServerMessage({
+        type: "snapshot",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(3),
+        projection: snapshotProjection,
+      }),
+    );
+    vi.advanceTimersByTime(6_000);
+    expect(sockets).toHaveLength(2);
+    expect(client.getState().connection).toBe("LIVE");
+    client.destroy();
+    vi.useRealTimers();
+  });
+
   it("uses one reconnect timer after a closed socket", () => {
     vi.useFakeTimers();
     const sockets: FakeSocket[] = [];

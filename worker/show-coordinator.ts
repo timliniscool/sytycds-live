@@ -56,6 +56,7 @@ import {
   serveMediaAsset,
   uploadMediaAsset,
 } from "./media-assets";
+import { listAuditEvents, recordAuditEvent } from "./audit";
 import { preflightAssetRequests, runServerPreflight } from "./preflight";
 import { configuredPublicOrigin } from "./public-origin";
 import { hasSameOrigin } from "./security";
@@ -126,6 +127,9 @@ function isSocketAttachment(value: unknown): value is SocketAttachment {
 
 export class ShowCoordinator extends DurableObject<Env> {
   private aggregateFlushTimer: number | null = null;
+  private connectionCountTimer: number | null = null;
+  /** Last projector media error seen, so the log records changes, not repeats. */
+  private lastProjectorError: string | null = null;
   private readonly pendingAggregateUpdates = new Map<
     string,
     Extract<ServerMessage, { type: "aggregate_update" }>
@@ -163,6 +167,9 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
     if (url.pathname === "/api/admin/preflight" && request.method === "GET") {
       return this.handlePreflight(request, url);
+    }
+    if (url.pathname === "/api/admin/history" && request.method === "GET") {
+      return this.handleHistory(request, url);
     }
     if (url.pathname === "/api/admin/judges" && request.method === "GET") {
       return this.handleListJudges(request);
@@ -255,7 +262,12 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (!secret) {
       return Response.json({ authenticated: false }, { status: 503 });
     }
-    const result = await createAdminSession(this.ctx.storage, request, secret);
+    const result = await createAdminSession(
+      this.ctx.storage,
+      request,
+      secret,
+      PRIMARY_SHOW_ID,
+    );
     return Response.json(
       { authenticated: result.ok },
       {
@@ -353,6 +365,22 @@ export class ShowCoordinator extends DurableObject<Env> {
       only: only && /^[a-z_]{1,40}$/u.test(only) ? only : undefined,
     });
     return Response.json({ items });
+  }
+
+  private async handleHistory(request: Request, url: URL): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    const before = Number(url.searchParams.get("before"));
+    const limit = Number(url.searchParams.get("limit") ?? "50");
+    return Response.json(
+      listAuditEvents(
+        this.ctx.storage.sql,
+        PRIMARY_SHOW_ID,
+        Number.isSafeInteger(before) && before > 0 ? before : null,
+        Number.isSafeInteger(limit) ? limit : 50,
+      ),
+    );
   }
 
   private async handleListJudges(request: Request): Promise<Response> {
@@ -856,6 +884,12 @@ export class ShowCoordinator extends DurableObject<Env> {
         succeeded: parsed.message.succeeded,
         ...(parsed.message.detail ? { detail: parsed.message.detail } : {}),
       });
+      recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+        type: parsed.message.succeeded ? "cue.executed" : "cue.failed",
+        actor: "projector",
+        commandId: parsed.message.commandId,
+        data: { detail: parsed.message.detail?.slice(0, 120) ?? null },
+      });
       return;
     }
 
@@ -909,13 +943,23 @@ export class ShowCoordinator extends DurableObject<Env> {
         return;
       }
       // Telemetry is ephemeral operator assistance: it is relayed to admin and
-      // never written to SQLite, so hibernation simply drops it.
+      // never written to SQLite, so hibernation simply drops it. Only a newly
+      // appearing media error earns a line in the operational log.
       this.broadcastAdmin({
         type: "projector_telemetry",
         protocolVersion: PROTOCOL_VERSION,
         revision: this.currentRevision(),
         status: parsed.message.status,
       });
+      const error = parsed.message.status.error;
+      if (error && error !== this.lastProjectorError) {
+        recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+          type: "media.error",
+          actor: "projector",
+          data: { detail: error.slice(0, 120) },
+        });
+      }
+      this.lastProjectorError = error;
       return;
     }
 
@@ -1278,7 +1322,19 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
   }
 
+  /**
+   * Counting connections walks every socket, so a reconnect storm of a few
+   * hundred phones must not do that once per close. Coalesced like aggregates.
+   */
   private broadcastConnectionCount(): void {
+    if (this.connectionCountTimer !== null) return;
+    this.connectionCountTimer = setTimeout(() => {
+      this.connectionCountTimer = null;
+      this.sendConnectionCount();
+    }, 250);
+  }
+
+  private sendConnectionCount(): void {
     let audience = 0;
     const judgeIds = new Set<string>();
     for (const ws of this.ctx.getWebSockets()) {

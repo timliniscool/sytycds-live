@@ -2,7 +2,7 @@ import type {
   PreflightAssetRequest,
   ProjectorPreflightAsset,
 } from "../../shared/preflight";
-import { assetUrl } from "./MediaEngine";
+import { assetUrl } from "./media-cache";
 
 const PROBE_TIMEOUT_MS = 15_000;
 

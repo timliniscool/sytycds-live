@@ -15,4 +15,18 @@ export default defineConfig(
       },
     },
   },
+  {
+    // The projector media service worker is plain JS served as a static asset.
+    files: ["public/**/*.js"],
+    languageOptions: {
+      globals: {
+        self: "readonly",
+        caches: "readonly",
+        fetch: "readonly",
+        Headers: "readonly",
+        Response: "readonly",
+        URL: "readonly",
+      },
+    },
+  },
 );

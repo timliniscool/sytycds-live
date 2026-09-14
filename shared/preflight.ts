@@ -3,6 +3,8 @@
  * a real probe with an actionable diagnostic; nothing here is decorative.
  */
 
+import type { MediaCacheSummary } from "./domain";
+
 export type PreflightStatus = "READY" | "WARNING" | "FAILURE" | "PENDING";
 
 /** Who can actually run the probe: the coordinator, this browser, or the projector. */
@@ -40,6 +42,8 @@ export interface ProjectorPreflightReport {
   armed: boolean;
   cacheStorage: boolean;
   assets: readonly ProjectorPreflightAsset[];
+  /** Present once the projector has a media cache to report on. */
+  cache?: MediaCacheSummary;
 }
 
 /**

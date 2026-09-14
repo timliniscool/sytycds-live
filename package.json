@@ -18,7 +18,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:load": "vitest run --config vitest.load.config.ts"
   },
   "dependencies": {
     "react": "^19.2.8",

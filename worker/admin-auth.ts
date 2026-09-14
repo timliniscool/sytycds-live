@@ -1,3 +1,4 @@
+import { recordAuditEvent } from "./audit";
 import {
   adminSessionCookieName,
   cookieHeader,
@@ -109,6 +110,7 @@ export async function createAdminSession(
   storage: DurableObjectStorage,
   request: Request,
   secret: string,
+  showIdentifier: string,
 ): Promise<LoginResult> {
   if (!hasSameOrigin(request)) {
     return { ok: false, status: 403 };
@@ -129,17 +131,29 @@ export async function createAdminSession(
 
   const subjectHash = await loginSubjectHash(request);
   const timestamp = Date.now();
+  // Security events name neither the secret nor the address; the log answers
+  // "was someone trying the door?" and nothing more.
   if (
     storage.transactionSync(() =>
       isRateLimited(storage.sql, subjectHash, timestamp),
     )
   ) {
+    recordAuditEvent(storage.sql, showIdentifier, {
+      type: "admin.login_blocked",
+      actor: "system",
+      data: {},
+    });
     return { ok: false, status: 429 };
   }
   if (!sameSecret(supplied, secret)) {
     storage.transactionSync(() =>
       recordLoginFailure(storage.sql, subjectHash, timestamp),
     );
+    recordAuditEvent(storage.sql, showIdentifier, {
+      type: "admin.login_failed",
+      actor: "system",
+      data: {},
+    });
     return { ok: false, status: 401 };
   }
 
@@ -156,6 +170,11 @@ export async function createAdminSession(
       new Date(timestamp).toISOString(),
       new Date(timestamp).toISOString(),
     );
+  });
+  recordAuditEvent(storage.sql, showIdentifier, {
+    type: "admin.login",
+    actor: "admin",
+    data: {},
   });
   return {
     ok: true,

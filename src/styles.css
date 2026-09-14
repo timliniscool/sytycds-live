@@ -87,14 +87,38 @@ input:focus-visible {
   cursor: not-allowed;
   opacity: 0.4;
 }
+/* A control that has been pressed says so under the finger, immediately. */
+.admin-console button:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(1.15);
+}
+.admin-console--loading {
+  display: grid;
+  place-items: center;
+}
+.admin-loading {
+  display: grid;
+  gap: 0.6rem;
+  justify-items: center;
+  color: var(--admin-dim);
+  letter-spacing: 0.04em;
+}
+.act-list__empty {
+  margin: 0;
+  padding: 1rem;
+  color: var(--admin-dim);
+  font-size: 0.85rem;
+  line-height: 1.4;
+}
 .admin-status {
   grid-column: 1 / -1;
   z-index: var(--admin-z-status);
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 1rem;
+  gap: 0.4rem 1rem;
   min-height: 37px;
-  padding: 0 0.9rem;
+  padding: 0.25rem 0.9rem;
   border-bottom: 1px solid var(--admin-line);
   background: #0e191c;
   font-size: 0.72rem;
@@ -132,7 +156,18 @@ input:focus-visible {
 .connection--degraded,
 .connection--reconnecting,
 .connection--unauthorised {
-  color: var(--admin-warning);
+  color: #1a1305;
+  border-color: var(--admin-warning);
+  background: var(--admin-warning);
+  font-weight: 900;
+}
+.connection--connecting {
+  color: var(--admin-dim);
+}
+.connection--incompatible {
+  color: #fff;
+  border-color: var(--admin-danger);
+  background: var(--admin-danger);
 }
 
 /* The running order stays put; everything the operator drives scrolls beside it. */
@@ -235,9 +270,19 @@ input:focus-visible {
   font-weight: 800;
   letter-spacing: 0.12em;
 }
+/* The mode that is on screen is unmistakable: filled, not outlined. */
+.display-controls button.is-active {
+  border-color: var(--admin-accent);
+  background: var(--admin-accent);
+  color: #1b1405;
+}
 .display-controls__black {
   border-color: var(--admin-danger) !important;
   color: #ffdada;
+}
+.display-controls__black.is-active {
+  background: var(--admin-danger) !important;
+  color: #fff !important;
 }
 .voting-workspace {
   padding: var(--admin-space-3);
@@ -937,6 +982,10 @@ input:focus-visible {
   background: #1c3329;
   color: #7f9a8c;
 }
+.vote__lock:active:not(:disabled),
+.judge__submit:active:not(:disabled) {
+  transform: scale(0.985);
+}
 .vote__cancel {
   min-height: 48px;
   border: 1px solid #2f5244;
@@ -1138,7 +1187,7 @@ input:focus-visible {
   gap: 0.4rem;
 }
 .judge__example {
-  min-height: 44px;
+  min-height: 48px;
   padding: 0 0.9rem;
   border: 1px solid #4a3d2c;
   border-radius: 10px;
@@ -1882,6 +1931,7 @@ input:focus-visible {
 .results-panel {
   border-bottom: 1px solid var(--admin-line);
   background: #0d1719;
+  overflow-x: auto;
 }
 .results-panel__stage,
 .results-panel__staged {
@@ -2197,7 +2247,7 @@ input:focus-visible {
     grid-column: 1 / -1;
   }
   .admin-views {
-    display: none;
+    flex-wrap: wrap;
   }
   .preflight__item {
     grid-template-columns: 4.5rem minmax(0, 1fr);
@@ -2223,5 +2273,126 @@ input:focus-visible {
   .results__row,
   .winner__entry {
     animation: none;
+  }
+}
+
+/* ================================ admin: history ================================ */
+
+.history {
+  border-bottom: 1px solid var(--admin-line);
+  background: #0b1416;
+  font-variant-numeric: tabular-nums;
+}
+.history__empty {
+  margin: 0;
+  padding: 0.9rem 1rem;
+  color: var(--admin-dim);
+}
+.history__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.history__row {
+  display: grid;
+  grid-template-columns: 5.5rem 5rem minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0.8rem;
+  padding: 0.45rem 1rem;
+  border-top: 1px solid #16282c;
+}
+.history__row time {
+  color: var(--admin-dim);
+  font-size: 0.78rem;
+}
+.history__actor {
+  color: var(--admin-dim);
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.history__what {
+  min-width: 0;
+}
+.history__what b {
+  display: block;
+  font-size: 0.86rem;
+}
+.history__what small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #b8c3c5;
+  font-size: 0.74rem;
+}
+.history__row--alarm b {
+  color: var(--admin-danger);
+}
+.history__row--refused b {
+  color: var(--admin-warning);
+}
+.history__more {
+  padding: 0.7rem 1rem;
+}
+
+@media (max-width: 800px) {
+  .history__row {
+    grid-template-columns: 4.5rem minmax(0, 1fr);
+  }
+  .history__actor {
+    display: none;
+  }
+}
+
+/* ====================== short landscape phones (audience / judge) ====================== */
+
+@media (max-height: 440px) and (orientation: landscape) {
+  .vote,
+  .judge {
+    gap: 0.4rem;
+    padding-top: max(0.4rem, env(safe-area-inset-top));
+    padding-bottom: max(0.4rem, env(safe-area-inset-bottom));
+  }
+  .vote__mark,
+  .judge__mark {
+    display: none;
+  }
+  .vote__act,
+  .judge__act-name {
+    font-size: 1.15rem;
+  }
+  .vote__performer,
+  .judge__act-performer,
+  .judge__act-year {
+    display: none;
+  }
+  .vote__scale {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-auto-rows: minmax(44px, 1fr);
+    gap: 0.35rem;
+  }
+  .vote__score:last-child {
+    grid-column: span 1;
+  }
+  .vote__lock,
+  .judge__submit {
+    min-height: 48px;
+  }
+  .judge__input {
+    min-height: 52px;
+    font-size: 1.6rem;
+  }
+  .judge__examples {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .admin-console button:active:not(:disabled),
+  .vote__lock:active:not(:disabled),
+  .judge__submit:active:not(:disabled) {
+    transform: none;
   }
 }

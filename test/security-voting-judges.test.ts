@@ -67,7 +67,12 @@ describe("admin sessions, anonymous voters, and judge tokens", () => {
         },
         body: JSON.stringify({ secret: "correct" }),
       });
-      const login = await createAdminSession(storage, loginRequest, "correct");
+      const login = await createAdminSession(
+        storage,
+        loginRequest,
+        "correct",
+        PRIMARY_SHOW_ID,
+      );
       expect(login.ok).toBe(true);
       expect(login.setCookie).toContain("HttpOnly");
       expect(login.setCookie).toContain("Secure");
@@ -102,6 +107,7 @@ describe("admin sessions, anonymous voters, and judge tokens", () => {
             body: JSON.stringify({ secret: "wrong" }),
           }),
           "correct",
+          PRIMARY_SHOW_ID,
         );
         expect(failed.status).toBe(401);
       }
@@ -116,6 +122,7 @@ describe("admin sessions, anonymous voters, and judge tokens", () => {
           body: JSON.stringify({ secret: "correct" }),
         }),
         "correct",
+        PRIMARY_SHOW_ID,
       );
       expect(limited.status).toBe(429);
     });

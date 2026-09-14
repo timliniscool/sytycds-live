@@ -249,6 +249,42 @@ export type OperationalResult =
   | { kind: "provisional"; value: number }
   | { kind: "finalised"; value: number; finalisedAt: string };
 
+/**
+ * One show-critical media file as the projector cache needs to know it. The
+ * version is the R2 object version, so a re-uploaded file is a new entry.
+ */
+export interface MediaManifestEntry {
+  id: string;
+  version: string;
+  sizeBytes: number;
+  mimeType: string;
+}
+
+/** Projector media cache state, reported to the operator; never persisted. */
+export interface MediaCacheSummary {
+  files: number;
+  cached: number;
+  failed: number;
+  bytes: number;
+  cachedBytes: number;
+  /** Whether the browser granted persistent storage; null before asking. */
+  persisted: boolean | null;
+  error: string | null;
+}
+
+/**
+ * One line of the append-only operational log. `data` is small, safe metadata
+ * (IDs, modes, counts); secrets, tokens and raw addresses never appear here.
+ */
+export interface AuditEvent {
+  id: number;
+  at: string;
+  type: string;
+  actor: "admin" | "projector" | "audience" | "judge" | "system";
+  commandId: string | null;
+  data: Readonly<Record<string, string | number | boolean | null>>;
+}
+
 /** A judge's public scoreboard tile: raw text as typed plus the score that counts. */
 export interface ScoreboardJudge {
   slot: number;
@@ -343,6 +379,8 @@ export interface ProjectorShowProjection {
   publicResults: PublicResults | null;
   /** Canonical audience URL when the deployment configures one; else the client uses its own origin. */
   joinUrl: string | null;
+  /** Every asset any cue of the show references, for prefetch and caching. */
+  mediaManifest: readonly MediaManifestEntry[];
 }
 
 export interface AudienceShowProjection {

@@ -8,6 +8,7 @@ import type {
   MediaCommandMessage,
   ProjectorPlaybackStatus,
 } from "../../shared/protocol";
+import { assetUrl } from "./media-cache";
 
 export type PlaybackState = MediaPlaybackState;
 
@@ -52,10 +53,6 @@ interface StagedAudio {
 const LOAD_TIMEOUT_MS = 20_000;
 const MAX_REMEMBERED_EXECUTIONS = 64;
 const ARM_REQUIRED = "ARM SHOW / ENABLE AUDIO is required";
-
-export function assetUrl(assetId: string): string {
-  return `/api/media/${encodeURIComponent(assetId)}`;
-}
 
 function isMediaVisual(
   visual: VisualCue | null,
@@ -164,6 +161,15 @@ export class ProjectorMediaEngine {
   private audioState: PlaybackState = "IDLE";
   private error: string | null = null;
   private disposed = false;
+  /**
+   * True until the first operator command of this page session. State that
+   * says PLAYING is honoured for anything already audible, but after a reload
+   * nothing is audible, and restarting a backing track from the top mid-act is
+   * worse than silence. So a fresh session loads and holds; RESUME or REPLAY
+   * is the operator saying which they want.
+   */
+  private freshSession = true;
+  private held = false;
 
   constructor(private readonly options: MediaEngineOptions) {
     this.adoptAudio(this.audio);
@@ -232,6 +238,7 @@ export class ProjectorMediaEngine {
       armed: this.armed,
       black: this.black,
       error: this.error,
+      ...(this.held ? { held: true } : {}),
     };
   }
 
@@ -257,6 +264,8 @@ export class ProjectorMediaEngine {
     this.remember(command.executionId);
     return this.enqueue(async () => {
       this.error = null;
+      this.freshSession = false;
+      this.held = false;
       const cue = command.cueId
         ? (cues.find((candidate) => candidate.id === command.cueId) ?? null)
         : null;
@@ -375,6 +384,7 @@ export class ProjectorMediaEngine {
     if (this.disposed) return;
     this.lastTarget = { runtime, cues };
     this.black = runtime.blackScreen;
+    this.held = false;
     let failure: string | null = null;
 
     const visualCue =
@@ -445,6 +455,10 @@ export class ProjectorMediaEngine {
   ): Promise<void> {
     if (transport === "PLAYING") {
       if (!element.paused && !element.ended) return;
+      if (this.freshSession) {
+        this.held = true;
+        return;
+      }
       if (!this.armed) {
         report(ARM_REQUIRED);
         return;

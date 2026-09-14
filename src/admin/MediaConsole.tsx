@@ -30,6 +30,10 @@ interface PendingCommand {
 
 const PENDING_TIMEOUT_MS = 4_000;
 
+function megabytes(bytes: number): string {
+  return (bytes / 1_048_576).toFixed(bytes < 10 * 1_048_576 ? 1 : 0);
+}
+
 function clock(milliseconds: number | null): string {
   if (milliseconds === null) return "--:--";
   const total = Math.max(0, Math.round(milliseconds / 1000));
@@ -142,6 +146,17 @@ export function MediaConsole({
           Projector audio is not armed. Press ARM SHOW on the projector.
         </p>
       )}
+      {telemetry?.held && (
+        <p className="media-console__warn">
+          Projector reloaded during playback: media is held. Press RESUME to
+          continue or REPLAY to restart the backing track.
+        </p>
+      )}
+      {telemetry?.cache?.error && (
+        <p className="media-console__alarm" role="alert">
+          PROJECTOR MEDIA CACHE: {telemetry.cache.error}
+        </p>
+      )}
       {runtime.activeVisualCueId && VISUAL_LAYER_HIDDEN.has(displayMode) && (
         <p className="media-console__warn">
           The visual layer is hidden while the projector shows{" "}
@@ -227,6 +242,14 @@ export function MediaConsole({
           <small>Time</small>
           <b>
             {clock(position)} / {clock(duration)}
+          </b>
+        </span>
+        <span>
+          <small>Media cache</small>
+          <b>
+            {telemetry?.cache
+              ? `${telemetry.cache.cached}/${telemetry.cache.files} · ${megabytes(telemetry.cache.cachedBytes)}/${megabytes(telemetry.cache.bytes)} MB${telemetry.cache.persisted === true ? " · protected" : ""}`
+              : "—"}
           </b>
         </span>
       </div>

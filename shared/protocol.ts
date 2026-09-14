@@ -15,6 +15,7 @@ import {
   type EmergencyPresentation,
   type JudgePermissionState,
   type JudgeRawInput,
+  type MediaCacheSummary,
   type MediaPlaybackState,
   type ProtocolVersion,
   type PublicAct,
@@ -67,6 +68,9 @@ export interface ProjectorPlaybackStatus {
   armed: boolean;
   black: boolean;
   error: string | null;
+  /** Media held after a reload until the operator resumes or replays. */
+  held?: boolean;
+  cache?: MediaCacheSummary;
 }
 
 export interface ProjectorStatusMessage extends ProtocolEnvelope {
@@ -305,6 +309,44 @@ function parseMilliseconds(value: unknown): number | null {
     : null;
 }
 
+function parseCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : null;
+}
+
+/** Cache summaries are small counters; anything malformed drops the summary, not the message. */
+export function parseMediaCacheSummary(
+  value: unknown,
+): MediaCacheSummary | undefined {
+  if (!isRecord(value)) return undefined;
+  const files = parseCount(value.files);
+  const cached = parseCount(value.cached);
+  const failed = parseCount(value.failed);
+  const bytes = parseCount(value.bytes);
+  const cachedBytes = parseCount(value.cachedBytes);
+  if (
+    files === null ||
+    cached === null ||
+    failed === null ||
+    bytes === null ||
+    cachedBytes === null ||
+    (value.persisted !== null && typeof value.persisted !== "boolean") ||
+    (value.error !== null && typeof value.error !== "string")
+  ) {
+    return undefined;
+  }
+  return {
+    files,
+    cached,
+    failed,
+    bytes,
+    cachedBytes,
+    persisted: value.persisted as boolean | null,
+    error: typeof value.error === "string" ? value.error.slice(0, 200) : null,
+  };
+}
+
 function parseProjectorStatus(value: unknown): ProjectorPlaybackStatus | null {
   if (
     !isRecord(value) ||
@@ -318,6 +360,7 @@ function parseProjectorStatus(value: unknown): ProjectorPlaybackStatus | null {
     return null;
   }
   const detail = typeof value.error === "string" ? value.error : null;
+  const cache = parseMediaCacheSummary(value.cache);
   return {
     visual: value.visual as MediaPlaybackState,
     audio: value.audio as MediaPlaybackState,
@@ -326,6 +369,8 @@ function parseProjectorStatus(value: unknown): ProjectorPlaybackStatus | null {
     armed: value.armed,
     black: value.black,
     error: detail === null ? null : detail.slice(0, 200),
+    ...(value.held === true ? { held: true } : {}),
+    ...(cache ? { cache } : {}),
   };
 }
 
@@ -371,12 +416,14 @@ function parsePreflightReport(value: unknown): ProjectorPreflightReport | null {
     if (!asset) return null;
     assets.push(asset);
   }
+  const cache = parseMediaCacheSummary(value.cache);
   return {
     protocolVersion: value.protocolVersion,
     engineReady: value.engineReady,
     armed: value.armed,
     cacheStorage: value.cacheStorage,
     assets,
+    ...(cache ? { cache } : {}),
   };
 }
 

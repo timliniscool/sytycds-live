@@ -76,6 +76,7 @@ function projection(
     revealedResult: null,
     publicResults: null,
     joinUrl: null,
+    mediaManifest: [],
   };
 }
 

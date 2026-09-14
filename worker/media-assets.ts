@@ -1,4 +1,4 @@
-import { type MediaAsset } from "../shared/domain";
+import { type MediaAsset, type MediaManifestEntry } from "../shared/domain";
 
 const MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set([
@@ -167,6 +167,34 @@ export async function uploadMediaAsset(
       referenced: false,
     },
   };
+}
+
+/**
+ * Every live asset any cue references: the show-critical media set. The
+ * projector caches exactly this list and keys each file by its R2 version.
+ */
+export function listReferencedAssets(
+  sql: SqlStorage,
+  showIdentifier: string,
+): MediaManifestEntry[] {
+  return sql
+    .exec<
+      Pick<AssetRow, "id" | "version_identifier" | "size_bytes" | "mime_type">
+    >(
+      `SELECT DISTINCT m.id, m.version_identifier, m.size_bytes, m.mime_type
+       FROM cue_asset_references r
+       JOIN media_assets m ON m.id = r.asset_id
+       WHERE r.show_id = ? AND m.deleted_at IS NULL
+       ORDER BY m.id`,
+      showIdentifier,
+    )
+    .toArray()
+    .map((row) => ({
+      id: row.id,
+      version: row.version_identifier,
+      sizeBytes: row.size_bytes,
+      mimeType: row.mime_type,
+    }));
 }
 
 export function listMediaAssets(

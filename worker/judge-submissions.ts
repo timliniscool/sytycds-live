@@ -1,4 +1,5 @@
 import { parseJudgeScore, transformJudgeScore } from "../shared/scoring";
+import { recordAuditEvent } from "./audit";
 import {
   actId,
   judgeId,
@@ -221,6 +222,16 @@ export function submitJudgeScore(
       timestamp,
       showIdentifier,
     );
+    recordAuditEvent(storage.sql, showIdentifier, {
+      type: "judge.submitted",
+      actor: "judge",
+      data: {
+        judgeId: judgeIdentifier,
+        actId: show.active_act_id,
+        classification: parsed.parsed.classification,
+        effectiveScore,
+      },
+    });
     const submission: JudgeSubmission = {
       showId: showId(showIdentifier),
       actId: actId(show.active_act_id),

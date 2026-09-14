@@ -261,21 +261,38 @@ function projectorItems(report: ProjectorPreflightReport): PreflightItem[] {
         : "Not available in this browser; the HTTP cache alone will carry media.",
       false,
     ),
-    result(
-      "media_cache",
-      "Media cache progress",
-      "projector",
-      report.assets.length === 0
-        ? "WARNING"
-        : failed.length === 0
-          ? "READY"
-          : "FAILURE",
-      report.assets.length === 0
-        ? "No cue references any media."
-        : failed.length === 0
-          ? `${report.assets.length}/${report.assets.length} assets loaded on the projector`
-          : `${report.assets.length - failed.length}/${report.assets.length} loaded. Failed: ${list(failed)}`,
-    ),
+    report.cache
+      ? result(
+          "media_cache",
+          "Media cache progress",
+          "projector",
+          report.cache.error
+            ? "FAILURE"
+            : report.cache.files === 0
+              ? "WARNING"
+              : report.cache.cached === report.cache.files
+                ? "READY"
+                : "FAILURE",
+          report.cache.error ??
+            (report.cache.files === 0
+              ? "No cue references any media."
+              : `${report.cache.cached}/${report.cache.files} files (${Math.round(report.cache.cachedBytes / 1_048_576)}/${Math.round(report.cache.bytes / 1_048_576)} MB) stored on the projector${report.cache.persisted === true ? "; storage is protected from eviction" : report.cache.persisted === false ? "; browser declined persistent storage" : ""}`),
+        )
+      : result(
+          "media_cache",
+          "Media cache progress",
+          "projector",
+          report.assets.length === 0
+            ? "WARNING"
+            : failed.length === 0
+              ? "READY"
+              : "FAILURE",
+          report.assets.length === 0
+            ? "No cue references any media."
+            : failed.length === 0
+              ? `${report.assets.length}/${report.assets.length} assets loaded on the projector`
+              : `${report.assets.length - failed.length}/${report.assets.length} loaded. Failed: ${list(failed)}`,
+        ),
     result(
       "audio_metadata",
       "Audio metadata",

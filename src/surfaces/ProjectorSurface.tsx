@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 
-import { PROTOCOL_VERSION } from "../../shared/domain";
+import { PROTOCOL_VERSION, type MediaCacheSummary } from "../../shared/domain";
 import type { MediaCommandMessage } from "../../shared/protocol";
 import {
   ProjectorMediaEngine,
   type ProjectorMediaStatus,
 } from "../projector/MediaEngine";
+import { MediaCache } from "../projector/media-cache";
 import { cacheStorageAvailable, probeAssets } from "../projector/preflight";
 import {
   ActCardGraphic,
@@ -41,9 +42,11 @@ const TELEMETRY_HEARTBEAT_MS = 5_000;
 
 export default function ProjectorSurface() {
   const [media, setMedia] = useState(INITIAL_MEDIA);
+  const [cache, setCache] = useState<MediaCacheSummary | null>(null);
   const [diagnostics, setDiagnostics] = useState(false);
   const clientRef = useRef<RealtimeClient | null>(null);
   const engineRef = useRef<ProjectorMediaEngine | null>(null);
+  const cacheRef = useRef<MediaCache | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const token = new URLSearchParams(window.location.search).get("token") ?? "";
   if (!clientRef.current)
@@ -97,6 +100,28 @@ export default function ProjectorSurface() {
     };
   }, [client]);
 
+  // The media service worker answers /api/media/* from CacheStorage so a
+  // prepared file survives a Wi-Fi drop; the page fills that cache from the
+  // manifest. Both are scoped to this route and touch no other traffic.
+  useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      void navigator.serviceWorker
+        .register("/media-sw.js", { scope: "/projector" })
+        .catch(() => undefined);
+    }
+    const mediaCache = new MediaCache(setCache);
+    cacheRef.current = mediaCache;
+    return () => {
+      mediaCache.dispose();
+      cacheRef.current = null;
+    };
+  }, []);
+
+  const manifest = projection?.mediaManifest ?? null;
+  useEffect(() => {
+    if (manifest) void cacheRef.current?.sync(manifest);
+  }, [manifest]);
+
   // Every snapshot and media patch converges the engine on the authoritative
   // transports. A reconnect therefore restores the presentation without
   // restarting anything that already matches.
@@ -126,6 +151,7 @@ export default function ProjectorSurface() {
           armed: engineRef.current?.telemetry().armed ?? false,
           cacheStorage: cacheStorageAvailable(),
           assets,
+          ...(cacheRef.current ? { cache: cacheRef.current.summary() } : {}),
         },
       });
     });
@@ -143,7 +169,10 @@ export default function ProjectorSurface() {
     const timer = setInterval(() => {
       const engine = engineRef.current;
       if (!engine) return;
-      const status = engine.telemetry();
+      const status = {
+        ...engine.telemetry(),
+        ...(cacheRef.current ? { cache: cacheRef.current.summary() } : {}),
+      };
       const encoded = JSON.stringify(status);
       const now = Date.now();
       if (encoded === previous && now - sentAt < TELEMETRY_HEARTBEAT_MS) return;
@@ -226,6 +255,17 @@ export default function ProjectorSurface() {
           </span>
           {media.error && (
             <span className="projector-diagnostics__error">{media.error}</span>
+          )}
+          {cache && (
+            <span>
+              cache {cache.cached}/{cache.files} ·{" "}
+              {Math.round(cache.cachedBytes / 1_048_576)}/
+              {Math.round(cache.bytes / 1_048_576)} MB
+              {cache.persisted === true ? " · persisted" : ""}
+            </span>
+          )}
+          {cache?.error && (
+            <span className="projector-diagnostics__error">{cache.error}</span>
           )}
           <span>press D to hide</span>
         </output>

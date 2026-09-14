@@ -101,6 +101,10 @@ const OPEN = 1;
 const MAX_RETRY_DELAY_MS = 10_000;
 const BASE_RETRY_DELAY_MS = 500;
 const MAX_SEEN_MESSAGES = 128;
+/** How long a resync may go unanswered before the socket is presumed dead. */
+const RESYNC_WATCHDOG_MS = 5_000;
+/** Client-chosen close code for a socket that stopped answering. */
+const CLOSE_UNRESPONSIVE = 4000;
 
 function defaultSocketFactory(url: string): WebSocketLike {
   return new WebSocket(url);
@@ -291,13 +295,23 @@ export class RealtimeClient {
     });
     this.socket?.close(1000, "Browser offline");
   };
+  private probeAnswered = true;
+  private watchdog: number | null = null;
   private readonly onVisibilityChange = () => {
     if (
-      typeof document !== "undefined" &&
-      document.visibilityState === "visible"
+      typeof document === "undefined" ||
+      document.visibilityState !== "visible"
     ) {
-      this.connect();
+      return;
     }
+    if (!this.socket) {
+      this.connect();
+      return;
+    }
+    // A phone that slept with the tab open can hold a socket the network has
+    // long since dropped without a close event. Ask for a snapshot and treat
+    // silence as a dead link, so the reconnect path takes over.
+    this.probeConnection();
   };
 
   constructor(private readonly options: RealtimeClientOptions) {
@@ -388,6 +402,20 @@ export class RealtimeClient {
     });
   }
 
+  /** Resync now and close the socket if nothing at all comes back in time. */
+  probeConnection(): void {
+    if (!this.socket || this.socket.readyState !== OPEN) return;
+    this.probeAnswered = false;
+    this.requestResync();
+    if (this.watchdog !== null) clearTimeout(this.watchdog);
+    this.watchdog = setTimeout(() => {
+      this.watchdog = null;
+      if (this.socket && !this.probeAnswered) {
+        this.socket.close(CLOSE_UNRESPONSIVE, "No reply to resync");
+      }
+    }, RESYNC_WATCHDOG_MS);
+  }
+
   private listenToBrowser(): void {
     if (typeof window === "undefined") {
       return;
@@ -432,6 +460,10 @@ export class RealtimeClient {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
+    if (this.watchdog !== null) {
+      clearTimeout(this.watchdog);
+      this.watchdog = null;
+    }
     this.socket?.close(1000, "Page closed");
     this.socket = null;
     this.selectorSubscriptions.clear();
@@ -443,6 +475,7 @@ export class RealtimeClient {
   }
 
   private handleServerMessage(payload: string): void {
+    this.probeAnswered = true;
     const parsed = parseServerMessage(payload);
     if (!parsed.ok) {
       this.publish({
@@ -450,6 +483,9 @@ export class RealtimeClient {
         connection: parsed.incompatible ? "INCOMPATIBLE" : "DEGRADED",
         lastError: parsed.reason,
       });
+      // A malformed or unrevisioned message means this client and the server
+      // disagree about something; the snapshot is the only safe reset.
+      if (!parsed.incompatible) this.requestResync();
       return;
     }
     const message = parsed.message;

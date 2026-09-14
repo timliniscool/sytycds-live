@@ -1,5 +1,6 @@
 import { audienceWeight, isValidAudienceScore } from "../shared/scoring";
 import { isRecord } from "../shared/trust";
+import { isVoteMilestone, recordAuditEvent } from "./audit";
 import {
   actId,
   type AudienceAggregate,
@@ -171,6 +172,17 @@ export function submitAudienceVote(
         request.actIdentifier,
       )
       .one();
+    // Milestones only: one line per order of magnitude, not one per vote.
+    if (isVoteMilestone(aggregate.vote_count)) {
+      recordAuditEvent(storage.sql, showIdentifier, {
+        type: "audience.milestone",
+        actor: "system",
+        data: {
+          actId: request.actIdentifier,
+          voteCount: aggregate.vote_count,
+        },
+      });
+    }
     return {
       ok: true,
       revision: revision as ShowRevision,

@@ -34,6 +34,8 @@ import {
   type VisualCueKind,
 } from "../shared/domain";
 import { rankGroups } from "../shared/ranking";
+import { auditEventForCommand, recordAuditEvent } from "./audit";
+import { listReferencedAssets } from "./media-assets";
 import { audienceJoinUrl } from "./public-origin";
 import { loadPublicResults, loadRanking } from "./rankings";
 import {
@@ -504,15 +506,10 @@ function recordCommand(
     timestamp,
     commandFingerprint(command),
   );
-  sql.exec(
-    `INSERT INTO audit_events (
-      show_id, command_id, actor_role, event_type, event_json, occurred_at
-    ) VALUES (?, ?, 'admin', ?, ?, ?)`,
+  recordAuditEvent(
+    sql,
     showIdentifier,
-    command.commandId,
-    `admin.${command.type.toLowerCase()}`,
-    JSON.stringify({ status: acknowledgement.status }),
-    timestamp,
+    auditEventForCommand(command, acknowledgement),
   );
 }
 
@@ -1538,6 +1535,7 @@ export function projectShowState(
       joinUrl: options.publicOrigin
         ? audienceJoinUrl(options.publicOrigin)
         : null,
+      mediaManifest: listReferencedAssets(storage.sql, show.id),
     };
     return projection;
   }

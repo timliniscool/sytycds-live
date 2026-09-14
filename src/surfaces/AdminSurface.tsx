@@ -11,6 +11,7 @@ import type {
   AdminCommandType,
 } from "../../shared/admin-command";
 import { EmergencyPanel } from "../admin/EmergencyPanel";
+import { HistoryPanel } from "../admin/HistoryPanel";
 import { JudgeLinks } from "../admin/JudgeLinks";
 import { MediaConsole } from "../admin/MediaConsole";
 import { PreflightPanel } from "../admin/PreflightPanel";
@@ -23,7 +24,7 @@ import {
 } from "../realtime/RealtimeClient";
 
 type AuthenticationState = "checking" | "signed-out" | "signed-in" | "failed";
-type ConsoleView = "show" | "results" | "setup";
+type ConsoleView = "show" | "results" | "setup" | "history";
 
 export default function AdminSurface() {
   const [authentication, setAuthentication] =
@@ -104,6 +105,7 @@ const VIEWS: readonly { view: ConsoleView; label: string }[] = [
   { view: "show", label: "SHOW" },
   { view: "results", label: "RESULTS" },
   { view: "setup", label: "SETUP & PREFLIGHT" },
+  { view: "history", label: "HISTORY" },
 ];
 function id(): string {
   return crypto.randomUUID().replaceAll("-", "");
@@ -227,8 +229,11 @@ function Console() {
   }, [projection, mediaPlaying]);
   if (!projection)
     return (
-      <main className="admin-console">
-        <p>Connecting to authoritative show state…</p>
+      <main className="admin-console admin-console--loading">
+        <p className="admin-loading">
+          <span className="admin-mark">SYTYCDS / CONTROL</span>
+          Connecting to the show coordinator…
+        </p>
       </main>
     );
   const active =
@@ -273,6 +278,7 @@ function Console() {
               key={entry.view}
               type="button"
               className={view === entry.view ? "is-active" : ""}
+              aria-pressed={view === entry.view}
               onClick={() => setView(entry.view)}
             >
               {entry.label}
@@ -299,6 +305,11 @@ function Console() {
           role="listbox"
           aria-label="Show running order"
         >
+          {projection.acts.length === 0 && (
+            <p className="act-list__empty">
+              No acts yet. Add the running order before doors.
+            </p>
+          )}
           {projection.acts.map((act) => {
             const result = projection.results[act.id];
             const current = act.id === projection.show.activeActId;
@@ -355,6 +366,11 @@ function Console() {
             send={send}
           />
         )}
+        {view === "history" && (
+          <HistoryPanel
+            revision={revision === null ? null : Number(revision)}
+          />
+        )}
         {view === "setup" && (
           <>
             <PreflightPanel client={client} />
@@ -390,6 +406,7 @@ function Console() {
                     className={
                       projection.show.displayMode === mode ? "is-active" : ""
                     }
+                    aria-pressed={projection.show.displayMode === mode}
                     onClick={() => send("SET_DISPLAY_MODE", { mode })}
                   >
                     {mode.replaceAll("_", " ")}
@@ -398,6 +415,7 @@ function Console() {
                 <button
                   type="button"
                   className={`display-controls__black${projection.runtime.blackScreen ? " is-active" : ""}`}
+                  aria-pressed={projection.runtime.blackScreen}
                   onClick={() => send("BLACK_SCREEN")}
                 >
                   BLACK

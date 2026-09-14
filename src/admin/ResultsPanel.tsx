@@ -62,6 +62,7 @@ export function ResultsPanel({
             key={entry.stage}
             type="button"
             className={stage === entry.stage ? "is-active" : ""}
+            aria-pressed={stage === entry.stage}
             disabled={entry.stage !== "HIDDEN" && nothingRanked}
             onClick={() => send("SET_RESULTS_STAGE", { stage: entry.stage })}
           >

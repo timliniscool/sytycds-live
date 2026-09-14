@@ -1,6 +1,7 @@
 import { cloudflareTest } from "@cloudflare/vitest-plugin";
 import { defineConfig } from "vitest/config";
 
+/** Load and chaos runs are slow by design; `npm run test:load` opts in. */
 export default defineConfig({
   plugins: [
     cloudflareTest({
@@ -8,7 +9,8 @@ export default defineConfig({
     }),
   ],
   test: {
-    // Load and chaos tests live under test/load and run via `npm run test:load`.
-    exclude: ["**/node_modules/**", "**/dist/**", "test/load/**"],
+    include: ["test/load/**/*.test.ts"],
+    testTimeout: 180_000,
+    hookTimeout: 60_000,
   },
 });

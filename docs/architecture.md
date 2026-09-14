@@ -128,6 +128,44 @@ own media pipeline in reply to a relayed `preflight_request` and answers with a
 `projector_preflight` report that is relayed to admin and never persisted. A
 required failure blocks READY; warnings never masquerade as failure.
 
+## Media preparation, operational log, recovery and load
+
+The projector page registers `public/media-sw.js` with scope `/projector`. The
+worker answers only `GET /api/media/*`, from the `sytycds-media` CacheStorage
+cache, including the Range requests media elements make; everything else goes
+to the network untouched, so no API, admin or judge response is ever cached.
+The page, not the worker, decides what is cached: `MediaCache` reconciles the
+cache with the projector projection's `mediaManifest` (every asset any cue
+references, keyed by R2 version), streams each missing file once, verifies its
+length, stores it under its version, removes stale or unreferenced entries,
+asks for persistent storage, and reports files, bytes, failures and quota
+exhaustion through telemetry and the preflight report.
+
+`audit_events` is the append-only operational log (`worker/audit.ts`). Every
+operator command writes one typed event with safe metadata (accepted commands
+say what changed; refused ones say why); judge acceptance, audience vote
+milestones, projector acknowledgements, newly appearing media errors and
+operator sign-in outcomes are also recorded. Secrets, tokens, addresses and
+individual votes are not. `GET /api/admin/history` pages newest-first by ID and
+the console's HISTORY view loads one bounded page at a time.
+
+Recovery is deterministic: a reconnecting client always receives the
+authoritative snapshot; revisions detect stale and gapped messages; command,
+vote and judge replays are absorbed by the command log and insert-once
+constraints; a socket that sleeps with a phone is probed on return and closed
+if it does not answer a resync, which hands over to the reconnect path. After
+a projector page reload the media engine loads but holds anything the server
+says is PLAYING, and reports `held`, because restarting a backing track from
+the top mid-act is worse than silence; RESUME or REPLAY is the operator's
+decision. Connection-count and aggregate broadcasts are coalesced so a
+reconnect storm or a vote burst costs a handful of messages, not one per event.
+
+`npm run test:load` runs the load and chaos harness in `test/load` against the
+real coordinator: 100, 500 and 1000 HTTP voters with replay and aggregate
+checks, close-mid-burst and act-change races, 100 and 500 phones with fan-out
+and reconnect storms, repeated operator clicks, query plans on the vote path,
+per-vote transaction cost and role payload sizes.
+
 ## State lifetime
 
 Persistent state belongs in coordinator SQLite: show configuration, acts and cues, display/voting state, hashed identities and credentials, accepted submissions, aggregates, revisions, idempotency records, and result publication state. R2 persists media bytes.
