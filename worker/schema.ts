@@ -237,11 +237,52 @@ const AUTH_AND_VOTER_SCHEMA: SchemaMigration = {
   ],
 };
 
+/**
+ * Asset bytes live in R2; SQLite only records their immutable identity and
+ * references.  Cue operations are deliberately JSON because they are a small,
+ * discriminated command list, not arbitrary executable data.
+ */
+const RESULTS_ACTS_MEDIA_SCHEMA: SchemaMigration = {
+  version: 5,
+  name: "results_act_management_and_r2_media",
+  statements: [
+    `CREATE TABLE media_assets (
+      id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
+      show_id TEXT NOT NULL,
+      object_key TEXT NOT NULL,
+      original_filename TEXT NOT NULL,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+      version_identifier TEXT NOT NULL,
+      duration_ms INTEGER CHECK (duration_ms IS NULL OR duration_ms >= 0),
+      width INTEGER CHECK (width IS NULL OR width > 0),
+      height INTEGER CHECK (height IS NULL OR height > 0),
+      uploaded_at TEXT NOT NULL,
+      deleted_at TEXT,
+      UNIQUE (show_id, object_key),
+      FOREIGN KEY (show_id) REFERENCES shows(id) ON DELETE RESTRICT
+    ) STRICT`,
+    `CREATE TABLE cue_asset_references (
+      show_id TEXT NOT NULL,
+      cue_id TEXT NOT NULL,
+      asset_id TEXT NOT NULL,
+      PRIMARY KEY (show_id, cue_id, asset_id),
+      FOREIGN KEY (show_id, cue_id) REFERENCES cues(show_id, id) ON DELETE RESTRICT,
+      FOREIGN KEY (asset_id) REFERENCES media_assets(id) ON DELETE RESTRICT
+    ) STRICT`,
+    "CREATE INDEX idx_cue_asset_references_asset ON cue_asset_references (asset_id)",
+    "ALTER TABLE cues ADD COLUMN operator_label TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE cues ADD COLUMN operations_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE cues ADD COLUMN internal_note TEXT NOT NULL DEFAULT ''",
+  ],
+};
+
 export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
   COMMAND_IDEMPOTENCY_SCHEMA,
   AUTH_AND_VOTER_SCHEMA,
+  RESULTS_ACTS_MEDIA_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

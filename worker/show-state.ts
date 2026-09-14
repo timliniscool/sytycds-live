@@ -24,8 +24,14 @@ import {
   type PublicAct,
   type ShowRuntimeState,
   type AudioCueKind,
+  type CueOperation,
   type VisualCueKind,
 } from "../shared/domain";
+import {
+  finaliseResult,
+  operationalResult,
+  revealedFinalScore,
+} from "./results";
 
 export const PRIMARY_SHOW_ID = showId("primary");
 
@@ -84,6 +90,9 @@ interface CueRow extends Record<string, SqlStorageValue> {
   audio_kind: string | null;
   audio_source_key: string | null;
   duration_ms: number | null;
+  operator_label: string;
+  operations_json: string;
+  internal_note: string;
 }
 
 interface AggregateRow extends Record<string, SqlStorageValue> {
@@ -222,6 +231,30 @@ function toPublicAct(row: ActRow): PublicAct {
 }
 
 function toCue(showIdentifier: string, row: CueRow): PersistedCue {
+  let operations: CueOperation[] = [];
+  try {
+    const candidate: unknown = JSON.parse(row.operations_json);
+    if (Array.isArray(candidate)) operations = candidate as CueOperation[];
+  } catch {
+    // A legacy cue is represented from its old non-executable columns below.
+  }
+  if (operations.length === 0) {
+    if (row.visual_kind)
+      operations.push({
+        kind: "visual",
+        visual: {
+          kind: row.visual_kind as VisualCueKind,
+          sourceKey: row.visual_source_key,
+          title: row.visual_title,
+        },
+      });
+    if (row.audio_kind && row.audio_source_key)
+      operations.push({
+        kind: "audio",
+        action: "LOAD",
+        assetId: row.audio_source_key,
+      });
+  }
   return {
     id: cueId(row.id),
     showId: showId(showIdentifier),
@@ -241,6 +274,9 @@ function toCue(showIdentifier: string, row: CueRow): PersistedCue {
         }
       : null,
     durationMs: row.duration_ms,
+    operatorLabel: row.operator_label,
+    operations,
+    internalNote: row.internal_note,
   };
 }
 
@@ -285,7 +321,7 @@ function cueForCurrentAct(
     sql
       .exec<CueRow>(
         `SELECT id, act_id, position, visual_kind, visual_source_key, visual_title,
-                audio_kind, audio_source_key, duration_ms
+                audio_kind, audio_source_key, duration_ms, operator_label, operations_json, internal_note
          FROM cues WHERE show_id = ? AND act_id = ? AND id = ?`,
         show.id,
         show.active_act_id,
@@ -513,7 +549,7 @@ function executeTransition(
         };
       }
       sql.exec(
-        "UPDATE shows SET active_act_id = ? WHERE id = ?",
+        "UPDATE shows SET active_act_id = ?, result_reveal_state = 'HIDDEN' WHERE id = ?",
         command.actId,
         show.id,
       );
@@ -524,7 +560,7 @@ function executeTransition(
         return { accepted: false, reason: "There is no next act", changes: [] };
       }
       sql.exec(
-        "UPDATE shows SET active_act_id = ? WHERE id = ?",
+        "UPDATE shows SET active_act_id = ?, result_reveal_state = 'HIDDEN' WHERE id = ?",
         next.id,
         show.id,
       );
@@ -540,7 +576,7 @@ function executeTransition(
         };
       }
       sql.exec(
-        "UPDATE shows SET active_act_id = ? WHERE id = ?",
+        "UPDATE shows SET active_act_id = ?, result_reveal_state = 'HIDDEN' WHERE id = ?",
         previous.id,
         show.id,
       );
@@ -676,7 +712,30 @@ function executeTransition(
       );
       return { accepted: true, changes: ["judge_permission"] };
     }
+    case "FINALISE_RESULT": {
+      if (!activeActId) {
+        return {
+          accepted: false,
+          reason: "Select an act before finalising a result",
+          changes: [],
+        };
+      }
+      const finalised = finaliseResult(sql, show.id, activeActId);
+      return finalised.ok
+        ? { accepted: true, changes: ["result_reveal"] }
+        : { accepted: false, reason: finalised.reason, changes: [] };
+    }
     case "REVEAL_RESULT":
+      if (
+        !activeActId ||
+        operationalResult(sql, show.id, activeActId).kind !== "finalised"
+      ) {
+        return {
+          accepted: false,
+          reason: "Finalise a complete result before revealing it",
+          changes: [],
+        };
+      }
       sql.exec(
         "UPDATE shows SET result_reveal_state = 'REVEALED' WHERE id = ?",
         show.id,
@@ -743,6 +802,19 @@ function executeTransition(
           : runtime.audio_transport,
       );
       return { accepted: true, changes: ["media"] };
+    case "RESUME_MEDIA":
+      runtimeUpdate(
+        sql,
+        show.id,
+        "visual_transport = ?, audio_transport = ?",
+        runtime.visual_transport === "PAUSED"
+          ? "PLAYING"
+          : runtime.visual_transport,
+        runtime.audio_transport === "PAUSED"
+          ? "PLAYING"
+          : runtime.audio_transport,
+      );
+      return { accepted: true, changes: ["media"] };
     case "STOP_MEDIA":
       runtimeUpdate(
         sql,
@@ -767,6 +839,65 @@ function executeTransition(
         runtime.active_audio_cue_id ? "PLAYING" : "STOPPED",
       );
       return { accepted: true, changes: ["media"] };
+    case "RESTART_MEDIA":
+      if (!runtime.active_visual_cue_id && !runtime.active_audio_cue_id) {
+        return {
+          accepted: false,
+          reason: "There is no active media to restart",
+          changes: [],
+        };
+      }
+      runtimeUpdate(
+        sql,
+        show.id,
+        "visual_transport = ?, audio_transport = ?, black_screen = 0",
+        runtime.active_visual_cue_id ? "PLAYING" : "STOPPED",
+        runtime.active_audio_cue_id ? "PLAYING" : "STOPPED",
+      );
+      return { accepted: true, changes: ["media"] };
+    case "SEEK_MEDIA":
+      if (!runtime.active_audio_cue_id) {
+        return {
+          accepted: false,
+          reason: "There is no active audio transport to seek",
+          changes: [],
+        };
+      }
+      return { accepted: true, changes: ["media"] };
+    case "NEXT_CUE":
+    case "PREVIOUS_CUE": {
+      if (!activeActId)
+        return {
+          accepted: false,
+          reason: "Select an act before selecting a cue",
+          changes: [],
+        };
+      const selected = runtime.prepared_cue_id
+        ? sql
+            .exec<{ id: string }>(
+              `SELECT id FROM cues WHERE show_id = ? AND act_id = ? AND position ${command.type === "NEXT_CUE" ? ">" : "<"} (SELECT position FROM cues WHERE show_id = ? AND id = ?) ORDER BY position ${command.type === "NEXT_CUE" ? "ASC" : "DESC"} LIMIT 1`,
+              show.id,
+              activeActId,
+              show.id,
+              runtime.prepared_cue_id,
+            )
+            .toArray()[0]
+        : sql
+            .exec<{ id: string }>(
+              `SELECT id FROM cues WHERE show_id = ? AND act_id = ? ORDER BY position ${command.type === "NEXT_CUE" ? "ASC" : "DESC"} LIMIT 1`,
+              show.id,
+              activeActId,
+            )
+            .toArray()[0];
+      if (!selected)
+        return {
+          accepted: false,
+          reason: `There is no ${command.type === "NEXT_CUE" ? "next" : "previous"} cue`,
+          changes: [],
+        };
+      runtimeUpdate(sql, show.id, "prepared_cue_id = ?", selected.id);
+      return { accepted: true, changes: ["media"] };
+    }
     case "BLACK_SCREEN":
       runtimeUpdate(sql, show.id, "black_screen = 1");
       return { accepted: true, changes: ["media"] };
@@ -887,7 +1018,7 @@ function loadCues(
   return sql
     .exec<CueRow>(
       `SELECT id, act_id, position, visual_kind, visual_source_key, visual_title,
-              audio_kind, audio_source_key, duration_ms
+              audio_kind, audio_source_key, duration_ms, operator_label, operations_json, internal_note
        FROM cues WHERE show_id = ? AND act_id = ? ORDER BY position`,
       showIdentifier,
       actIdentifier,
@@ -947,6 +1078,12 @@ export function projectShowState(
         revision: persisted.revision,
       },
       activeAct: publicActive,
+      revealedResult: revealedFinalScore(
+        storage.sql,
+        show.id,
+        show.active_act_id,
+        persisted.resultRevealState === "REVEALED",
+      ),
     };
     return projection;
   }
@@ -976,6 +1113,12 @@ export function projectShowState(
         audioTransport: requireTransportState(runtime.audio_transport),
         blackScreen: runtime.black_screen === 1,
       },
+      revealedResult: revealedFinalScore(
+        storage.sql,
+        show.id,
+        show.active_act_id,
+        persisted.resultRevealState === "REVEALED",
+      ),
     };
     return projection;
   }
@@ -1067,6 +1210,12 @@ export function projectShowState(
     acts,
     audienceAggregates: aggregates,
     runtime: runtimeState(show.id, runtime),
+    results: Object.fromEntries(
+      acts.map((act) => [
+        act.id,
+        operationalResult(storage.sql, show.id, act.id),
+      ]),
+    ),
   };
   return projection;
 }

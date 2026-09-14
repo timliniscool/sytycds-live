@@ -52,7 +52,7 @@ export type ConnectionRole =
   | { kind: "judge"; judgeId: JudgeId };
 
 export type VisualCueKind =
-  "TITLE_CARD" | "IMAGE" | "SLIDES" | "VIDEO" | "BLACK";
+  "TITLE_CARD" | "IMAGE" | "SLIDES" | "VIDEO" | "BLACK" | "CLEAR";
 export type AudioCueKind = "AUDIO" | "VIDEO_AUDIO";
 
 /** Visual and backing-audio channels are intentionally independent. */
@@ -75,6 +75,33 @@ export interface PersistedCue {
   visual: VisualCue | null;
   audio: AudioCue | null;
   durationMs: number | null;
+  operatorLabel: string;
+  operations: readonly CueOperation[];
+  internalNote: string;
+}
+
+export type CueOperation =
+  | { kind: "visual"; visual: VisualCue }
+  | {
+      kind: "audio";
+      action: "LOAD" | "PLAY" | "PAUSE" | "RESUME" | "STOP" | "REPLAY" | "SEEK";
+      assetId?: string;
+      positionMs?: number;
+    }
+  | { kind: "delay"; durationMs: number };
+
+export interface MediaAsset {
+  id: string;
+  objectKey: string;
+  originalFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  versionIdentifier: string;
+  uploadedAt: string;
+  durationMs: number | null;
+  width: number | null;
+  height: number | null;
+  referenced: boolean;
 }
 
 export interface PublicAct {
@@ -163,12 +190,22 @@ export interface PersistedResult {
   finalisedAt: string | null;
 }
 
+export type OperationalResult =
+  | {
+      kind: "incomplete";
+      missingJudgeSlots: readonly number[];
+      audienceMissing: boolean;
+    }
+  | { kind: "provisional"; value: number }
+  | { kind: "finalised"; value: number; finalisedAt: string };
+
 export interface AdminShowProjection {
   role: "admin";
   show: PersistedShow;
   acts: readonly AdminAct[];
   audienceAggregates: readonly AudienceAggregate[];
   runtime: ShowRuntimeState;
+  results: Readonly<Record<string, OperationalResult>>;
 }
 
 export interface ProjectorShowProjection {
@@ -188,6 +225,8 @@ export interface ProjectorShowProjection {
     | "audioTransport"
     | "blackScreen"
   >;
+  /** Present only after the operator has publicly revealed a finalised result. */
+  revealedResult?: number | null;
 }
 
 export interface AudienceShowProjection {
@@ -197,6 +236,7 @@ export interface AudienceShowProjection {
     "title" | "activeActId" | "audienceVoteState" | "revision"
   >;
   activeAct: PublicAct | null;
+  revealedResult?: number | null;
 }
 
 export interface JudgeShowProjection {

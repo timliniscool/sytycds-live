@@ -31,7 +31,8 @@ export default {
       url.pathname === "/api/ws" ||
       url.pathname.startsWith("/api/admin/") ||
       url.pathname === "/api/vote" ||
-      url.pathname === "/api/vote/status"
+      url.pathname === "/api/vote/status" ||
+      url.pathname.startsWith("/api/media/")
     ) {
       const id = env.SHOW_COORDINATOR.idFromName("primary");
       return env.SHOW_COORDINATOR.get(id).fetch(request);

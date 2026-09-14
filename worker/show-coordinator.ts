@@ -34,6 +34,28 @@ import {
   revokeJudge,
   rotateJudgeToken,
 } from "./judge-lifecycle";
+import { submitJudgeScore } from "./judge-submissions";
+import {
+  createAct,
+  deleteAct,
+  editAct,
+  parseActInput,
+  replaceActOrder,
+} from "./acts";
+import {
+  createCue,
+  deleteCue,
+  duplicateCue,
+  editCue,
+  parseCueInput,
+  replaceCueOrder,
+} from "./cues";
+import {
+  deleteMediaAsset,
+  listMediaAssets,
+  serveMediaAsset,
+  uploadMediaAsset,
+} from "./media-assets";
 import { hasSameOrigin } from "./security";
 import { initialiseSchema, readSchemaVersion } from "./schema";
 import { authenticateSocketRole } from "./socket-auth";
@@ -162,6 +184,51 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (url.pathname === "/api/vote" && request.method === "POST") {
       return this.handleAudienceVote(request);
     }
+    if (url.pathname === "/api/admin/acts" && request.method === "POST")
+      return this.handleCreateAct(request);
+    if (url.pathname === "/api/admin/acts/reorder" && request.method === "POST")
+      return this.handleReorderActs(request);
+    const actMatch = /^\/api\/admin\/acts\/([A-Za-z0-9_-]{1,128})$/u.exec(
+      url.pathname,
+    );
+    if (actMatch && request.method === "PATCH")
+      return this.handleEditAct(request, actMatch[1] ?? "");
+    if (actMatch && request.method === "DELETE")
+      return this.handleDeleteAct(request, actMatch[1] ?? "");
+    if (url.pathname === "/api/admin/cues" && request.method === "POST")
+      return this.handleCreateCue(request);
+    if (url.pathname === "/api/admin/cues/reorder" && request.method === "POST")
+      return this.handleReorderCues(request);
+    const cueMatch =
+      /^\/api\/admin\/cues\/([A-Za-z0-9_-]{1,128})(?:\/(duplicate))?$/u.exec(
+        url.pathname,
+      );
+    if (cueMatch && cueMatch[2] === "duplicate" && request.method === "POST")
+      return this.handleDuplicateCue(request, cueMatch[1] ?? "");
+    if (cueMatch && !cueMatch[2] && request.method === "PATCH")
+      return this.handleEditCue(request, cueMatch[1] ?? "");
+    if (cueMatch && !cueMatch[2] && request.method === "DELETE")
+      return this.handleDeleteCue(request, cueMatch[1] ?? "");
+    if (url.pathname === "/api/admin/media" && request.method === "GET")
+      return this.handleListMedia(request);
+    if (url.pathname === "/api/admin/media" && request.method === "POST")
+      return this.handleUploadMedia(request, url);
+    const mediaMatch =
+      /^\/api\/(?:admin\/)?media\/([A-Za-z0-9_-]{1,128})$/u.exec(url.pathname);
+    if (mediaMatch && request.method === "GET")
+      return serveMediaAsset(
+        this.ctx.storage.sql,
+        this.env.MEDIA,
+        PRIMARY_SHOW_ID,
+        mediaMatch[1] ?? "",
+        request,
+      );
+    if (
+      mediaMatch &&
+      url.pathname.startsWith("/api/admin/") &&
+      request.method === "DELETE"
+    )
+      return this.handleDeleteMedia(request, mediaMatch[1] ?? "");
     return Response.json({ error: "Not found" }, { status: 404 });
   }
 
@@ -392,6 +459,229 @@ export class ShowCoordinator extends DurableObject<Env> {
     return response;
   }
 
+  private async adminBody(request: Request): Promise<unknown | null> {
+    try {
+      return await request.json();
+    } catch {
+      return null;
+    }
+  }
+
+  private async handleCreateAct(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const input = parseActInput(await this.adminBody(request));
+    if (!input)
+      return Response.json({ error: "Invalid act fields" }, { status: 400 });
+    const act = createAct(this.ctx.storage, PRIMARY_SHOW_ID, input);
+    if (!act)
+      return Response.json({ error: "Show unavailable" }, { status: 409 });
+    this.broadcastSnapshots("admin");
+    return Response.json({ act }, { status: 201 });
+  }
+
+  private async handleEditAct(
+    request: Request,
+    requestedId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const input = parseActInput(await this.adminBody(request));
+    if (!input)
+      return Response.json({ error: "Invalid act fields" }, { status: 400 });
+    if (!editAct(this.ctx.storage, PRIMARY_SHOW_ID, requestedId, input))
+      return Response.json({ error: "Act not found" }, { status: 404 });
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("audience");
+    this.broadcastSnapshots("judge");
+    return Response.json({ updated: true });
+  }
+
+  private async handleDeleteAct(
+    request: Request,
+    requestedId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const result = deleteAct(this.ctx.storage, PRIMARY_SHOW_ID, requestedId);
+    if (result !== "deleted")
+      return Response.json(
+        { error: result },
+        { status: result === "not_found" ? 404 : 409 },
+      );
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("audience");
+    this.broadcastSnapshots("judge");
+    return Response.json({ deleted: true });
+  }
+
+  private async handleReorderActs(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const body = await this.adminBody(request);
+    const ids =
+      isRecord(body) &&
+      Array.isArray(body.ids) &&
+      body.ids.every((id) => typeof id === "string")
+        ? body.ids
+        : null;
+    if (!ids || !replaceActOrder(this.ctx.storage, PRIMARY_SHOW_ID, ids))
+      return Response.json(
+        { error: "Invalid complete order" },
+        { status: 400 },
+      );
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("audience");
+    this.broadcastSnapshots("judge");
+    return Response.json({ reordered: true });
+  }
+
+  private async handleCreateCue(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const body = await this.adminBody(request);
+    const input = parseCueInput(body);
+    const actIdentifier =
+      isRecord(body) && typeof body.actId === "string" ? body.actId : null;
+    if (!input || !actIdentifier)
+      return Response.json({ error: "Invalid cue" }, { status: 400 });
+    const id = createCue(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      actIdentifier,
+      input,
+    );
+    if (!id)
+      return Response.json(
+        { error: "Act or asset not found" },
+        { status: 409 },
+      );
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    return Response.json({ cueId: id }, { status: 201 });
+  }
+
+  private async handleEditCue(
+    request: Request,
+    requestedId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const input = parseCueInput(await this.adminBody(request));
+    if (
+      !input ||
+      !editCue(this.ctx.storage, PRIMARY_SHOW_ID, requestedId, input)
+    )
+      return Response.json(
+        { error: "Cue or asset not found" },
+        { status: 404 },
+      );
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    return Response.json({ updated: true });
+  }
+
+  private async handleDuplicateCue(
+    request: Request,
+    requestedId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const id = duplicateCue(this.ctx.storage, PRIMARY_SHOW_ID, requestedId);
+    if (!id) return Response.json({ error: "Cue not found" }, { status: 404 });
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    return Response.json({ cueId: id }, { status: 201 });
+  }
+
+  private async handleDeleteCue(
+    request: Request,
+    requestedId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    if (!deleteCue(this.ctx.storage, PRIMARY_SHOW_ID, requestedId))
+      return Response.json({ error: "Cue not found" }, { status: 404 });
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    return Response.json({ deleted: true });
+  }
+
+  private async handleReorderCues(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const body = await this.adminBody(request);
+    const actIdentifier =
+      isRecord(body) && typeof body.actId === "string" ? body.actId : null;
+    const ids =
+      isRecord(body) &&
+      Array.isArray(body.ids) &&
+      body.ids.every((id) => typeof id === "string")
+        ? body.ids
+        : null;
+    if (
+      !actIdentifier ||
+      !ids ||
+      !replaceCueOrder(this.ctx.storage, PRIMARY_SHOW_ID, actIdentifier, ids)
+    )
+      return Response.json(
+        { error: "Invalid complete order" },
+        { status: 400 },
+      );
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    return Response.json({ reordered: true });
+  }
+
+  private async handleListMedia(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    return Response.json({
+      assets: listMediaAssets(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+    });
+  }
+
+  private async handleUploadMedia(
+    request: Request,
+    url: URL,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const result = await uploadMediaAsset(
+      this.ctx.storage,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+      request,
+      url.searchParams.get("filename"),
+    );
+    return result.ok
+      ? Response.json({ asset: result.asset }, { status: 201 })
+      : Response.json({ error: result.error }, { status: result.status });
+  }
+
+  private async handleDeleteMedia(
+    request: Request,
+    assetId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const result = await deleteMediaAsset(
+      this.ctx.storage,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+      assetId,
+    );
+    return result === "deleted"
+      ? Response.json({ deleted: true })
+      : Response.json(
+          { error: result },
+          { status: result === "not_found" ? 404 : 409 },
+        );
+  }
+
   private queueAggregateUpdate(
     revision: ReturnType<typeof showRevision>,
     aggregate: AudienceAggregate,
@@ -513,6 +803,44 @@ export class ShowCoordinator extends DurableObject<Env> {
         succeeded: parsed.message.succeeded,
         ...(parsed.message.detail ? { detail: parsed.message.detail } : {}),
       });
+      return;
+    }
+
+    if (parsed.message.type === "judge_submit") {
+      if (attachment.role.kind !== "judge") {
+        this.sendProtocolError(
+          ws,
+          "unauthorised",
+          "Only a judge may submit a score",
+        );
+        return;
+      }
+      const outcome = submitJudgeScore(
+        this.ctx.storage,
+        PRIMARY_SHOW_ID,
+        attachment.role.judgeId,
+        parsed.message.input.raw,
+      );
+      this.sendOne(ws, {
+        type: "judge_submission_update",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: outcome.revision,
+        accepted: outcome.ok && outcome.accepted,
+        locked: outcome.ok,
+        ...(!outcome.ok &&
+        outcome.code !== "UNAUTHORISED" &&
+        outcome.code !== "NO_CURRENT_ACT"
+          ? { reason: outcome.code }
+          : {}),
+      });
+      if (outcome.ok) {
+        this.sendSnapshot(ws, attachment.role);
+        if (outcome.accepted) {
+          this.broadcastSnapshots("admin");
+          if (this.currentDisplayMode() === "SCOREBOARD")
+            this.broadcastSnapshots("projector");
+        }
+      }
       return;
     }
 
@@ -656,9 +984,13 @@ export class ShowCoordinator extends DurableObject<Env> {
             type: "media_command",
             protocolVersion: PROTOCOL_VERSION,
             revision,
+            executionId: command.commandId,
             commandId: command.commandId,
             action,
             cueId: projector.runtime.preparedCueId,
+            ...(command.type === "SEEK_MEDIA"
+              ? { positionMs: command.positionMs }
+              : {}),
           });
         }
       }
@@ -693,7 +1025,19 @@ export class ShowCoordinator extends DurableObject<Env> {
 
   private mediaAction(
     command: AdminCommand,
-  ): "prepare" | "play" | "pause" | "stop" | "replay" | "black" | null {
+  ):
+    | "prepare"
+    | "play"
+    | "pause"
+    | "resume"
+    | "stop"
+    | "restart"
+    | "replay"
+    | "seek"
+    | "next"
+    | "previous"
+    | "black"
+    | null {
     switch (command.type) {
       case "PREPARE_CUE":
         return "prepare";
@@ -701,10 +1045,20 @@ export class ShowCoordinator extends DurableObject<Env> {
         return "play";
       case "PAUSE_MEDIA":
         return "pause";
+      case "RESUME_MEDIA":
+        return "resume";
       case "STOP_MEDIA":
         return "stop";
+      case "RESTART_MEDIA":
+        return "restart";
       case "REPLAY_MEDIA":
         return "replay";
+      case "SEEK_MEDIA":
+        return "seek";
+      case "NEXT_CUE":
+        return "next";
+      case "PREVIOUS_CUE":
+        return "previous";
       case "BLACK_SCREEN":
         return "black";
       default:
@@ -763,6 +1117,18 @@ export class ShowCoordinator extends DurableObject<Env> {
     });
   }
 
+  private broadcastSnapshots(targetRole: ConnectionRole["kind"]): void {
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (
+        attachment?.phase === "ready" &&
+        attachment.role.kind === targetRole
+      ) {
+        this.sendSnapshot(ws, attachment.role);
+      }
+    }
+  }
+
   private currentRevision(): ReturnType<typeof showRevision> {
     const row = this.ctx.storage.sql
       .exec<{ revision: number }>(
@@ -781,6 +1147,16 @@ export class ShowCoordinator extends DurableObject<Env> {
       )
       .toArray()[0];
     return row?.result_reveal_state === "REVEALED" ? "REVEALED" : "HIDDEN";
+  }
+
+  private currentDisplayMode(): string {
+    const row = this.ctx.storage.sql
+      .exec<{ display_mode: string }>(
+        "SELECT display_mode FROM shows WHERE id = ?",
+        PRIMARY_SHOW_ID,
+      )
+      .toArray()[0];
+    return row?.display_mode ?? "LOBBY";
   }
 
   private socketAttachment(ws: WebSocket): SocketAttachment | null {

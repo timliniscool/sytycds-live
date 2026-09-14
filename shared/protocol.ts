@@ -121,11 +121,31 @@ export interface JudgePermissionUpdateMessage extends RevisionedServerMessage {
   state: JudgePermissionState;
 }
 
+export interface JudgeSubmissionUpdateMessage extends RevisionedServerMessage {
+  type: "judge_submission_update";
+  accepted: boolean;
+  locked: boolean;
+  reason?: "VOTING_CLOSED" | "WRONG_ACT" | "INVALID_SCORE" | "TOO_LONG";
+}
+
 export interface MediaCommandMessage extends RevisionedServerMessage {
   type: "media_command";
+  executionId: CommandId;
   commandId: CommandId;
-  action: "prepare" | "play" | "pause" | "stop" | "replay" | "black";
+  action:
+    | "prepare"
+    | "play"
+    | "pause"
+    | "resume"
+    | "stop"
+    | "restart"
+    | "replay"
+    | "seek"
+    | "next"
+    | "previous"
+    | "black";
   cueId: CueId | null;
+  positionMs?: number;
 }
 
 export interface ResultRevealMessage extends RevisionedServerMessage {
@@ -166,6 +186,7 @@ export type ServerMessage =
   | AggregateUpdateMessage
   | VotingStateUpdateMessage
   | JudgePermissionUpdateMessage
+  | JudgeSubmissionUpdateMessage
   | MediaCommandMessage
   | ResultRevealMessage
   | CommandAcknowledgementMessage

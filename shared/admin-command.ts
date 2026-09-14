@@ -29,11 +29,17 @@ export type AdminCommandType =
   | "CLOSE_JUDGE"
   | "REVEAL_RESULT"
   | "HIDE_RESULT"
+  | "FINALISE_RESULT"
   | "PREPARE_CUE"
   | "PLAY_CUE"
   | "PAUSE_MEDIA"
+  | "RESUME_MEDIA"
   | "STOP_MEDIA"
+  | "RESTART_MEDIA"
   | "REPLAY_MEDIA"
+  | "SEEK_MEDIA"
+  | "NEXT_CUE"
+  | "PREVIOUS_CUE"
   | "BLACK_SCREEN";
 
 interface AdminCommandBase {
@@ -56,11 +62,17 @@ export type AdminCommand =
   | (AdminCommandBase & { type: "CLOSE_JUDGE"; judgeId: JudgeId })
   | (AdminCommandBase & { type: "REVEAL_RESULT" })
   | (AdminCommandBase & { type: "HIDE_RESULT" })
+  | (AdminCommandBase & { type: "FINALISE_RESULT" })
   | (AdminCommandBase & { type: "PREPARE_CUE"; cueId: CueId })
   | (AdminCommandBase & { type: "PLAY_CUE"; cueId?: CueId })
   | (AdminCommandBase & { type: "PAUSE_MEDIA" })
+  | (AdminCommandBase & { type: "RESUME_MEDIA" })
   | (AdminCommandBase & { type: "STOP_MEDIA" })
+  | (AdminCommandBase & { type: "RESTART_MEDIA" })
   | (AdminCommandBase & { type: "REPLAY_MEDIA" })
+  | (AdminCommandBase & { type: "SEEK_MEDIA"; positionMs: number })
+  | (AdminCommandBase & { type: "NEXT_CUE" })
+  | (AdminCommandBase & { type: "PREVIOUS_CUE" })
   | (AdminCommandBase & { type: "BLACK_SCREEN" });
 
 export type CommandStatus =
@@ -102,11 +114,17 @@ const COMMAND_TYPES: ReadonlySet<AdminCommandType> = new Set([
   "CLOSE_JUDGE",
   "REVEAL_RESULT",
   "HIDE_RESULT",
+  "FINALISE_RESULT",
   "PREPARE_CUE",
   "PLAY_CUE",
   "PAUSE_MEDIA",
+  "RESUME_MEDIA",
   "STOP_MEDIA",
+  "RESTART_MEDIA",
   "REPLAY_MEDIA",
+  "SEEK_MEDIA",
+  "NEXT_CUE",
+  "PREVIOUS_CUE",
   "BLACK_SCREEN",
 ]);
 
@@ -301,13 +319,35 @@ export function parseAdminCommand(value: unknown): AdminCommandParseResult {
     case "CLOSE_ALL_JUDGES":
     case "REVEAL_RESULT":
     case "HIDE_RESULT":
+    case "FINALISE_RESULT":
     case "PAUSE_MEDIA":
+    case "RESUME_MEDIA":
     case "STOP_MEDIA":
+    case "RESTART_MEDIA":
     case "REPLAY_MEDIA":
+    case "NEXT_CUE":
+    case "PREVIOUS_CUE":
     case "BLACK_SCREEN":
       return {
         ok: true,
         command: { ...base.base, type: base.base.type },
       } as AdminCommandParseResult;
+    case "SEEK_MEDIA":
+      return typeof base.value.positionMs === "number" &&
+        Number.isSafeInteger(base.value.positionMs) &&
+        base.value.positionMs >= 0
+        ? {
+            ok: true,
+            command: {
+              ...base.base,
+              type: "SEEK_MEDIA",
+              positionMs: base.value.positionMs,
+            },
+          }
+        : {
+            ok: false,
+            reason: "Invalid media seek position",
+            commandId: base.base.commandId,
+          };
   }
 }
