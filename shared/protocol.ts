@@ -168,6 +168,7 @@ export interface ProjectorAcknowledgementMessage extends RevisionedServerMessage
 export interface ConnectionCountMessage extends RevisionedServerMessage {
   type: "connection_count";
   audience: number;
+  judgeIds: readonly string[];
 }
 
 export interface ProtocolErrorMessage extends RevisionedServerMessage {

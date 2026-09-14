@@ -190,6 +190,14 @@ export interface PersistedResult {
   finalisedAt: string | null;
 }
 
+export interface AdminJudgeState {
+  id: JudgeId;
+  slot: number;
+  displayName: string;
+  permission: JudgePermissionState;
+  submission: JudgeSubmission | null;
+}
+
 export type OperationalResult =
   | {
       kind: "incomplete";
@@ -206,6 +214,7 @@ export interface AdminShowProjection {
   audienceAggregates: readonly AudienceAggregate[];
   runtime: ShowRuntimeState;
   results: Readonly<Record<string, OperationalResult>>;
+  judges: readonly AdminJudgeState[];
 }
 
 export interface ProjectorShowProjection {

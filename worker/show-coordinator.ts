@@ -1133,16 +1133,20 @@ export class ShowCoordinator extends DurableObject<Env> {
 
   private broadcastConnectionCount(): void {
     let audience = 0;
+    const judgeIds = new Set<string>();
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = this.socketAttachment(ws);
       if (attachment?.phase === "ready" && attachment.role.kind === "audience")
         audience += 1;
+      if (attachment?.phase === "ready" && attachment.role.kind === "judge")
+        judgeIds.add(attachment.role.judgeId);
     }
     this.broadcastAdmin({
       type: "connection_count",
       protocolVersion: PROTOCOL_VERSION,
       revision: this.currentRevision(),
       audience,
+      judgeIds: [...judgeIds],
     });
   }
 

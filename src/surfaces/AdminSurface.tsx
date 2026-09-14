@@ -130,6 +130,10 @@ function Console() {
     client,
     (state) => state.audienceConnections,
   );
+  const judgeConnections = useRealtimeSelector(
+    client,
+    (state) => state.judgeConnections,
+  );
   useEffect(() => {
     client.connect();
     return () => client.destroy();
@@ -203,6 +207,22 @@ function Console() {
     ? projection.audienceAggregates.find((entry) => entry.actId === active.id)
     : null;
   const votingOpen = projection.show.audienceVoteState === "OPEN";
+  const submittedScores = projection.judges.flatMap((judge) =>
+    judge.submission ? [judge.submission.effectiveScore] : [],
+  );
+  const judgeContribution =
+    submittedScores.length === 4
+      ? submittedScores.reduce((sum, score) => sum + score, 0) / 8
+      : null;
+  const judgeMean =
+    submittedScores.length === 4
+      ? submittedScores.reduce((sum, score) => sum + score, 0) / 4
+      : null;
+  const audienceContribution =
+    aggregate?.weightedMean === null || aggregate?.weightedMean === undefined
+      ? null
+      : aggregate.weightedMean / 2;
+  const result = active ? projection.results[active.id] : undefined;
   return (
     <main className="admin-console">
       <header className="admin-status">
@@ -356,6 +376,167 @@ function Console() {
             onClick={() => send("CLOSE_AUDIENCE_VOTING")}
           >
             CLOSE AUDIENCE VOTING
+          </button>
+        </div>
+      </section>
+      <section className="judge-workspace" aria-labelledby="judge-title">
+        <div className="region-title">
+          <p>ADJUDICATORS</p>
+          <h2 id="judge-title">Judge control matrix</h2>
+          <span>
+            Connection, permission, and submitted score are independent.
+          </span>
+        </div>
+        <div className="judge-global">
+          <button type="button" onClick={() => send("OPEN_ALL_JUDGES")}>
+            OPEN ALL
+          </button>
+          <button type="button" onClick={() => send("CLOSE_ALL_JUDGES")}>
+            CLOSE ALL
+          </button>
+        </div>
+        <div className="judge-grid">
+          {projection.judges.map((judge) => (
+            <article className="judge-row" key={judge.id}>
+              <header>
+                <b>{judge.displayName}</b>
+                <small>
+                  Judge {judge.slot} ·{" "}
+                  <span
+                    className={
+                      judgeConnections.has(judge.id)
+                        ? "signal signal--live"
+                        : "signal"
+                    }
+                  >
+                    {judgeConnections.has(judge.id) ? "CONNECTED" : "OFFLINE"}
+                  </span>
+                </small>
+              </header>
+              <div>
+                <span
+                  className={
+                    judge.permission === "OPEN"
+                      ? "signal signal--live"
+                      : "signal"
+                  }
+                >
+                  {judge.permission}
+                </span>
+                <span
+                  className={
+                    judge.submission ? "signal signal--locked" : "signal"
+                  }
+                >
+                  {judge.submission ? "LOCKED" : "WAITING"}
+                </span>
+              </div>
+              {judge.submission ? (
+                <p>
+                  <b>{judge.submission.input.raw}</b>
+                  {Math.abs(
+                    judge.submission.effectiveScore -
+                      (judge.submission.parsed.finiteValue ??
+                        judge.submission.effectiveScore),
+                  ) > 0.001 && (
+                    <> → {judge.submission.effectiveScore.toFixed(3)}</>
+                  )}
+                  <small>
+                    {new Date(
+                      judge.submission.submittedAt,
+                    ).toLocaleTimeString()}
+                  </small>
+                </p>
+              ) : (
+                <p className="judge-empty">No score submitted</p>
+              )}
+              <footer>
+                <button
+                  type="button"
+                  disabled={Boolean(judge.submission)}
+                  onClick={() => send("OPEN_JUDGE", { judgeId: judge.id })}
+                >
+                  OPEN
+                </button>
+                <button
+                  type="button"
+                  onClick={() => send("CLOSE_JUDGE", { judgeId: judge.id })}
+                >
+                  CLOSE
+                </button>
+              </footer>
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="score-workspace" aria-labelledby="score-title">
+        <div className="region-title">
+          <p>LIVE SCORING</p>
+          <h2 id="score-title">
+            {result?.kind === "incomplete"
+              ? "INCOMPLETE"
+              : result?.kind === "finalised"
+                ? "FINALISED"
+                : "PROVISIONAL"}
+          </h2>
+          <span>
+            {result?.kind === "incomplete"
+              ? `${result.missingJudgeSlots.length} judge score(s) and${result.audienceMissing ? " audience votes" : ""} remaining`
+              : active?.actName}
+          </span>
+        </div>
+        <div className="score-metrics">
+          <span>
+            <small>Audience weighted</small>
+            <b>{aggregate?.weightedMean?.toFixed(2) ?? "—"}</b>
+            <em>{aggregate?.voteCount ?? 0} votes</em>
+          </span>
+          <span>
+            <small>Audience 50%</small>
+            <b>{audienceContribution?.toFixed(3) ?? "—"}</b>
+          </span>
+          <span>
+            <small>Judge mean</small>
+            <b>{judgeMean?.toFixed(3) ?? "—"}</b>
+          </span>
+          <span>
+            <small>Judges 50%</small>
+            <b>{judgeContribution?.toFixed(3) ?? "—"}</b>
+            <em>{submittedScores.length}/4 locked</em>
+          </span>
+          <span>
+            <small>Final result</small>
+            <b>
+              {result?.kind === "incomplete" || !result
+                ? "—"
+                : result.value.toFixed(3)}
+            </b>
+          </span>
+        </div>
+        <div className="score-actions">
+          <button
+            type="button"
+            disabled={result?.kind !== "provisional"}
+            onClick={() => send("FINALISE_RESULT")}
+          >
+            FINALISE
+          </button>
+          <button
+            type="button"
+            disabled={
+              result?.kind !== "finalised" ||
+              projection.show.resultRevealState === "REVEALED"
+            }
+            onClick={() => send("REVEAL_RESULT")}
+          >
+            REVEAL
+          </button>
+          <button
+            type="button"
+            disabled={projection.show.resultRevealState !== "REVEALED"}
+            onClick={() => send("HIDE_RESULT")}
+          >
+            HIDE
           </button>
         </div>
       </section>

@@ -10,6 +10,7 @@ import {
   showId,
   showRevision,
   type AdminShowProjection,
+  type AdminJudgeState,
   type AudienceAggregate,
   type AudienceShowProjection,
   type ClientProjection,
@@ -1237,6 +1238,61 @@ export function projectShowState(
         operationalResult(storage.sql, show.id, act.id),
       ]),
     ),
+    judges: storage.sql
+      .exec<{
+        id: string;
+        slot: number;
+        display_name: string;
+        raw_input: string | null;
+        parsed_classification: string | null;
+        finite_value: number | null;
+        effective_score: number | null;
+        submitted_at: string | null;
+      }>(
+        `SELECT j.id, j.slot, j.display_name, s.raw_input, s.parsed_classification,
+                s.finite_value, s.effective_score, s.submitted_at
+         FROM judges j LEFT JOIN judge_submissions s
+           ON s.show_id = j.show_id AND s.judge_id = j.id AND s.act_id = ?
+         WHERE j.show_id = ? AND j.revoked_at IS NULL ORDER BY j.slot`,
+        show.active_act_id ?? "",
+        show.id,
+      )
+      .toArray()
+      .map((judge): AdminJudgeState => ({
+        id: judgeId(judge.id),
+        slot: judge.slot,
+        displayName: judge.display_name,
+        permission: permissionForJudge(storage.sql, show, runtime, judge.id),
+        submission:
+          judge.raw_input !== null &&
+          judge.parsed_classification !== null &&
+          judge.effective_score !== null &&
+          judge.submitted_at !== null
+            ? {
+                showId: showId(show.id),
+                actId: actId(show.active_act_id ?? ""),
+                judgeId: judgeId(judge.id),
+                input: { raw: judge.raw_input },
+                parsed:
+                  judge.parsed_classification === "FINITE"
+                    ? {
+                        classification: "FINITE",
+                        finiteValue: judge.finite_value ?? 0,
+                      }
+                    : judge.parsed_classification === "POSITIVE_INFINITY"
+                      ? {
+                          classification: "POSITIVE_INFINITY",
+                          finiteValue: null,
+                        }
+                      : {
+                          classification: "NEGATIVE_INFINITY",
+                          finiteValue: null,
+                        },
+                effectiveScore: judge.effective_score,
+                submittedAt: judge.submitted_at,
+              }
+            : null,
+      })),
   };
   return projection;
 }

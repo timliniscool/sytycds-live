@@ -261,6 +261,104 @@ input:focus-visible {
   display: flex;
   gap: 0.4rem;
 }
+.judge-workspace,
+.score-workspace {
+  border-bottom: 1px solid var(--admin-line);
+  background: #0d1719;
+}
+.judge-global,
+.score-actions {
+  display: flex;
+  gap: 0.45rem;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid var(--admin-line);
+}
+.judge-global button:first-child {
+  border-color: var(--admin-live);
+  color: var(--admin-live);
+}
+.judge-global button:last-child,
+.score-actions button:last-child {
+  border-color: var(--admin-danger);
+  color: #ffd7d7;
+}
+.judge-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.judge-row {
+  min-width: 0;
+  padding: 0.75rem;
+  border-right: 1px solid var(--admin-line);
+}
+.judge-row:last-child {
+  border-right: 0;
+}
+.judge-row header b,
+.judge-row header small,
+.judge-row p small {
+  display: block;
+}
+.judge-row header small,
+.judge-row p small,
+.judge-empty {
+  color: var(--admin-dim);
+  font-size: 0.7rem;
+}
+.judge-row p {
+  min-height: 2.3rem;
+  margin: 0.6rem 0;
+}
+.judge-row p > b {
+  color: var(--admin-accent);
+}
+.judge-row footer {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.35rem;
+}
+.signal {
+  display: inline-block;
+  margin: 0.4rem 0.35rem 0.1rem 0;
+  color: var(--admin-dim);
+  font-size: 0.62rem;
+  font-weight: 900;
+  letter-spacing: 0.07em;
+}
+.signal--live {
+  color: var(--admin-live);
+}
+.signal--locked {
+  color: var(--admin-accent);
+}
+.score-metrics {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1px;
+  background: var(--admin-line);
+}
+.score-metrics span {
+  min-width: 0;
+  padding: 0.75rem 1rem;
+  background: #101d20;
+}
+.score-metrics small,
+.score-metrics em {
+  display: block;
+  color: var(--admin-dim);
+  font-size: 0.7rem;
+  font-style: normal;
+}
+.score-metrics b {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--admin-ink);
+  font-size: 1.4rem;
+}
+.score-metrics span:last-child b {
+  color: var(--admin-accent);
+}
 .projector {
   position: relative;
   min-height: 100dvh;
@@ -349,6 +447,16 @@ input:focus-visible {
   }
   .admin-status output {
     display: none;
+  }
+  .judge-grid,
+  .score-metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+  .judge-row:nth-child(2) {
+    border-right: 0;
+  }
+  .judge-row:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--admin-line);
   }
 }
 

@@ -30,6 +30,7 @@ export interface RealtimeState {
   lastMediaCommand: MediaCommandMessage | null;
   lastCommandAcknowledgement: CommandAcknowledgementMessage | null;
   audienceConnections: number;
+  judgeConnections: ReadonlySet<string>;
   lastError: string | null;
 }
 
@@ -66,6 +67,7 @@ const INITIAL_STATE: RealtimeState = {
   lastMediaCommand: null,
   lastCommandAcknowledgement: null,
   audienceConnections: 0,
+  judgeConnections: new Set(),
   lastError: null,
 };
 
@@ -454,6 +456,7 @@ export class RealtimeClient {
     let lastMediaCommand = this.state.lastMediaCommand;
     let lastCommandAcknowledgement = this.state.lastCommandAcknowledgement;
     let audienceConnections = this.state.audienceConnections;
+    let judgeConnections = this.state.judgeConnections;
 
     switch (message.type) {
       case "state_patch":
@@ -506,6 +509,7 @@ export class RealtimeClient {
         break;
       case "connection_count":
         audienceConnections = message.audience;
+        judgeConnections = new Set(message.judgeIds);
         break;
       case "protocol_error":
         break;
@@ -526,6 +530,7 @@ export class RealtimeClient {
       lastMediaCommand,
       lastCommandAcknowledgement,
       audienceConnections,
+      judgeConnections,
       lastError: message.type === "protocol_error" ? message.detail : null,
     });
   }
