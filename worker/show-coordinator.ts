@@ -62,6 +62,7 @@ import { configuredPublicOrigin } from "./public-origin";
 import { hasSameOrigin } from "./security";
 import { initialiseSchema, readSchemaVersion } from "./schema";
 import { parseShowInput, upsertShow } from "./show-config";
+import { RESET_CONFIRMATION, isResetConfirmed, resetShow } from "./show-reset";
 import { authenticateSocketRole } from "./socket-auth";
 import {
   executeAdminCommand,
@@ -174,6 +175,9 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
     if (url.pathname === "/api/admin/show" && request.method === "PUT") {
       return this.handleUpsertShow(request);
+    }
+    if (url.pathname === "/api/admin/show/reset" && request.method === "POST") {
+      return this.handleResetShow(request);
     }
     if (url.pathname === "/api/admin/judges" && request.method === "GET") {
       return this.handleListJudges(request);
@@ -396,6 +400,31 @@ export class ShowCoordinator extends DurableObject<Env> {
     this.broadcastSnapshots("audience");
     this.broadcastSnapshots("judge");
     return Response.json(result, { status: result.created ? 201 : 200 });
+  }
+
+  /** Wipes everything; guarded by session, same origin and a typed phrase. */
+  private async handleResetShow(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    if (!isResetConfirmed(await this.adminBody(request))) {
+      return Response.json(
+        { error: `Type ${RESET_CONFIRMATION} to confirm` },
+        { status: 400 },
+      );
+    }
+    const result = await resetShow(
+      this.ctx.storage,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+    );
+    this.lastProjectorError = null;
+    // Every client is told the show is gone; the console offers creation.
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("audience");
+    this.broadcastSnapshots("judge");
+    return Response.json(result);
   }
 
   private async handleHistory(request: Request, url: URL): Promise<Response> {

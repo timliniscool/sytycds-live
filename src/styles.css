@@ -2446,3 +2446,37 @@ input:focus-visible {
     grid-column: 1;
   }
 }
+
+.show-identity__reset {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.8rem 1rem;
+  border-top: 2px solid #3a2326;
+  background: #150e10;
+}
+.show-identity__reset p {
+  margin: 0;
+  color: #d59aa0;
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+.show-identity__reset span {
+  color: #d9c3c5;
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.show-identity__reset input {
+  min-height: 38px;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--admin-danger);
+  border-radius: var(--admin-radius);
+  background: #07110f;
+  color: var(--admin-ink);
+}
+.show-identity__reset-fire {
+  border-color: var(--admin-danger) !important;
+  background: #6b1c21 !important;
+  color: #fff !important;
+  font-weight: 900;
+}
