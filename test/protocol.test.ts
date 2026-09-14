@@ -37,6 +37,10 @@ describe("realtime protocol", () => {
       role: "audience",
       show: {
         title: "Show",
+        shortName: "",
+        themeId: "navy-bismarck",
+        fontFamily: "system-ui",
+        reactionsEnabled: true,
         intermissionMessage: "",
         emergencyMessage: "",
         displayMode: "LOBBY",

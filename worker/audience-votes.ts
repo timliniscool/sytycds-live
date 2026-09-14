@@ -71,6 +71,13 @@ export async function resolveVoterIdentity(
   };
 }
 
+export async function existingVoterIdentityHash(
+  request: Request,
+): Promise<ArrayBuffer | null> {
+  const token = parseCookie(request, voterCookieName());
+  return isOpaqueToken(token) ? tokenHash(token) : null;
+}
+
 export function parseAudienceVoteRequest(
   value: unknown,
 ):

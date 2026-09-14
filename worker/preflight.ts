@@ -67,9 +67,13 @@ function referencedAssets(
   const rows = sql
     .exec<AssetRow>(
       `SELECT DISTINCT m.id, m.object_key, m.mime_type, m.original_filename
-       FROM cue_asset_references r
-       JOIN media_assets m ON m.id = r.asset_id
-       WHERE r.show_id = ? AND m.deleted_at IS NULL`,
+       FROM media_assets m
+       WHERE m.show_id = ? AND m.deleted_at IS NULL AND (
+         EXISTS (SELECT 1 FROM cue_asset_references r
+           WHERE r.show_id = m.show_id AND r.asset_id = m.id)
+         OR EXISTS (SELECT 1 FROM acts a
+           WHERE a.show_id = m.show_id AND a.public_image_asset_id = m.id)
+       )`,
       showIdentifier,
     )
     .toArray();
@@ -258,7 +262,7 @@ export async function runServerPreflight(
     judges: () => {
       const judges = context.sql
         .exec<{ slot: number; revoked: string | null }>(
-          "SELECT slot, revoked_at AS revoked FROM judges WHERE show_id = ? ORDER BY slot",
+          "SELECT slot, CASE WHEN active = 1 AND credential_revoked_at IS NULL THEN NULL ELSE COALESCE(credential_revoked_at, deactivated_at, 'inactive') END AS revoked FROM show_judges WHERE show_id = ? ORDER BY slot",
           context.showIdentifier,
         )
         .toArray();
@@ -268,21 +272,26 @@ export async function runServerPreflight(
           "judges",
           "Judge links",
           "FAILURE",
-          "No judges have been created. Issue the four judge links.",
+          "No judges have been configured. Configure between one and eight judges.",
         );
-      if (active.length !== 4)
+      if (active.length < 1 || active.length > 8)
         return item(
           "judges",
           "Judge links",
           "FAILURE",
-          `${active.length} of 4 judge links are active. Rotate the revoked judge${4 - active.length === 1 ? "" : "s"} to reissue.`,
+          `${active.length} judge links are active; configure between one and eight.`,
         );
-      return item("judges", "Judge links", "READY", "Four active judge links");
+      return item(
+        "judges",
+        "Judge links",
+        "READY",
+        `${active.length} active judge link${active.length === 1 ? "" : "s"}`,
+      );
     },
     judge_connections: () => {
       const judges = context.sql
         .exec<{ id: string; slot: number; display_name: string }>(
-          "SELECT id, slot, display_name FROM judges WHERE show_id = ? AND revoked_at IS NULL ORDER BY slot",
+          "SELECT id, slot, display_name FROM show_judges WHERE show_id = ? AND active = 1 AND credential_revoked_at IS NULL ORDER BY slot",
           context.showIdentifier,
         )
         .toArray();
@@ -296,7 +305,7 @@ export async function runServerPreflight(
             judges.length === 0 ? "WARNING" : "READY",
             judges.length === 0
               ? "No judges to connect"
-              : "All four judge devices are connected",
+              : `All ${judges.length} judge device${judges.length === 1 ? " is" : "s are"} connected`,
             false,
           )
         : item(
@@ -314,7 +323,7 @@ export async function runServerPreflight(
           "projector",
           "Projector connected",
           "FAILURE",
-          "No projector is connected. Open /projector with its access token on the hall display.",
+          "No projector is connected. Open /projector and enter a one-time pairing code.",
         );
       return item(
         "projector",

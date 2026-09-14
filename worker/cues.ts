@@ -136,21 +136,42 @@ function referencedAssets(operations: readonly CueOperation[]): string[] {
   ];
 }
 
-function verifyAssets(
+export function cueValidationState(
   sql: SqlStorage,
   showIdentifier: string,
-  assets: readonly string[],
-): boolean {
-  return assets.every(
-    (id) =>
-      sql
-        .exec<{ present: number }>(
-          "SELECT 1 AS present FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL",
-          showIdentifier,
-          id,
-        )
-        .toArray().length > 0,
-  );
+  operations: readonly CueOperation[],
+): "VALID" | "MISSING_MEDIA" | "INCOMPATIBLE_MEDIA" {
+  for (const operation of operations) {
+    const reference =
+      operation.kind === "visual"
+        ? operation.visual.sourceKey
+        : operation.kind === "audio"
+          ? operation.assetId
+          : null;
+    if (!reference) continue;
+    const asset = sql
+      .exec<{ mime_type: string }>(
+        "SELECT mime_type FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL",
+        showIdentifier,
+        reference,
+      )
+      .toArray()[0];
+    if (!asset) return "MISSING_MEDIA";
+    let compatible = false;
+    if (operation.kind === "audio")
+      compatible =
+        asset.mime_type.startsWith("audio/") ||
+        asset.mime_type.startsWith("video/");
+    if (operation.kind === "visual")
+      compatible =
+        operation.visual.kind === "IMAGE" || operation.visual.kind === "SLIDES"
+          ? asset.mime_type.startsWith("image/")
+          : operation.visual.kind === "VIDEO"
+            ? asset.mime_type.startsWith("video/")
+            : false;
+    if (!compatible) return "INCOMPATIBLE_MEDIA";
+  }
+  return "VALID";
 }
 
 function legacyColumns(operations: readonly CueOperation[]): {
@@ -195,7 +216,11 @@ export function createCue(
     )
       return null;
     const assets = referencedAssets(input.operations);
-    if (!verifyAssets(storage.sql, showIdentifier, assets)) return null;
+    if (
+      cueValidationState(storage.sql, showIdentifier, input.operations) !==
+      "VALID"
+    )
+      return null;
     const id = `cue-${crypto.randomUUID()}`;
     const position = storage.sql
       .exec<{ position: number }>(
@@ -256,11 +281,8 @@ export function editCue(
       .toArray()[0];
     if (
       !cue ||
-      !verifyAssets(
-        storage.sql,
-        showIdentifier,
-        referencedAssets(input.operations),
-      )
+      cueValidationState(storage.sql, showIdentifier, input.operations) !==
+        "VALID"
     )
       return false;
     const timestamp = new Date().toISOString();

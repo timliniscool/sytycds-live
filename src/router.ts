@@ -1,3 +1,8 @@
+import { PLATFORM_NAME } from "../shared/platform";
+import { DEFAULT_THEME_ID, themeById } from "../shared/themes";
+
+const DEFAULT_THEME = themeById(DEFAULT_THEME_ID);
+
 export type Route =
   | { kind: "admin" }
   | { kind: "projector" }
@@ -50,33 +55,33 @@ export function metadataForRoute(route: Route): RouteMetadata {
   switch (route.kind) {
     case "admin":
       return {
-        title: "Show control · SYTYCDS",
-        description: "SYTYCDS broadcast show-control console.",
-        themeColor: "#101417",
+        title: `Show control · ${PLATFORM_NAME}`,
+        description: `${PLATFORM_NAME} broadcast show-control console.`,
+        themeColor: DEFAULT_THEME.web.background,
       };
     case "projector":
       return {
-        title: "SYTYCDS live presentation",
+        title: `${PLATFORM_NAME} presentation`,
         description: "Live event presentation display.",
-        themeColor: "#050607",
+        themeColor: DEFAULT_THEME.projector.background,
       };
     case "vote":
       return {
-        title: "Vote · SYTYCDS",
-        description: "Cast your SYTYCDS audience vote.",
-        themeColor: "#15211c",
+        title: `Vote · ${PLATFORM_NAME}`,
+        description: `Cast your ${PLATFORM_NAME} audience vote.`,
+        themeColor: DEFAULT_THEME.web.background,
       };
     case "judge":
       return {
-        title: "Judge · SYTYCDS",
-        description: "Private SYTYCDS judge scoring.",
-        themeColor: "#1c1713",
+        title: `Judge · ${PLATFORM_NAME}`,
+        description: `Private ${PLATFORM_NAME} judge scoring.`,
+        themeColor: DEFAULT_THEME.web.background,
       };
     case "not-found":
       return {
-        title: "Page not found · SYTYCDS",
-        description: "The requested SYTYCDS page was not found.",
-        themeColor: "#101417",
+        title: `Page not found · ${PLATFORM_NAME}`,
+        description: `The requested ${PLATFORM_NAME} page was not found.`,
+        themeColor: DEFAULT_THEME.web.background,
       };
   }
 }

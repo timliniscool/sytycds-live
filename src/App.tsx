@@ -1,6 +1,7 @@
 import { Component, lazy, Suspense, useEffect, type ReactNode } from "react";
 
 import { metadataForRoute, resolveRoute, type Route } from "./router";
+import { PLATFORM_NAME } from "../shared/platform";
 
 const AdminSurface = lazy(() => import("./surfaces/AdminSurface"));
 const ProjectorSurface = lazy(() => import("./surfaces/ProjectorSurface"));
@@ -69,7 +70,7 @@ function RouteDocumentMetadata({ route }: { route: Route }) {
 function FatalScreen({ title }: { title: string }) {
   return (
     <main className="fatal-screen">
-      <p>SYTYCDS</p>
+      <p>{PLATFORM_NAME}</p>
       <h1>{title}</h1>
       <p>Please use a current browser, then reload this page.</p>
     </main>
@@ -79,7 +80,7 @@ function FatalScreen({ title }: { title: string }) {
 function NotFoundSurface() {
   return (
     <main className="not-found" aria-labelledby="not-found-title">
-      <p>SYTYCDS</p>
+      <p>{PLATFORM_NAME}</p>
       <h1 id="not-found-title">This show surface does not exist.</h1>
       <a href="/vote">Go to audience voting</a>
     </main>

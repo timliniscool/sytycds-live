@@ -1,11 +1,13 @@
 import { judgeId, type JudgeId } from "../shared/domain";
 import { generateOpaqueToken, tokenHash } from "./security";
+import { scoringDataExists } from "./scoring-config";
 
 interface JudgeRow extends Record<string, SqlStorageValue> {
   id: string;
   slot: number;
   display_name: string;
   revoked_at: string | null;
+  active: number;
 }
 
 export interface JudgeLinkIssue {
@@ -20,13 +22,15 @@ export interface AdminJudgeSummary {
   slot: number;
   displayName: string;
   active: boolean;
+  configured: boolean;
   /** Raw tokens are intentionally never recoverable; rotate to issue a new link. */
   linkAvailable: false;
 }
 
 function validateLabels(labels: readonly string[]): boolean {
   return (
-    labels.length === 4 &&
+    labels.length >= 1 &&
+    labels.length <= 8 &&
     labels.every((label) => label.trim().length > 0 && label.length <= 120)
   );
 }
@@ -43,6 +47,7 @@ export async function createJudges(
   if (!validateLabels(labels)) {
     return null;
   }
+  if (scoringDataExists(storage.sql, showIdentifier)) return null;
   const issued = await Promise.all(
     labels.map(async (displayName, index) => {
       const token = generateOpaqueToken();
@@ -64,7 +69,7 @@ export async function createJudges(
       .toArray()[0];
     const count = storage.sql
       .exec<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM judges WHERE show_id = ?",
+        "SELECT COUNT(*) AS count FROM show_judges WHERE show_id = ?",
         showIdentifier,
       )
       .one().count;
@@ -74,9 +79,10 @@ export async function createJudges(
     const timestamp = new Date().toISOString();
     for (const judge of issued) {
       storage.sql.exec(
-        `INSERT INTO judges (
-          id, show_id, slot, display_name, token_hash, created_at, revoked_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+        `INSERT INTO show_judges (
+          id, show_id, slot, display_name, token_hash, active, created_at,
+          deactivated_at, credential_revoked_at
+        ) VALUES (?, ?, ?, ?, ?, 1, ?, NULL, NULL)`,
         judge.judgeId,
         showIdentifier,
         judge.slot,
@@ -104,7 +110,7 @@ export async function rotateJudgeToken(
   return storage.transactionSync(() => {
     const judge = storage.sql
       .exec<JudgeRow>(
-        `SELECT id, slot, display_name, revoked_at FROM judges
+        `SELECT id, slot, display_name, credential_revoked_at AS revoked_at, active FROM show_judges
          WHERE show_id = ? AND id = ?`,
         showIdentifier,
         requestedJudgeId,
@@ -114,7 +120,7 @@ export async function rotateJudgeToken(
       return null;
     }
     storage.sql.exec(
-      `UPDATE judges SET token_hash = ?, revoked_at = NULL
+      `UPDATE show_judges SET token_hash = ?, credential_revoked_at = NULL
        WHERE show_id = ? AND id = ?`,
       hash,
       showIdentifier,
@@ -137,8 +143,8 @@ export function revokeJudge(
 ): boolean {
   return storage.transactionSync(() => {
     const result = storage.sql.exec(
-      `UPDATE judges SET revoked_at = ?
-       WHERE show_id = ? AND id = ? AND revoked_at IS NULL`,
+      `UPDATE show_judges SET credential_revoked_at = ?
+       WHERE show_id = ? AND id = ? AND credential_revoked_at IS NULL`,
       new Date().toISOString(),
       showIdentifier,
       requestedJudgeId,
@@ -153,7 +159,7 @@ export function listJudges(
 ): AdminJudgeSummary[] {
   return sql
     .exec<JudgeRow>(
-      `SELECT id, slot, display_name, revoked_at FROM judges
+      `SELECT id, slot, display_name, credential_revoked_at AS revoked_at, active FROM show_judges
        WHERE show_id = ? ORDER BY slot`,
       showIdentifier,
     )
@@ -162,7 +168,34 @@ export function listJudges(
       id: judgeId(judge.id),
       slot: judge.slot,
       displayName: judge.display_name,
-      active: judge.revoked_at === null,
+      active: judge.active === 1 && judge.revoked_at === null,
+      configured: judge.active === 1,
       linkAvailable: false,
     }));
+}
+
+export function renameJudge(
+  storage: DurableObjectStorage,
+  showIdentifier: string,
+  requestedJudgeId: string,
+  displayName: string,
+): boolean {
+  const clean = displayName.replace(/\s+/gu, " ").trim();
+  if (clean.length === 0 || clean.length > 120) return false;
+  return storage.transactionSync(() => {
+    const timestamp = new Date().toISOString();
+    const result = storage.sql.exec(
+      "UPDATE show_judges SET display_name = ? WHERE show_id = ? AND id = ?",
+      clean,
+      showIdentifier,
+      requestedJudgeId,
+    );
+    if (result.rowsWritten !== 1) return false;
+    storage.sql.exec(
+      "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
+      timestamp,
+      showIdentifier,
+    );
+    return true;
+  });
 }

@@ -1,13 +1,13 @@
 :root {
-  --admin-ink: #d9e2e3;
-  --admin-dim: #829195;
-  --admin-base: #091012;
-  --admin-raised: #101c1f;
-  --admin-line: #294045;
-  --admin-accent: #e5c15b;
-  --admin-live: #4ee0a0;
-  --admin-warning: #f4a34f;
-  --admin-danger: #f05d5e;
+  --admin-ink: var(--theme-text, #d9e2e3);
+  --admin-dim: var(--theme-muted, #829195);
+  --admin-base: var(--theme-background, #091012);
+  --admin-raised: var(--theme-surface, #101c1f);
+  --admin-line: var(--theme-border, #294045);
+  --admin-accent: var(--theme-accent, #e5c15b);
+  --admin-live: var(--theme-success, #4ee0a0);
+  --admin-warning: var(--theme-warning, #f4a34f);
+  --admin-danger: var(--theme-danger, #f05d5e);
   --admin-space-1: 0.35rem;
   --admin-space-2: 0.65rem;
   --admin-space-3: 1rem;
@@ -2479,4 +2479,68 @@ input:focus-visible {
   background: #6b1c21 !important;
   color: #fff !important;
   font-weight: 900;
+}
+:root {
+  --theme-background: #071a2b;
+  --theme-surface: #0d2436;
+  --theme-surface-strong: #123047;
+  --theme-text: #f3f7f9;
+  --theme-muted: #a3b6be;
+  --theme-accent: #497183;
+  --theme-accent-strong: #6f98a9;
+  --theme-accent-soft: #173b50;
+  --theme-border: #234354;
+  --theme-focus: #8bb5c5;
+  --theme-hover: #16374c;
+  --theme-active: #214c62;
+  --theme-success: #4ee0a0;
+  --theme-warning: #f4a34f;
+  --theme-danger: #f05d5e;
+  --theme-on-accent: #071a2b;
+  --theme-font: system-ui, sans-serif;
+}
+
+body {
+  font-family: var(--theme-font);
+}
+
+.projector-pairing {
+  display: grid;
+  place-content: center;
+  gap: 1rem;
+  min-height: 100dvh;
+  padding: 2rem;
+  background: var(--theme-background);
+  color: var(--theme-text);
+  text-align: center;
+}
+
+.projector-pairing form {
+  display: grid;
+  gap: 0.75rem;
+  min-width: min(24rem, 80vw);
+}
+.projector-pairing input {
+  font: 700 2rem/1 var(--theme-font);
+  letter-spacing: 0.2em;
+  text-align: center;
+}
+
+.vote__reactions {
+  display: flex;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.5rem max(0.5rem, env(safe-area-inset-right))
+    max(0.5rem, env(safe-area-inset-bottom));
+}
+.vote__reactions button {
+  min-width: 48px;
+  min-height: 48px;
+  font-size: 1.45rem;
+}
+.vote__reaction--pulse {
+  transform: scale(1.18);
+}
+.scoreboard__judges {
+  grid-template-columns: repeat(auto-fit, minmax(min(12rem, 40vw), 1fr));
 }

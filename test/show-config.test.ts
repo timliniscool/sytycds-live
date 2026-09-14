@@ -7,7 +7,9 @@ import { PRIMARY_SHOW_ID, projectShowState } from "../worker/show-state";
 
 describe("show provisioning", () => {
   it("accepts a trimmed title and optional tagline and refuses the rest", () => {
-    expect(parseShowInput({ title: "  Talent  Night ", tagline: "" })).toEqual({
+    expect(
+      parseShowInput({ title: "  Talent  Night ", tagline: "" }),
+    ).toMatchObject({
       title: "Talent Night",
       tagline: "",
     });

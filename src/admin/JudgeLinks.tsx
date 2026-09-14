@@ -35,7 +35,12 @@ async function json<Value>(
  */
 export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
   const [judges, setJudges] = useState<JudgeSummary[] | null>(null);
-  const [labels, setLabels] = useState(["", "", "", ""]);
+  const [labels, setLabels] = useState([
+    "Judge 1",
+    "Judge 2",
+    "Judge 3",
+    "Judge 4",
+  ]);
   const [issued, setIssued] = useState<IssuedLink[]>([]);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -62,7 +67,7 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
     );
     setBusy(false);
     if (!result) {
-      setNotice("Four non-empty judge names are required.");
+      setNotice("Between one and eight non-empty judge names are required.");
       return;
     }
     setIssued(result.judges);
@@ -124,6 +129,27 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
             void create();
           }}
         >
+          <label>
+            Number of judges
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={labels.length}
+              onChange={(event) => {
+                const count = Math.min(
+                  8,
+                  Math.max(1, Number(event.target.value) || 1),
+                );
+                setLabels((current) =>
+                  Array.from(
+                    { length: count },
+                    (_, index) => current[index] ?? `Judge ${index + 1}`,
+                  ),
+                );
+              }}
+            />
+          </label>
           {labels.map((label, index) => (
             <label key={index}>
               Judge {index + 1}
@@ -143,7 +169,7 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
             </label>
           ))}
           <button type="submit" disabled={busy}>
-            ISSUE FOUR JUDGE LINKS
+            ISSUE {labels.length} JUDGE LINK{labels.length === 1 ? "" : "S"}
           </button>
           {notice && <p className="judge-links__notice">{notice}</p>}
         </form>

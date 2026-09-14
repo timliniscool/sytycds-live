@@ -52,6 +52,9 @@ function projection(
     show: {
       title: "Show",
       tagline: "",
+      shortName: "",
+      themeId: "navy-bismarck",
+      fontFamily: "system-ui",
       intermissionMessage: "Back at 8",
       emergencyMessage: "",
       displayMode: "PERFORMANCE",

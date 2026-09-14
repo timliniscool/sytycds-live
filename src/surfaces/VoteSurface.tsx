@@ -14,6 +14,10 @@ import {
   type VoteRejection,
   type VoteSubmission,
 } from "../vote/vote-view";
+import { REACTION_IDS, type ReactionId } from "../../shared/reactions";
+import { ReactionReporter } from "../vote/reaction-reporter";
+import { useShowTheme } from "../theme";
+import { PLATFORM_ATTRIBUTION } from "../../shared/platform";
 
 interface VoteResponse {
   accepted?: boolean;
@@ -51,6 +55,13 @@ export default function VoteSurface() {
     state.projection?.role === "audience" ? state.projection : null,
   );
   const connection = useRealtimeSelector(client, (state) => state.connection);
+  const reactionSampling = useRealtimeSelector(
+    client,
+    (state) => state.reactionSampling,
+  );
+  const reactionReporter = useRef(new ReactionReporter());
+  const [reactionPulse, setReactionPulse] = useState<ReactionId | null>(null);
+  useShowTheme(projection?.show.themeId, projection?.show.fontFamily);
 
   const [submission, setSubmission] = useState<VoteSubmission>({
     kind: "idle",
@@ -59,10 +70,7 @@ export default function VoteSurface() {
   const actId = projection?.show.activeActId ?? null;
   const votingOpen = projection?.show.audienceVoteState === "OPEN";
 
-  useEffect(() => {
-    client.connect();
-    return () => client.destroy();
-  }, [client]);
+  useEffect(() => () => client.destroy(), [client]);
 
   // A new act is a new vote. The locked state is then restored from the server
   // rather than trusted from this phone, so a reload cannot unlock anything.
@@ -86,10 +94,42 @@ export default function VoteSurface() {
         if (result?.locked) {
           setSubmission({ kind: "locked", score: result.score ?? null });
         }
+        client.connect();
       })
-      .catch(() => undefined);
+      .catch(() => client.connect());
     return () => controller.abort();
-  }, [actId]);
+  }, [actId, client]);
+
+  useEffect(() => {
+    if (!reactionSampling) return;
+    const config = {
+      slot: reactionSampling.slot,
+      serverOffsetMs: reactionSampling.serverNow - Date.now(),
+      epochMs: reactionSampling.epochMs,
+      intervalMs: reactionSampling.intervalMs,
+      eligibleSlots: reactionSampling.eligibleSlots,
+    };
+    const timer = setInterval(() => {
+      const packet = reactionReporter.current.flush(Date.now(), config);
+      if (packet)
+        client.send({
+          type: "reaction_summary",
+          protocolVersion: PROTOCOL_VERSION,
+          ...packet,
+        });
+    }, 1_000);
+    return () => clearInterval(timer);
+  }, [client, reactionSampling]);
+
+  function react(id: ReactionId): void {
+    reactionReporter.current.tap(id);
+    setReactionPulse(id);
+    navigator.vibrate?.(8);
+    window.setTimeout(
+      () => setReactionPulse((current) => (current === id ? null : current)),
+      220,
+    );
+  }
 
   useEffect(() => {
     if (votingOpen) setSawVotingOpen(true);
@@ -143,7 +183,9 @@ export default function VoteSurface() {
   return (
     <main className="vote" aria-live="polite">
       <header className="vote__head">
-        <p className="vote__mark">SO YOU THINK YOU CAN DO STUFF</p>
+        <p className="vote__mark">
+          {projection?.show.shortName || projection?.show.title || "Audience"}
+        </p>
         {view.kind === "VOTING" ||
         view.kind === "ACT" ||
         view.kind === "CLOSED" ? (
@@ -332,6 +374,31 @@ export default function VoteSurface() {
           </div>
         </div>
       )}
+      {projection?.show.reactionsEnabled &&
+        projection.show.displayMode !== "EMERGENCY" && (
+          <aside className="vote__reactions" aria-label="Reactions">
+            {REACTION_IDS.map((id) => (
+              <button
+                key={id}
+                type="button"
+                aria-label={id}
+                className={reactionPulse === id ? "vote__reaction--pulse" : ""}
+                onClick={() => react(id)}
+              >
+                {
+                  {
+                    applause: "👏",
+                    heart: "♥",
+                    fire: "🔥",
+                    laugh: "😂",
+                    wow: "😮",
+                  }[id]
+                }
+              </button>
+            ))}
+          </aside>
+        )}
+      <small className="platform-attribution">{PLATFORM_ATTRIBUTION}</small>
     </main>
   );
 }

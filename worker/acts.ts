@@ -17,12 +17,21 @@ export interface ActInput {
   actType: string;
   publicDescription: string;
   internalNotes: string;
+  publicImageAssetId?: string | null;
 }
 
 export function parseActInput(value: unknown): ActInput | null {
   if (!isRecord(value)) return null;
-  const fields = Object.keys(TEXT_LIMITS) as (keyof ActInput)[];
+  const fields = Object.keys(TEXT_LIMITS) as (keyof typeof TEXT_LIMITS)[];
   if (!fields.every((field) => typeof value[field] === "string")) return null;
+  const publicImageAssetId =
+    value.publicImageAssetId === null || value.publicImageAssetId === undefined
+      ? null
+      : typeof value.publicImageAssetId === "string" &&
+          /^asset-[A-Za-z0-9-]{1,128}$/u.test(value.publicImageAssetId)
+        ? value.publicImageAssetId
+        : undefined;
+  if (publicImageAssetId === undefined) return null;
   const candidate: ActInput = {
     performerName: (value.performerName as string).trim(),
     schoolYear: (value.schoolYear as string).trim(),
@@ -30,6 +39,7 @@ export function parseActInput(value: unknown): ActInput | null {
     actType: (value.actType as string).trim(),
     publicDescription: (value.publicDescription as string).trim(),
     internalNotes: (value.internalNotes as string).trim(),
+    publicImageAssetId,
   };
   if (
     candidate.performerName.length === 0 ||
@@ -61,11 +71,22 @@ export function createAct(
         showIdentifier,
       )
       .one().next_order;
+    if (
+      input.publicImageAssetId &&
+      !storage.sql
+        .exec<{ present: number }>(
+          "SELECT 1 AS present FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL AND mime_type LIKE 'image/%'",
+          showIdentifier,
+          input.publicImageAssetId,
+        )
+        .toArray()[0]
+    )
+      return null;
     const id = `act-${crypto.randomUUID()}`;
     const timestamp = new Date().toISOString();
     storage.sql.exec(
-      `INSERT INTO acts (id, show_id, order_index, performer_name, school_year, act_name, act_type, public_description, internal_notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO acts (id, show_id, order_index, performer_name, school_year, act_name, act_type, public_description, internal_notes, public_image_asset_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       showIdentifier,
       order,
@@ -75,6 +96,7 @@ export function createAct(
       input.actType,
       input.publicDescription,
       input.internalNotes,
+      input.publicImageAssetId ?? null,
       timestamp,
       timestamp,
     );
@@ -94,9 +116,20 @@ export function editAct(
   input: ActInput,
 ): boolean {
   return storage.transactionSync(() => {
+    if (
+      input.publicImageAssetId &&
+      !storage.sql
+        .exec<{ present: number }>(
+          "SELECT 1 AS present FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL AND mime_type LIKE 'image/%'",
+          showIdentifier,
+          input.publicImageAssetId,
+        )
+        .toArray()[0]
+    )
+      return false;
     const timestamp = new Date().toISOString();
     const updated = storage.sql.exec(
-      `UPDATE acts SET performer_name = ?, school_year = ?, act_name = ?, act_type = ?, public_description = ?, internal_notes = ?, updated_at = ?
+      `UPDATE acts SET performer_name = ?, school_year = ?, act_name = ?, act_type = ?, public_description = ?, internal_notes = ?, public_image_asset_id = ?, updated_at = ?
        WHERE show_id = ? AND id = ?`,
       input.performerName,
       input.schoolYear,
@@ -104,6 +137,7 @@ export function editAct(
       input.actType,
       input.publicDescription,
       input.internalNotes,
+      input.publicImageAssetId ?? null,
       timestamp,
       showIdentifier,
       requestedId,
@@ -144,9 +178,9 @@ export function deleteAct(
     if (show?.active_act_id === requestedId) return "current_act";
     const used = storage.sql
       .exec<{ present: number }>(
-        `SELECT 1 AS present FROM finalised_results WHERE show_id = ? AND act_id = ?
+        `SELECT 1 AS present FROM finalised_results_v2 WHERE show_id = ? AND act_id = ?
        UNION ALL SELECT 1 FROM audience_votes WHERE show_id = ? AND act_id = ?
-       UNION ALL SELECT 1 FROM judge_submissions WHERE show_id = ? AND act_id = ? LIMIT 1`,
+       UNION ALL SELECT 1 FROM show_judge_submissions WHERE show_id = ? AND act_id = ? LIMIT 1`,
         showIdentifier,
         requestedId,
         showIdentifier,

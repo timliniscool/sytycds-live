@@ -1,4 +1,4 @@
-# Deploying SYTYCDS to Cloudflare
+# Deploying SYTYCDS Live to Cloudflare
 
 This guide takes a clean Windows machine to a running production show. Every
 command runs in **PowerShell** from the repository folder unless stated. It
@@ -17,8 +17,9 @@ One Cloudflare Worker (`sytycds-live`) serves everything:
 | Show coordinator | `wrangler.jsonc` `durable_objects` + `exports`      | One SQLite-backed Durable Object, class `ShowCoordinator`              |
 | Media storage    | `wrangler.jsonc` `r2_buckets` (`MEDIA`)             | Bucket `sytycds-media`; created once, below                            |
 | Canonical origin | `wrangler.jsonc` `vars.PUBLIC_ORIGIN`               | Plain variable; empty means "use the browser's own origin"             |
-| Operator secret  | Worker secret `ADMIN_ACCESS_TOKEN`                  | Never in the repo                                                      |
-| Projector token  | Worker secret `PROJECTOR_ACCESS_TOKEN`              | Never in the repo                                                      |
+| Admin account    | Worker secrets `ADMIN_USERNAME`, `ADMIN_PASSWORD`   | Verified server-side; never in the repo                                |
+| Font catalogue   | Worker secret `GOOGLE_FONTS_API_KEY`                | Optional; required only to search/select Google Fonts                  |
+| Projector access | One-time code and HttpOnly projector session        | Generated in admin; no deployment token                                |
 | Security headers | `public/_headers` (assets), `worker/index.ts` (API) | CSP, frame denial, nosniff, no-store on API                            |
 
 Local development and production differ only by where these values come
@@ -62,23 +63,34 @@ media is only ever served through `/api/media/*`.
 
 ## 4. Set the secrets (once, or whenever you rotate them)
 
-Generate two long random values and keep them somewhere safe. In PowerShell:
+Choose the administrative username and generate a long random password. In
+PowerShell, this produces a suitable password:
 
 ```powershell
 -join ((48..57)+(65..90)+(97..122) | Get-Random -Count 40 | ForEach-Object {[char]$_})
 ```
 
-Run that twice, then store each value as a Worker secret. Each command prompts
-for the value; paste it and press Enter.
+Store both values as Worker secrets. Each command prompts for the value; paste
+it and press Enter. The Google Fonts key is optional.
 
 ```powershell
-npx wrangler secret put ADMIN_ACCESS_TOKEN
-npx wrangler secret put PROJECTOR_ACCESS_TOKEN
+npx wrangler secret put ADMIN_USERNAME
+npx wrangler secret put ADMIN_PASSWORD
+npx wrangler secret put GOOGLE_FONTS_API_KEY
 ```
 
-`ADMIN_ACCESS_TOKEN` is what the operator types into `/admin`.
-`PROJECTOR_ACCESS_TOKEN` goes in the projector URL as `?token=…`. Secrets are
-stored encrypted by Cloudflare and are not visible in the dashboard afterwards.
+The operator types `ADMIN_USERNAME` and `ADMIN_PASSWORD` into `/admin`. On the
+first successful login the coordinator derives and stores a salted PBKDF2
+verifier. Later credential changes use the authenticated credential-rotation
+operation, which invalidates other sessions; changing deployment secrets alone
+does not overwrite the stored verifier. Projectors are paired from the admin
+console with an expiring one-time code, so there is no projector secret to
+distribute. Secrets are encrypted by Cloudflare and are not visible in the
+dashboard afterwards.
+
+`ADMIN_ACCESS_TOKEN` remains a deployment-only compatibility input for an
+existing installation upgrading from the earlier token login. It is treated as
+the bootstrap password and should be replaced by `ADMIN_PASSWORD`, then removed.
 
 The first `secret put` on a brand-new Worker may ask to create the Worker;
 answer yes.
@@ -121,11 +133,13 @@ which is the current Wrangler shape and needs no migration block.
 
 ## 7. Provision the show
 
-1. Open `https://<your-origin>/admin` and sign in with `ADMIN_ACCESS_TOKEN`.
+1. Open `https://<your-origin>/admin` and sign in with the configured username
+   and password.
 2. The console reports that no show exists and shows **Create the show**.
    Enter the title and optional tagline and press **CREATE SHOW**.
-3. In **SETUP & PREFLIGHT**, issue the four judge links (**JUDGE LINKS**) and
-   copy or scan them now; they are shown once. Set the intermission and
+3. In **SETUP & PREFLIGHT**, configure between one and eight judges (four by
+   default), issue their links (**JUDGE LINKS**), and copy or scan them now;
+   credentials are shown once. Set the intermission and
    emergency text.
 4. Add acts and cues, upload media, and run **RUN PREFLIGHT**. Fix anything
    marked FAILURE. Warnings are advisory.
@@ -169,10 +183,11 @@ and projector and a phone for the audience and judge checks.
    the current `schemaVersion`.
 2. **Admin.** `/admin` signs in; the status bar shows `LIVE` and a revision.
    A wrong secret is refused; five wrong attempts are blocked for 15 minutes.
-3. **Projector.** `/projector?token=<PROJECTOR_ACCESS_TOKEN>` shows the lobby
-   with the QR; without the token it shows _Display not authorised_. Press
-   **ARM SHOW / ENABLE AUDIO**. Press `D` to confirm `link live` and the media
-   cache count, then `D` again.
+3. **Projector.** Open `/projector`; it shows the pairing keypad. Generate a
+   code in admin, enter the eight digits, and confirm the paired display shows
+   the lobby QR. Press **ARM SHOW / ENABLE AUDIO**. Press `D` to confirm `link
+live` and the media cache count, then `D` again. Reload the projector and
+   confirm its HttpOnly session survives.
 4. **Audience.** Scan the QR with a phone; `/vote` loads and shows the show
    title. Select an act, open voting in the console, cast a vote, confirm the
    phone locks and the console count rises. A second attempt on the same phone
@@ -184,9 +199,10 @@ and projector and a phone for the audience and judge checks.
    the score. A second submission is refused.
 7. **Media.** Play an image cue; the projector shows it and the console reads
    _Projector acknowledged STARTED_. Reload the projector; the image returns.
-8. **Reveal.** With four judge scores and at least one vote, FINALISE then
-   REVEAL on SCOREBOARD; the projector counts up the final score and the phone
-   shows it. HIDE removes it from both.
+8. **Reveal.** With every required active judge score and, when audience weight
+   is non-zero, at least one vote, FINALISE then REVEAL on SCOREBOARD; the
+   projector counts up the final score and the phone shows it. HIDE removes it
+   from both.
 9. **Preflight.** In SETUP & PREFLIGHT, **RUN PREFLIGHT** reads READY or READY
    WITH WARNINGS.
 
@@ -205,7 +221,7 @@ npx wrangler deploy --dry-run        # validate config and build without deployi
 ## Local development
 
 ```powershell
-Copy-Item .dev.vars.example .dev.vars   # then edit the two tokens
+New-Item .dev.vars                     # add ADMIN_USERNAME and ADMIN_PASSWORD
 npm run dev
 ```
 

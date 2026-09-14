@@ -25,6 +25,8 @@ import {
   showWebSocketUrl,
   useRealtimeSelector,
 } from "../realtime/RealtimeClient";
+import { PLATFORM_ATTRIBUTION, PLATFORM_NAME } from "../../shared/platform";
+import { useShowTheme } from "../theme";
 
 const INITIAL_MEDIA: ProjectorMediaStatus = {
   visual: "IDLE",
@@ -41,6 +43,11 @@ const TELEMETRY_INTERVAL_MS = 500;
 const TELEMETRY_HEARTBEAT_MS = 5_000;
 
 export default function ProjectorSurface() {
+  const [pairing, setPairing] = useState<"checking" | "unpaired" | "paired">(
+    "checking",
+  );
+  const [pairingCode, setPairingCode] = useState("");
+  const [pairingError, setPairingError] = useState<string | null>(null);
   const [media, setMedia] = useState(INITIAL_MEDIA);
   const [cache, setCache] = useState<MediaCacheSummary | null>(null);
   const [diagnostics, setDiagnostics] = useState(false);
@@ -48,7 +55,6 @@ export default function ProjectorSurface() {
   const engineRef = useRef<ProjectorMediaEngine | null>(null);
   const cacheRef = useRef<MediaCache | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
-  const token = new URLSearchParams(window.location.search).get("token") ?? "";
   if (!clientRef.current)
     clientRef.current = new RealtimeClient({
       url: showWebSocketUrl(window.location),
@@ -56,7 +62,6 @@ export default function ProjectorSurface() {
         type: "hello",
         protocolVersion: PROTOCOL_VERSION,
         requestedRole: "projector",
-        credential: token,
       },
     });
   const client = clientRef.current;
@@ -74,11 +79,39 @@ export default function ProjectorSurface() {
   const connection = useRealtimeSelector(client, (state) => state.connection);
   const revision = useRealtimeSelector(client, (state) => state.revision);
   const aggregates = useRealtimeSelector(client, (state) => state.aggregates);
+  useShowTheme(projection?.show.themeId, projection?.show.fontFamily, true);
 
   useEffect(() => {
+    void fetch("/api/projector/session", { credentials: "same-origin" })
+      .then((response) => response.json() as Promise<{ paired: boolean }>)
+      .then((result) => setPairing(result.paired ? "paired" : "unpaired"))
+      .catch(() => setPairing("unpaired"));
+  }, []);
+
+  useEffect(() => {
+    if (pairing !== "paired") return;
     client.connect();
     return () => client.destroy();
-  }, [client]);
+  }, [client, pairing]);
+
+  async function pair(): Promise<void> {
+    setPairingError(null);
+    const response = await fetch("/api/projector/pair", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code: pairingCode }),
+    });
+    const result = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    if (!response.ok) {
+      setPairingError(result?.error ?? "Pairing failed");
+      return;
+    }
+    setPairingCode("");
+    setPairing("paired");
+  }
 
   useEffect(() => {
     const engine = new ProjectorMediaEngine({
@@ -89,6 +122,15 @@ export default function ProjectorSurface() {
           protocolVersion: PROTOCOL_VERSION,
           commandId: executionId as MediaCommandMessage["executionId"],
           succeeded,
+          state: succeeded
+            ? detail === "PREPARED"
+              ? "prepared"
+              : detail === "PAUSED"
+                ? "paused"
+                : detail === "ENDED"
+                  ? "ended"
+                  : "started"
+            : "failed",
           detail,
         }),
     });
@@ -132,9 +174,18 @@ export default function ProjectorSurface() {
   }, [runtime, cues]);
 
   useEffect(() => {
-    if (command && runtime && cues)
+    if (command && runtime && cues) {
+      client.send({
+        type: "projector_ack",
+        protocolVersion: PROTOCOL_VERSION,
+        commandId: command.executionId,
+        succeeded: true,
+        state: "received",
+        detail: "RECEIVED",
+      });
       void engineRef.current?.execute(command, runtime, cues);
-  }, [command, runtime, cues]);
+    }
+  }, [client, command, runtime, cues]);
 
   useEffect(() => {
     if (!preflightRequest) return;
@@ -204,8 +255,46 @@ export default function ProjectorSurface() {
       projection.scoreboard.audience)
     : null;
 
+  if (pairing !== "paired") {
+    return (
+      <main
+        className="projector projector-pairing"
+        aria-labelledby="projector-pair-title"
+      >
+        <p>{PLATFORM_NAME}</p>
+        <h1 id="projector-pair-title">Pair this display</h1>
+        {pairing === "checking" ? (
+          <p>Checking this display…</p>
+        ) : (
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              void pair();
+            }}
+          >
+            <label htmlFor="projector-code">8-digit code</label>
+            <input
+              id="projector-code"
+              inputMode="numeric"
+              autoComplete="one-time-code"
+              pattern="[0-9 ]{8,9}"
+              maxLength={9}
+              value={pairingCode}
+              onChange={(event) =>
+                setPairingCode(event.target.value.replace(/[^0-9 ]/gu, ""))
+              }
+            />
+            <button type="submit">Pair display</button>
+            {pairingError && <p role="alert">{pairingError}</p>}
+          </form>
+        )}
+        <footer>{PLATFORM_ATTRIBUTION}</footer>
+      </main>
+    );
+  }
+
   return (
-    <main className="projector" aria-label="SYTYCDS projector">
+    <main className="projector" aria-label={`${PLATFORM_NAME} projector`}>
       <Base
         base={scene.base}
         judges={projection?.scoreboard.judges ?? []}
@@ -289,7 +378,7 @@ function Base({
     case "CONNECTING":
       return (
         <HoldingGraphic
-          kicker="SYTYCDS"
+          kicker={PLATFORM_NAME}
           headline={base.unauthorised ? "Display not authorised" : "Connecting"}
         />
       );

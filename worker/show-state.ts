@@ -34,7 +34,9 @@ import {
   type VisualCueKind,
 } from "../shared/domain";
 import { rankGroups } from "../shared/ranking";
+import { isThemeId, DEFAULT_THEME_ID } from "../shared/themes";
 import { auditEventForCommand, recordAuditEvent } from "./audit";
+import { cueValidationState } from "./cues";
 import { listReferencedAssets } from "./media-assets";
 import { audienceJoinUrl } from "./public-origin";
 import { loadPublicResults, loadRanking } from "./rankings";
@@ -70,6 +72,11 @@ interface ShowRow extends Record<string, SqlStorageValue> {
   id: string;
   title: string;
   tagline: string;
+  short_name: string;
+  theme_id: string;
+  font_family: string;
+  audience_weight: number;
+  reactions_enabled: number;
   intermission_message: string;
   emergency_message: string;
   display_mode: string;
@@ -103,10 +110,11 @@ interface ActRow extends Record<string, SqlStorageValue> {
   public_description: string;
   internal_notes: string;
   withdrawn_at: string | null;
+  public_image_asset_id: string | null;
 }
 
 const ACT_COLUMNS = `id, order_index, performer_name, school_year, act_name, act_type,
-                public_description, internal_notes, withdrawn_at`;
+                public_description, internal_notes, withdrawn_at, public_image_asset_id`;
 
 interface JudgeSubmissionRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -211,7 +219,8 @@ function loadShow(sql: SqlStorage, id: string): ShowRow | null {
   return (
     sql
       .exec<ShowRow>(
-        `SELECT id, title, tagline, intermission_message, emergency_message,
+        `SELECT id, title, tagline, short_name, theme_id, font_family,
+                audience_weight, reactions_enabled, intermission_message, emergency_message,
                 display_mode, audience_vote_state, result_reveal_state,
                 active_act_id, revision
          FROM shows WHERE id = ?`,
@@ -285,6 +294,11 @@ function persistedShow(row: ShowRow): PersistedShow {
     id: showId(row.id),
     title: row.title,
     tagline: row.tagline,
+    shortName: row.short_name,
+    themeId: isThemeId(row.theme_id) ? row.theme_id : DEFAULT_THEME_ID,
+    fontFamily: row.font_family,
+    audienceWeight: row.audience_weight,
+    reactionsEnabled: row.reactions_enabled === 1,
     intermissionMessage: row.intermission_message,
     emergencyMessage: row.emergency_message,
     displayMode: requireDisplayMode(row.display_mode),
@@ -305,11 +319,16 @@ function toPublicAct(row: ActRow): PublicAct {
     actName: row.act_name,
     actType: row.act_type,
     publicDescription: row.public_description,
+    publicImageAssetId: row.public_image_asset_id,
     withdrawn: row.withdrawn_at !== null,
   };
 }
 
-function toCue(showIdentifier: string, row: CueRow): PersistedCue {
+function toCue(
+  sql: SqlStorage,
+  showIdentifier: string,
+  row: CueRow,
+): PersistedCue {
   let operations: CueOperation[] = [];
   try {
     const candidate: unknown = JSON.parse(row.operations_json);
@@ -363,6 +382,7 @@ function toCue(showIdentifier: string, row: CueRow): PersistedCue {
     operatorLabel: row.operator_label,
     operations,
     internalNote: row.internal_note,
+    validationState: cueValidationState(sql, showIdentifier, operations),
   };
 }
 
@@ -561,7 +581,7 @@ function judgeHasSubmitted(
   return (
     sql
       .exec<{ present: number }>(
-        `SELECT 1 AS present FROM judge_submissions
+        `SELECT 1 AS present FROM show_judge_submissions
          WHERE show_id = ? AND act_id = ? AND judge_id = ?`,
         showIdentifier,
         actIdentifier,
@@ -579,7 +599,7 @@ function judgeExists(
   return (
     sql
       .exec<{ present: number }>(
-        "SELECT 1 AS present FROM judges WHERE show_id = ? AND id = ? AND revoked_at IS NULL",
+        "SELECT 1 AS present FROM show_judges WHERE show_id = ? AND id = ? AND active = 1",
         showIdentifier,
         id,
       )
@@ -595,7 +615,7 @@ function setJudgePermission(
   permission: JudgePermissionState,
 ): void {
   sql.exec(
-    `INSERT INTO judge_permissions (
+    `INSERT INTO show_judge_permissions (
       show_id, act_id, judge_id, permission_state, updated_at
     ) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(show_id, act_id, judge_id) DO UPDATE SET
@@ -913,14 +933,14 @@ function executeTransition(
       }
       const judges = sql
         .exec<{ id: string }>(
-          "SELECT id FROM judges WHERE show_id = ? AND revoked_at IS NULL ORDER BY slot",
+          "SELECT id FROM show_judges WHERE show_id = ? AND active = 1 ORDER BY slot",
           show.id,
         )
         .toArray();
-      if (judges.length !== 4) {
+      if (judges.length === 0 || judges.length > 8) {
         return {
           accepted: false,
-          reason: "Exactly four active judges are required",
+          reason: "Configure between one and eight active judges first",
           changes: [],
         };
       }
@@ -935,7 +955,7 @@ function executeTransition(
     case "CLOSE_ALL_JUDGES": {
       if (activeActId) {
         sql.exec(
-          `UPDATE judge_permissions SET permission_state = 'CLOSED', updated_at = ?
+          `UPDATE show_judge_permissions SET permission_state = 'CLOSED', updated_at = ?
            WHERE show_id = ? AND act_id = ?`,
           now(),
           show.id,
@@ -1310,7 +1330,7 @@ function loadCues(
       actIdentifier,
     )
     .toArray()
-    .map((row) => toCue(showIdentifier, row));
+    .map((row) => toCue(sql, showIdentifier, row));
 }
 
 /**
@@ -1350,9 +1370,9 @@ function loadJudgeStates(
     .exec<JudgeSubmissionRow>(
       `SELECT j.id, j.slot, j.display_name, s.raw_input, s.parsed_classification,
               s.finite_value, s.effective_score, s.submitted_at
-       FROM judges j LEFT JOIN judge_submissions s
+       FROM show_judges j LEFT JOIN show_judge_submissions s
          ON s.show_id = j.show_id AND s.judge_id = j.id AND s.act_id = ?
-       WHERE j.show_id = ? AND j.revoked_at IS NULL ORDER BY j.slot`,
+       WHERE j.show_id = ? AND j.active = 1 ORDER BY j.slot`,
       show.active_act_id ?? "",
       show.id,
     )
@@ -1422,7 +1442,7 @@ function permissionForJudge(
   }
   const row = sql
     .exec<{ permission_state: string }>(
-      `SELECT permission_state FROM judge_permissions
+      `SELECT permission_state FROM show_judge_permissions
        WHERE show_id = ? AND act_id = ? AND judge_id = ?`,
       show.id,
       show.active_act_id,
@@ -1456,6 +1476,10 @@ export function projectShowState(
       role: "audience",
       show: {
         title: persisted.title,
+        shortName: persisted.shortName,
+        themeId: persisted.themeId,
+        fontFamily: persisted.fontFamily,
+        reactionsEnabled: persisted.reactionsEnabled,
         intermissionMessage: persisted.intermissionMessage,
         emergencyMessage: persisted.emergencyMessage,
         displayMode: persisted.displayMode,
@@ -1486,6 +1510,9 @@ export function projectShowState(
       show: {
         title: persisted.title,
         tagline: persisted.tagline,
+        shortName: persisted.shortName,
+        themeId: persisted.themeId,
+        fontFamily: persisted.fontFamily,
         intermissionMessage: persisted.intermissionMessage,
         emergencyMessage: persisted.emergencyMessage,
         displayMode: persisted.displayMode,
@@ -1563,7 +1590,7 @@ export function projectShowState(
             submitted_at: string;
           }>(
             `SELECT raw_input, parsed_classification, finite_value, effective_score, submitted_at
-             FROM judge_submissions WHERE show_id = ? AND act_id = ? AND judge_id = ?`,
+             FROM show_judge_submissions WHERE show_id = ? AND act_id = ? AND judge_id = ?`,
             show.id,
             show.active_act_id,
             role.judgeId,
@@ -1574,6 +1601,9 @@ export function projectShowState(
       role: "judge",
       show: {
         title: persisted.title,
+        shortName: persisted.shortName,
+        themeId: persisted.themeId,
+        fontFamily: persisted.fontFamily,
         activeActId: persisted.activeActId,
         revision: persisted.revision,
       },

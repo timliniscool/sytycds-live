@@ -250,7 +250,7 @@ describe("failure recovery over real coordinator sockets", () => {
       expect(
         state.storage.sql
           .exec<{ raw_input: string }>(
-            "SELECT raw_input FROM judge_submissions WHERE show_id = ? AND judge_id = 'judge-1'",
+            "SELECT raw_input FROM show_judge_submissions WHERE show_id = ? AND judge_id = 'judge-1'",
             PRIMARY_SHOW_ID,
           )
           .toArray(),

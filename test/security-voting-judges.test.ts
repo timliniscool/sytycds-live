@@ -244,7 +244,11 @@ describe("admin sessions, anonymous voters, and judge tokens", () => {
       ).toBe(0);
       expect(listJudges(storage.sql, PRIMARY_SHOW_ID)).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ linkAvailable: false }),
+          expect.objectContaining({
+            linkAvailable: false,
+            active: true,
+            configured: true,
+          }),
         ]),
       );
       expect(revokeJudge(storage, PRIMARY_SHOW_ID, first.judgeId)).toBe(true);

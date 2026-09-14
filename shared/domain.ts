@@ -18,6 +18,7 @@ export type JudgeId = Brand<string, "JudgeId">;
 export type CueId = Brand<string, "CueId">;
 export type CommandId = Brand<string, "CommandId">;
 export type ShowRevision = Brand<number, "ShowRevision">;
+export type ThemeId = import("./themes").ThemeId;
 
 export const showId = (value: string): ShowId => value as ShowId;
 export const actId = (value: string): ActId => value as ActId;
@@ -101,6 +102,7 @@ export interface PersistedCue {
   operatorLabel: string;
   operations: readonly CueOperation[];
   internalNote: string;
+  validationState?: "VALID" | "MISSING_MEDIA" | "INCOMPATIBLE_MEDIA";
 }
 
 /**
@@ -145,6 +147,7 @@ export interface PublicAct {
   actName: string;
   actType: string;
   publicDescription: string;
+  publicImageAssetId?: string | null;
   /** A withdrawn act keeps its history but leaves the running order and rankings. */
   withdrawn: boolean;
 }
@@ -159,6 +162,11 @@ export interface PersistedShow {
   title: string;
   /** Optional second line for lobby graphics; empty when the show sets none. */
   tagline: string;
+  shortName: string;
+  themeId: ThemeId;
+  fontFamily: string;
+  audienceWeight: number;
+  reactionsEnabled: boolean;
   /** Short operator-configured public text for the INTERMISSION graphic. */
   intermissionMessage: string;
   /** Short public text shown only in the TEXT emergency presentation. */
@@ -239,6 +247,7 @@ export type OperationalResult =
       kind: "incomplete";
       missingJudgeSlots: readonly number[];
       audienceMissing: boolean;
+      judgeConfigurationMissing?: boolean;
     }
   | { kind: "provisional"; value: number }
   | { kind: "finalised"; value: number; finalisedAt: string };
@@ -348,6 +357,9 @@ export interface ProjectorShowProjection {
     PersistedShow,
     | "title"
     | "tagline"
+    | "shortName"
+    | "themeId"
+    | "fontFamily"
     | "intermissionMessage"
     | "emergencyMessage"
     | "displayMode"
@@ -383,6 +395,10 @@ export interface AudienceShowProjection {
   show: Pick<
     PersistedShow,
     | "title"
+    | "shortName"
+    | "themeId"
+    | "fontFamily"
+    | "reactionsEnabled"
     | "intermissionMessage"
     | "emergencyMessage"
     | "displayMode"
@@ -397,7 +413,15 @@ export interface AudienceShowProjection {
 
 export interface JudgeShowProjection {
   role: "judge";
-  show: Pick<PersistedShow, "title" | "activeActId" | "revision">;
+  show: Pick<
+    PersistedShow,
+    | "title"
+    | "shortName"
+    | "themeId"
+    | "fontFamily"
+    | "activeActId"
+    | "revision"
+  >;
   activeAct: PublicAct | null;
   permission: JudgePermissionState;
   submission: JudgeSubmission | null;

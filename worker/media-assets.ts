@@ -1,4 +1,8 @@
-import { type MediaAsset, type MediaManifestEntry } from "../shared/domain";
+import {
+  type CueOperation,
+  type MediaAsset,
+  type MediaManifestEntry,
+} from "../shared/domain";
 
 const MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set([
@@ -182,9 +186,13 @@ export function listReferencedAssets(
       Pick<AssetRow, "id" | "version_identifier" | "size_bytes" | "mime_type">
     >(
       `SELECT DISTINCT m.id, m.version_identifier, m.size_bytes, m.mime_type
-       FROM cue_asset_references r
-       JOIN media_assets m ON m.id = r.asset_id
-       WHERE r.show_id = ? AND m.deleted_at IS NULL
+       FROM media_assets m
+       WHERE m.show_id = ? AND m.deleted_at IS NULL AND (
+         EXISTS (SELECT 1 FROM cue_asset_references r
+           WHERE r.show_id = m.show_id AND r.asset_id = m.id)
+         OR EXISTS (SELECT 1 FROM acts a
+           WHERE a.show_id = m.show_id AND a.public_image_asset_id = m.id)
+       )
        ORDER BY m.id`,
       showIdentifier,
     )
@@ -207,6 +215,8 @@ export function listMediaAssets(
               m.version_identifier, m.uploaded_at, m.duration_ms, m.width, m.height,
               EXISTS (
                 SELECT 1 FROM cue_asset_references r WHERE r.asset_id = m.id
+              ) OR EXISTS (
+                SELECT 1 FROM acts a WHERE a.public_image_asset_id = m.id
               ) AS referenced
        FROM media_assets m
        WHERE m.show_id = ? AND m.deleted_at IS NULL
@@ -241,7 +251,16 @@ export async function deleteMediaAsset(
       .toArray().length > 0
   )
     return "referenced";
-  await bucket.delete(row.object_key);
+  if (
+    storage.sql
+      .exec<{ present: number }>(
+        "SELECT 1 AS present FROM acts WHERE show_id = ? AND public_image_asset_id = ? LIMIT 1",
+        showIdentifier,
+        assetId,
+      )
+      .toArray().length > 0
+  )
+    return "referenced";
   storage.transactionSync(() => {
     storage.sql.exec(
       "UPDATE media_assets SET deleted_at = ? WHERE id = ?",
@@ -254,7 +273,122 @@ export async function deleteMediaAsset(
       showIdentifier,
     );
   });
+  // Metadata becomes inaccessible first. A failed object deletion leaves only
+  // an unreferenced private R2 object, never a live record pointing at a hole.
+  await bucket.delete(row.object_key).catch(() => undefined);
   return "deleted";
+}
+
+function mediaKind(mime: string): "image" | "audio" | "video" | "other" {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime.startsWith("video/")) return "video";
+  return "other";
+}
+
+/** Uploads first, then atomically retargets every reference; the old bytes leave last. */
+export async function replaceMediaAsset(
+  storage: DurableObjectStorage,
+  bucket: R2Bucket,
+  showIdentifier: string,
+  oldAssetId: string,
+  request: Request,
+  filename: string | null,
+): Promise<
+  { ok: true; asset: MediaAsset } | { ok: false; status: number; error: string }
+> {
+  const old = storage.sql
+    .exec<AssetRow>(
+      `SELECT id, object_key, original_filename, mime_type, size_bytes,
+      version_identifier, uploaded_at, duration_ms, width, height
+     FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
+      showIdentifier,
+      oldAssetId,
+    )
+    .toArray()[0];
+  if (!old) return { ok: false, status: 404, error: "Media asset not found" };
+  const uploaded = await uploadMediaAsset(
+    storage,
+    bucket,
+    showIdentifier,
+    request,
+    filename,
+  );
+  if (!uploaded.ok) return uploaded;
+  if (mediaKind(old.mime_type) !== mediaKind(uploaded.asset.mimeType)) {
+    await deleteMediaAsset(storage, bucket, showIdentifier, uploaded.asset.id);
+    return {
+      ok: false,
+      status: 409,
+      error: "Replacement must use the same media kind",
+    };
+  }
+  storage.transactionSync(() => {
+    const cues = storage.sql
+      .exec<{ id: string; operations_json: string }>(
+        `SELECT c.id, c.operations_json FROM cues c
+       JOIN cue_asset_references r ON r.cue_id = c.id
+       WHERE r.show_id = ? AND r.asset_id = ?`,
+        showIdentifier,
+        oldAssetId,
+      )
+      .toArray();
+    for (const cue of cues) {
+      const parsed = JSON.parse(cue.operations_json) as CueOperation[];
+      const operations = parsed.map((operation): CueOperation => {
+        if (
+          operation.kind === "visual" &&
+          operation.visual.sourceKey === oldAssetId
+        )
+          return {
+            ...operation,
+            visual: { ...operation.visual, sourceKey: uploaded.asset.id },
+          };
+        if (operation.kind === "audio" && operation.assetId === oldAssetId)
+          return { ...operation, assetId: uploaded.asset.id };
+        return operation;
+      });
+      storage.sql.exec(
+        `UPDATE cues SET operations_json = ?,
+          visual_source_key = CASE WHEN visual_source_key = ? THEN ? ELSE visual_source_key END,
+          audio_source_key = CASE WHEN audio_source_key = ? THEN ? ELSE audio_source_key END,
+          updated_at = ? WHERE show_id = ? AND id = ?`,
+        JSON.stringify(operations),
+        oldAssetId,
+        uploaded.asset.id,
+        oldAssetId,
+        uploaded.asset.id,
+        new Date().toISOString(),
+        showIdentifier,
+        cue.id,
+      );
+    }
+    storage.sql.exec(
+      "DELETE FROM cue_asset_references WHERE show_id = ? AND asset_id = ?",
+      showIdentifier,
+      oldAssetId,
+    );
+    for (const cue of cues)
+      storage.sql.exec(
+        "INSERT OR IGNORE INTO cue_asset_references (show_id, cue_id, asset_id) VALUES (?, ?, ?)",
+        showIdentifier,
+        cue.id,
+        uploaded.asset.id,
+      );
+    storage.sql.exec(
+      "UPDATE acts SET public_image_asset_id = ? WHERE show_id = ? AND public_image_asset_id = ?",
+      uploaded.asset.id,
+      showIdentifier,
+      oldAssetId,
+    );
+    storage.sql.exec(
+      "UPDATE media_assets SET deleted_at = ? WHERE id = ?",
+      new Date().toISOString(),
+      oldAssetId,
+    );
+  });
+  await bucket.delete(old.object_key).catch(() => undefined);
+  return uploaded;
 }
 
 export async function serveMediaAsset(

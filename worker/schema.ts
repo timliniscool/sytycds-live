@@ -319,6 +319,172 @@ const PUBLIC_MODES_AND_RESULTS_SCHEMA: SchemaMigration = {
   ],
 };
 
+/**
+ * Prompt-1 configuration and identity model. New tables sit beside the legacy
+ * fixed-four tables so an in-place deployment never has to disable foreign-key
+ * enforcement while migrating live data. All runtime code uses the v2 tables.
+ */
+const CONFIGURATION_AND_DYNAMIC_JUDGES_SCHEMA: SchemaMigration = {
+  version: 9,
+  name: "show_configuration_dynamic_judges_auth_pairing",
+  statements: [
+    "ALTER TABLE shows ADD COLUMN short_name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE shows ADD COLUMN theme_id TEXT NOT NULL DEFAULT 'navy-bismarck'",
+    "ALTER TABLE shows ADD COLUMN font_family TEXT NOT NULL DEFAULT 'system-ui'",
+    "ALTER TABLE shows ADD COLUMN audience_weight REAL NOT NULL DEFAULT 0.5 CHECK (audience_weight >= 0 AND audience_weight <= 1)",
+    "ALTER TABLE shows ADD COLUMN reactions_enabled INTEGER NOT NULL DEFAULT 1 CHECK (reactions_enabled IN (0, 1))",
+    "ALTER TABLE acts ADD COLUMN public_image_asset_id TEXT",
+    `CREATE TABLE show_judges (
+      id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
+      show_id TEXT NOT NULL,
+      slot INTEGER NOT NULL CHECK (slot BETWEEN 1 AND 8),
+      display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 120),
+      token_hash BLOB NOT NULL CHECK (length(token_hash) = 32),
+      active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+      created_at TEXT NOT NULL,
+      deactivated_at TEXT,
+      credential_revoked_at TEXT,
+      UNIQUE (show_id, id),
+      UNIQUE (show_id, slot),
+      UNIQUE (show_id, token_hash),
+      FOREIGN KEY (show_id) REFERENCES shows(id) ON DELETE RESTRICT
+    ) STRICT`,
+    `INSERT INTO show_judges (
+      id, show_id, slot, display_name, token_hash, active, created_at,
+      deactivated_at, credential_revoked_at
+    ) SELECT id, show_id, slot, display_name, token_hash,
+      1, created_at, NULL, revoked_at FROM judges`,
+    `CREATE TABLE show_judge_permissions (
+      show_id TEXT NOT NULL,
+      act_id TEXT NOT NULL,
+      judge_id TEXT NOT NULL,
+      permission_state TEXT NOT NULL CHECK (permission_state IN ('OPEN', 'CLOSED')),
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (show_id, act_id, judge_id),
+      FOREIGN KEY (show_id, act_id) REFERENCES acts(show_id, id) ON DELETE RESTRICT,
+      FOREIGN KEY (show_id, judge_id) REFERENCES show_judges(show_id, id) ON DELETE RESTRICT
+    ) STRICT`,
+    `INSERT INTO show_judge_permissions
+      SELECT show_id, act_id, judge_id, permission_state, updated_at FROM judge_permissions`,
+    `CREATE TABLE show_judge_submissions (
+      show_id TEXT NOT NULL,
+      act_id TEXT NOT NULL,
+      judge_id TEXT NOT NULL,
+      raw_input TEXT NOT NULL,
+      parsed_classification TEXT NOT NULL CHECK (parsed_classification IN (
+        'FINITE', 'POSITIVE_INFINITY', 'NEGATIVE_INFINITY'
+      )),
+      finite_value REAL,
+      effective_score REAL NOT NULL,
+      submitted_at TEXT NOT NULL,
+      PRIMARY KEY (show_id, act_id, judge_id),
+      CHECK (
+        (parsed_classification = 'FINITE' AND finite_value IS NOT NULL) OR
+        (parsed_classification != 'FINITE' AND finite_value IS NULL)
+      ),
+      FOREIGN KEY (show_id, act_id) REFERENCES acts(show_id, id) ON DELETE RESTRICT,
+      FOREIGN KEY (show_id, judge_id) REFERENCES show_judges(show_id, id) ON DELETE RESTRICT
+    ) STRICT`,
+    `INSERT INTO show_judge_submissions
+      SELECT show_id, act_id, judge_id, raw_input, parsed_classification,
+             finite_value, effective_score, submitted_at FROM judge_submissions`,
+    `CREATE TABLE finalised_results_v2 (
+      show_id TEXT NOT NULL,
+      act_id TEXT NOT NULL,
+      audience_mean REAL,
+      judge_scores_json TEXT NOT NULL,
+      audience_weight REAL NOT NULL CHECK (audience_weight >= 0 AND audience_weight <= 1),
+      judge_weight REAL NOT NULL CHECK (judge_weight >= 0 AND judge_weight <= 1),
+      active_judge_ids_json TEXT NOT NULL,
+      formula_version INTEGER NOT NULL,
+      final_score REAL NOT NULL,
+      finalised_at TEXT NOT NULL,
+      PRIMARY KEY (show_id, act_id),
+      FOREIGN KEY (show_id, act_id) REFERENCES acts(show_id, id) ON DELETE RESTRICT
+    ) STRICT`,
+    `INSERT INTO finalised_results_v2 (
+      show_id, act_id, audience_mean, judge_scores_json, audience_weight,
+      judge_weight, active_judge_ids_json, formula_version, final_score, finalised_at
+    ) SELECT f.show_id, f.act_id, f.audience_mean,
+      json_array(f.judge_1_effective_score, f.judge_2_effective_score,
+                 f.judge_3_effective_score, f.judge_4_effective_score),
+      0.5, 0.5,
+      COALESCE((SELECT json_group_array(id) FROM
+        (SELECT id FROM show_judges j WHERE j.show_id = f.show_id
+         AND j.slot BETWEEN 1 AND 4 ORDER BY j.slot)), '[]'),
+      1, f.final_score, f.finalised_at FROM finalised_results f`,
+    `CREATE TABLE admin_credentials (
+      singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+      username TEXT NOT NULL CHECK (length(username) BETWEEN 1 AND 120),
+      salt BLOB NOT NULL CHECK (length(salt) = 16),
+      verifier BLOB NOT NULL CHECK (length(verifier) = 32),
+      iterations INTEGER NOT NULL CHECK (iterations >= 100000),
+      updated_at TEXT NOT NULL
+    ) STRICT`,
+    `CREATE TABLE projector_pairing_codes (
+      show_id TEXT PRIMARY KEY NOT NULL,
+      code_hash BLOB NOT NULL CHECK (length(code_hash) = 32),
+      salt BLOB NOT NULL CHECK (length(salt) = 16),
+      expires_at INTEGER NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (show_id) REFERENCES shows(id) ON DELETE RESTRICT
+    ) STRICT`,
+    `CREATE TABLE projector_sessions (
+      token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+      show_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      expires_at INTEGER NOT NULL,
+      revoked_at TEXT,
+      FOREIGN KEY (show_id) REFERENCES shows(id) ON DELETE RESTRICT
+    ) STRICT`,
+    "CREATE INDEX idx_projector_sessions_show ON projector_sessions (show_id, revoked_at)",
+    `CREATE TABLE font_assets (
+      id TEXT PRIMARY KEY NOT NULL,
+      family TEXT NOT NULL,
+      object_key TEXT NOT NULL UNIQUE,
+      mime_type TEXT NOT NULL,
+      size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+      created_at TEXT NOT NULL
+    ) STRICT`,
+    `CREATE TABLE selected_font_css (
+      family TEXT PRIMARY KEY NOT NULL,
+      css_text TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT`,
+    `CREATE TRIGGER legacy_judges_insert AFTER INSERT ON judges BEGIN
+      INSERT OR IGNORE INTO show_judges
+        (id, show_id, slot, display_name, token_hash, active, created_at, deactivated_at, credential_revoked_at)
+      VALUES (NEW.id, NEW.show_id, NEW.slot, NEW.display_name, NEW.token_hash,
+        1, NEW.created_at, NULL, NEW.revoked_at);
+    END`,
+    `CREATE TRIGGER legacy_judge_permissions_insert AFTER INSERT ON judge_permissions BEGIN
+      INSERT OR REPLACE INTO show_judge_permissions
+        (show_id, act_id, judge_id, permission_state, updated_at)
+      VALUES (NEW.show_id, NEW.act_id, NEW.judge_id, NEW.permission_state, NEW.updated_at);
+    END`,
+    `CREATE TRIGGER legacy_judge_submissions_insert AFTER INSERT ON judge_submissions BEGIN
+      INSERT OR IGNORE INTO show_judge_submissions
+        (show_id, act_id, judge_id, raw_input, parsed_classification, finite_value, effective_score, submitted_at)
+      VALUES (NEW.show_id, NEW.act_id, NEW.judge_id, NEW.raw_input,
+        NEW.parsed_classification, NEW.finite_value, NEW.effective_score, NEW.submitted_at);
+    END`,
+    `CREATE TRIGGER legacy_finalised_results_insert AFTER INSERT ON finalised_results BEGIN
+      INSERT OR IGNORE INTO finalised_results_v2
+        (show_id, act_id, audience_mean, judge_scores_json, audience_weight, judge_weight,
+         active_judge_ids_json, formula_version, final_score, finalised_at)
+      VALUES (NEW.show_id, NEW.act_id, NEW.audience_mean,
+        json_array(NEW.judge_1_effective_score, NEW.judge_2_effective_score,
+                   NEW.judge_3_effective_score, NEW.judge_4_effective_score),
+        0.5, 0.5,
+        COALESCE((SELECT json_group_array(id) FROM
+          (SELECT id FROM show_judges j WHERE j.show_id = NEW.show_id ORDER BY j.slot LIMIT 4)), '[]'),
+        1, NEW.final_score, NEW.finalised_at);
+    END`,
+  ],
+};
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -328,6 +494,7 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   SHOW_IDENTITY_SCHEMA,
   CUE_REFERENCE_INTEGRITY_SCHEMA,
   PUBLIC_MODES_AND_RESULTS_SCHEMA,
+  CONFIGURATION_AND_DYNAMIC_JUDGES_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

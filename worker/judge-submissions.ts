@@ -79,7 +79,7 @@ function existingSubmission(
   const row = sql
     .exec<SubmissionRow>(
       `SELECT raw_input, parsed_classification, finite_value, effective_score, submitted_at
-       FROM judge_submissions
+       FROM show_judge_submissions
        WHERE show_id = ? AND act_id = ? AND judge_id = ?`,
       showIdentifier,
       actIdentifier,
@@ -99,7 +99,7 @@ function permissionIsOpen(
 ): boolean {
   const specific = sql
     .exec<{ permission_state: string }>(
-      `SELECT permission_state FROM judge_permissions
+      `SELECT permission_state FROM show_judge_permissions
        WHERE show_id = ? AND act_id = ? AND judge_id = ?`,
       showIdentifier,
       actIdentifier,
@@ -143,8 +143,8 @@ export function submitJudgeScore(
     if (!show) return { ok: false, code: "UNAUTHORISED", revision };
     const judge = storage.sql
       .exec<{ present: number }>(
-        `SELECT 1 AS present FROM judges
-         WHERE show_id = ? AND id = ? AND revoked_at IS NULL`,
+        `SELECT 1 AS present FROM show_judges
+         WHERE show_id = ? AND id = ? AND active = 1 AND credential_revoked_at IS NULL`,
         showIdentifier,
         judgeIdentifier,
       )
@@ -183,7 +183,7 @@ export function submitJudgeScore(
     const effectiveScore = transformJudgeScore(parsed.parsed);
     try {
       storage.sql.exec(
-        `INSERT INTO judge_submissions (
+        `INSERT INTO show_judge_submissions (
           show_id, act_id, judge_id, raw_input, parsed_classification,
           finite_value, effective_score, submitted_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -208,7 +208,7 @@ export function submitJudgeScore(
       return { ok: true, accepted: false, submission: existing, revision };
     }
     storage.sql.exec(
-      `UPDATE judge_permissions SET permission_state = 'CLOSED', updated_at = ?
+      `UPDATE show_judge_permissions SET permission_state = 'CLOSED', updated_at = ?
        WHERE show_id = ? AND act_id = ? AND judge_id = ?`,
       timestamp,
       showIdentifier,

@@ -16,22 +16,41 @@ import {
 } from "../shared/protocol";
 import { isRecord } from "../shared/trust";
 import {
-  configuredAdminSecret,
+  configuredAdminCredential,
   createAdminSession,
   destroyAdminSession,
   isAdminSessionHashActive,
   readAdminSession,
+  rotateAdminCredential,
 } from "./admin-auth";
 import {
+  generateProjectorPairingCode,
+  pairProjector,
+  projectorPairingStatus,
+  readProjectorSessionHash,
+  revokeProjectors,
+} from "./projector-pairing";
+import {
   audienceVoteScore,
+  existingVoterIdentityHash,
   parseAudienceVoteRequest,
   resolveVoterIdentity,
   submitAudienceVote,
 } from "./audience-votes";
 import {
+  REACTION_EPOCH_MS,
+  REACTION_INTERVAL_MS,
+  REACTION_MAX_UNITS,
+  REACTION_SLOT_COUNT,
+  REACTION_TARGET_REPORTERS,
+  reactionSlot,
+} from "../shared/reactions";
+import { validateReactionSummary } from "./reactions";
+import {
   createJudges,
   listJudges,
   revokeJudge,
+  renameJudge,
   rotateJudgeToken,
 } from "./judge-lifecycle";
 import { submitJudgeScore } from "./judge-submissions";
@@ -54,6 +73,7 @@ import {
   deleteMediaAsset,
   listMediaAssets,
   serveMediaAsset,
+  replaceMediaAsset,
   uploadMediaAsset,
 } from "./media-assets";
 import { listAuditEvents, recordAuditEvent } from "./audit";
@@ -63,6 +83,16 @@ import { hasSameOrigin } from "./security";
 import { initialiseSchema, readSchemaVersion } from "./schema";
 import { parseShowInput, upsertShow } from "./show-config";
 import { RESET_CONFIRMATION, isResetConfirmed, resetShow } from "./show-reset";
+import {
+  applyScoringConfiguration,
+  parseScoringConfiguration,
+} from "./scoring-config";
+import { searchGoogleFonts } from "./google-fonts";
+import {
+  cacheSelectedFont,
+  serveFontAsset,
+  serveSelectedFontCss,
+} from "./font-assets";
 import { authenticateSocketRole } from "./socket-auth";
 import {
   executeAdminCommand,
@@ -80,6 +110,9 @@ interface CoordinatorHealth {
 interface AwaitingHelloAttachment {
   phase: "awaiting_hello";
   adminSessionHash: ArrayBuffer | null;
+  projectorSessionHash: ArrayBuffer | null;
+  voterKey: string | null;
+  reactionSlot: number | null;
 }
 
 interface ReadyAttachment {
@@ -87,6 +120,12 @@ interface ReadyAttachment {
   role: ConnectionRole;
   protocolVersion: typeof PROTOCOL_VERSION;
   adminSessionHash: ArrayBuffer | null;
+  projectorSessionHash: ArrayBuffer | null;
+  voterKey: string | null;
+  reactionSlot: number | null;
+  lastReactionInterval: number;
+  reactionViolations: number;
+  reactionEligibleSlots: number;
 }
 
 type SocketAttachment = AwaitingHelloAttachment | ReadyAttachment;
@@ -100,8 +139,12 @@ function isSocketAttachment(value: unknown): value is SocketAttachment {
   }
   if (value.phase === "awaiting_hello") {
     return (
-      value.adminSessionHash === null ||
-      value.adminSessionHash instanceof ArrayBuffer
+      (value.adminSessionHash === null ||
+        value.adminSessionHash instanceof ArrayBuffer) &&
+      (value.projectorSessionHash === null ||
+        value.projectorSessionHash instanceof ArrayBuffer) &&
+      (value.voterKey === null || typeof value.voterKey === "string") &&
+      (value.reactionSlot === null || typeof value.reactionSlot === "number")
     );
   }
   if (
@@ -121,6 +164,13 @@ function isSocketAttachment(value: unknown): value is SocketAttachment {
   return (
     (value.adminSessionHash === null ||
       value.adminSessionHash instanceof ArrayBuffer) &&
+    (value.projectorSessionHash === null ||
+      value.projectorSessionHash instanceof ArrayBuffer) &&
+    (value.voterKey === null || typeof value.voterKey === "string") &&
+    (value.reactionSlot === null || typeof value.reactionSlot === "number") &&
+    typeof value.lastReactionInterval === "number" &&
+    typeof value.reactionViolations === "number" &&
+    typeof value.reactionEligibleSlots === "number" &&
     (value.role.kind === "admin" ||
       value.role.kind === "projector" ||
       value.role.kind === "audience")
@@ -164,6 +214,40 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (url.pathname === "/api/admin/logout" && request.method === "POST") {
       return this.handleAdminLogout(request);
     }
+    if (url.pathname === "/api/admin/credentials" && request.method === "PUT") {
+      return this.handleAdminCredentialRotation(request);
+    }
+    if (
+      url.pathname === "/api/admin/projector/code" &&
+      request.method === "POST"
+    ) {
+      return this.handleGenerateProjectorCode(request);
+    }
+    if (url.pathname === "/api/admin/projector" && request.method === "GET") {
+      return this.handleProjectorStatus(request);
+    }
+    if (
+      url.pathname === "/api/admin/projector/revoke" &&
+      request.method === "POST"
+    ) {
+      return this.handleRevokeProjector(request);
+    }
+    if (url.pathname === "/api/projector/session" && request.method === "GET") {
+      return this.handleProjectorSession(request);
+    }
+    if (url.pathname === "/api/projector/pair" && request.method === "POST") {
+      return this.handlePairProjector(request);
+    }
+    if (url.pathname === "/api/font/selected.css" && request.method === "GET")
+      return serveSelectedFontCss(this.ctx.storage.sql, PRIMARY_SHOW_ID);
+    const fontMatch = /^\/api\/font\/(font-[a-f0-9]{64})$/u.exec(url.pathname);
+    if (fontMatch && request.method === "GET")
+      return serveFontAsset(
+        this.ctx.storage.sql,
+        this.env.MEDIA,
+        fontMatch[1] ?? "",
+        request,
+      );
     if (url.pathname === "/api/admin/command" && request.method === "POST") {
       return this.handleAdminHttpCommand(request);
     }
@@ -173,11 +257,20 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (url.pathname === "/api/admin/history" && request.method === "GET") {
       return this.handleHistory(request, url);
     }
+    if (url.pathname === "/api/admin/fonts" && request.method === "GET") {
+      return this.handleFontSearch(request, url);
+    }
     if (url.pathname === "/api/admin/show" && request.method === "PUT") {
       return this.handleUpsertShow(request);
     }
     if (url.pathname === "/api/admin/show/reset" && request.method === "POST") {
       return this.handleResetShow(request);
+    }
+    if (
+      url.pathname === "/api/admin/scoring-config" &&
+      request.method === "PUT"
+    ) {
+      return this.handleScoringConfiguration(request);
     }
     if (url.pathname === "/api/admin/judges" && request.method === "GET") {
       return this.handleListJudges(request);
@@ -198,6 +291,10 @@ export class ShowCoordinator extends DurableObject<Env> {
         ? this.handleRotateJudge(request, judgeId)
         : this.handleRevokeJudge(request, judgeId);
     }
+    const judgeEditMatch =
+      /^\/api\/admin\/judges\/([A-Za-z0-9_-]{1,128})$/u.exec(url.pathname);
+    if (judgeEditMatch && request.method === "PATCH")
+      return this.handleRenameJudge(request, judgeEditMatch[1] ?? "");
     if (url.pathname === "/api/vote/status" && request.method === "GET") {
       return this.handleVoteStatus(request, url);
     }
@@ -236,19 +333,19 @@ export class ShowCoordinator extends DurableObject<Env> {
     const mediaMatch =
       /^\/api\/(?:admin\/)?media\/([A-Za-z0-9_-]{1,128})$/u.exec(url.pathname);
     if (mediaMatch && request.method === "GET")
-      return serveMediaAsset(
-        this.ctx.storage.sql,
-        this.env.MEDIA,
-        PRIMARY_SHOW_ID,
-        mediaMatch[1] ?? "",
-        request,
-      );
+      return this.handleServeMedia(request, mediaMatch[1] ?? "");
     if (
       mediaMatch &&
       url.pathname.startsWith("/api/admin/") &&
       request.method === "DELETE"
     )
       return this.handleDeleteMedia(request, mediaMatch[1] ?? "");
+    const replaceMediaMatch =
+      /^\/api\/admin\/media\/([A-Za-z0-9_-]{1,128})\/replace$/u.exec(
+        url.pathname,
+      );
+    if (replaceMediaMatch && request.method === "POST")
+      return this.handleReplaceMedia(request, url, replaceMediaMatch[1] ?? "");
     return Response.json({ error: "Not found" }, { status: 404 });
   }
 
@@ -266,14 +363,14 @@ export class ShowCoordinator extends DurableObject<Env> {
   }
 
   private async handleAdminLogin(request: Request): Promise<Response> {
-    const secret = configuredAdminSecret(this.env);
-    if (!secret) {
+    const credential = configuredAdminCredential(this.env);
+    if (!credential) {
       return Response.json({ authenticated: false }, { status: 503 });
     }
     const result = await createAdminSession(
       this.ctx.storage,
       request,
-      secret,
+      credential,
       PRIMARY_SHOW_ID,
     );
     return Response.json(
@@ -300,6 +397,130 @@ export class ShowCoordinator extends DurableObject<Env> {
     return Response.json(
       { authenticated: false },
       { headers: { "Set-Cookie": cookie } },
+    );
+  }
+
+  private async handleAdminCredentialRotation(
+    request: Request,
+  ): Promise<Response> {
+    const session = await this.authenticatedAdmin(request, true);
+    if (!session)
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const body = await this.adminBody(request);
+    if (
+      !isRecord(body) ||
+      typeof body.username !== "string" ||
+      typeof body.password !== "string" ||
+      body.confirm !== "ROTATE ADMIN CREDENTIAL"
+    ) {
+      return Response.json(
+        { error: "Invalid credential rotation request" },
+        { status: 400 },
+      );
+    }
+    if (
+      !(await rotateAdminCredential(
+        this.ctx.storage,
+        session,
+        body.username,
+        body.password,
+      ))
+    ) {
+      return Response.json(
+        { error: "Password must contain at least 12 characters" },
+        { status: 400 },
+      );
+    }
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "admin.credential_rotated",
+      actor: "admin",
+      data: {},
+    });
+    return Response.json({ rotated: true });
+  }
+
+  private async handleGenerateProjectorCode(
+    request: Request,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    if (!this.showExists())
+      return Response.json({ error: "Create the show first" }, { status: 409 });
+    const result = await generateProjectorPairingCode(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+    );
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "projector.pairing_code_created",
+      actor: "admin",
+      data: { expiresAt: result.expiresAt },
+    });
+    return Response.json(result);
+  }
+
+  private async handleProjectorStatus(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const paired = projectorPairingStatus(
+      this.ctx.storage.sql,
+      PRIMARY_SHOW_ID,
+    ).paired;
+    return Response.json({
+      paired,
+      connected: this.socketInventory().projectors > 0,
+    });
+  }
+
+  private async handleRevokeProjector(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const revoked = revokeProjectors(this.ctx.storage, PRIMARY_SHOW_ID);
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (attachment?.phase === "ready" && attachment.role.kind === "projector")
+        ws.close(1008, "Projector revoked");
+    }
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "projector.revoked",
+      actor: "admin",
+      data: { sessions: revoked },
+    });
+    return Response.json({ revoked });
+  }
+
+  private async handleProjectorSession(request: Request): Promise<Response> {
+    return Response.json({
+      paired:
+        (await readProjectorSessionHash(this.ctx.storage.sql, request)) !==
+        null,
+    });
+  }
+
+  private async handlePairProjector(request: Request): Promise<Response> {
+    if (!hasSameOrigin(request))
+      return Response.json({ error: "Forbidden" }, { status: 403 });
+    const body = await this.adminBody(request);
+    if (!isRecord(body) || typeof body.code !== "string")
+      return Response.json(
+        { error: "Enter the pairing code" },
+        { status: 400 },
+      );
+    const result = await pairProjector(
+      this.ctx.storage,
+      request,
+      PRIMARY_SHOW_ID,
+      body.code,
+    );
+    if (!result.ok)
+      return Response.json({ error: result.error }, { status: result.status });
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "projector.paired",
+      actor: "projector",
+      data: {},
+    });
+    return Response.json(
+      { paired: true },
+      { headers: { "Set-Cookie": result.setCookie } },
     );
   }
 
@@ -387,6 +608,21 @@ export class ShowCoordinator extends DurableObject<Env> {
         { status: 400 },
       );
     }
+    if (input.fontFamily !== "system-ui") {
+      const cached = await cacheSelectedFont(
+        this.ctx.storage,
+        this.env.MEDIA,
+        input.fontFamily,
+      ).catch(() => false);
+      if (!cached)
+        return Response.json(
+          {
+            error:
+              "The selected font could not be cached; the current show font was kept",
+          },
+          { status: 503 },
+        );
+    }
     const result = upsertShow(this.ctx.storage, PRIMARY_SHOW_ID, input);
     recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
       type: result.created ? "show.created" : "show.renamed",
@@ -427,6 +663,39 @@ export class ShowCoordinator extends DurableObject<Env> {
     return Response.json(result);
   }
 
+  private async handleScoringConfiguration(
+    request: Request,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const input = parseScoringConfiguration(await this.adminBody(request));
+    if (!input)
+      return Response.json(
+        { error: "Invalid scoring configuration" },
+        { status: 400 },
+      );
+    const result = await applyScoringConfiguration(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      input,
+    );
+    if (!result.ok)
+      return Response.json({ error: result.reason }, { status: result.status });
+    const origin = new URL(request.url).origin;
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("judge");
+    return Response.json({
+      scoringReset: result.scoringReset,
+      issuedJudges: result.issued.map((judge) => ({
+        judgeId: judge.judgeId,
+        slot: judge.slot,
+        displayName: judge.displayName,
+        link: `${origin}/judge/${judge.token}`,
+      })),
+    });
+  }
+
   private async handleHistory(request: Request, url: URL): Promise<Response> {
     if (!(await this.authenticatedAdmin(request, false))) {
       return Response.json({ error: "Unauthorised" }, { status: 401 });
@@ -441,6 +710,24 @@ export class ShowCoordinator extends DurableObject<Env> {
         Number.isSafeInteger(limit) ? limit : 50,
       ),
     );
+  }
+
+  private async handleFontSearch(
+    request: Request,
+    url: URL,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const query = (url.searchParams.get("q") ?? "").slice(0, 120);
+    const limit = Number(url.searchParams.get("limit") ?? "25");
+    const result = await searchGoogleFonts(
+      this.env,
+      query,
+      Number.isSafeInteger(limit) ? limit : 25,
+    );
+    return result.ok
+      ? Response.json(result)
+      : Response.json(result, { status: 503 });
   }
 
   private async handleListJudges(request: Request): Promise<Response> {
@@ -530,6 +817,33 @@ export class ShowCoordinator extends DurableObject<Env> {
       );
     }
     return Response.json({ judgeId: requestedJudgeId, active: false });
+  }
+
+  private async handleRenameJudge(
+    request: Request,
+    requestedJudgeId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const body = await this.adminBody(request);
+    if (
+      !isRecord(body) ||
+      typeof body.displayName !== "string" ||
+      !renameJudge(
+        this.ctx.storage,
+        PRIMARY_SHOW_ID,
+        requestedJudgeId,
+        body.displayName,
+      )
+    ) {
+      return Response.json(
+        { error: "Invalid judge name or ID" },
+        { status: 400 },
+      );
+    }
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    return Response.json({ renamed: true });
   }
 
   /**
@@ -823,6 +1137,48 @@ export class ShowCoordinator extends DurableObject<Env> {
         );
   }
 
+  private async handleReplaceMedia(
+    request: Request,
+    url: URL,
+    assetId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const result = await replaceMediaAsset(
+      this.ctx.storage,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+      assetId,
+      request,
+      url.searchParams.get("filename"),
+    );
+    if (result.ok) {
+      this.broadcastSnapshots("admin");
+      this.broadcastSnapshots("projector");
+      return Response.json({ asset: result.asset });
+    }
+    return Response.json({ error: result.error }, { status: result.status });
+  }
+
+  private async handleServeMedia(
+    request: Request,
+    assetId: string,
+  ): Promise<Response> {
+    const admin = await this.authenticatedAdmin(request, false);
+    const projector = hasSameOrigin(request)
+      ? await readProjectorSessionHash(this.ctx.storage.sql, request)
+      : null;
+    if (!admin && !projector)
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    return serveMediaAsset(
+      this.ctx.storage.sql,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+      assetId,
+      request,
+    );
+  }
+
   private queueAggregateUpdate(
     revision: ReturnType<typeof showRevision>,
     aggregate: AudienceAggregate,
@@ -860,10 +1216,24 @@ export class ShowCoordinator extends DurableObject<Env> {
     const session = hasSameOrigin(request)
       ? await readAdminSession(this.ctx.storage.sql, request)
       : null;
+    const projectorSessionHash = hasSameOrigin(request)
+      ? await readProjectorSessionHash(this.ctx.storage.sql, request)
+      : null;
+    const voterHash = hasSameOrigin(request)
+      ? await existingVoterIdentityHash(request)
+      : null;
+    const voterKey = voterHash
+      ? [...new Uint8Array(voterHash)]
+          .map((byte) => byte.toString(16).padStart(2, "0"))
+          .join("")
+      : null;
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({
       phase: "awaiting_hello",
       adminSessionHash: session?.tokenHash ?? null,
+      projectorSessionHash,
+      voterKey,
+      reactionSlot: voterHash ? reactionSlot(voterHash) : null,
     } satisfies AwaitingHelloAttachment);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -942,6 +1312,7 @@ export class ShowCoordinator extends DurableObject<Env> {
         revision: this.currentRevision(),
         commandId: parsed.message.commandId,
         succeeded: parsed.message.succeeded,
+        ...(parsed.message.state ? { state: parsed.message.state } : {}),
         ...(parsed.message.detail ? { detail: parsed.message.detail } : {}),
       });
       recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
@@ -1063,6 +1434,64 @@ export class ShowCoordinator extends DurableObject<Env> {
       return;
     }
 
+    if (parsed.message.type === "reaction_summary") {
+      const reaction = parsed.message;
+      if (
+        attachment.role.kind !== "audience" ||
+        !attachment.voterKey ||
+        attachment.reactionSlot === null
+      ) {
+        this.rejectReaction(ws, attachment);
+        return;
+      }
+      const show = this.ctx.storage.sql
+        .exec<{ reactions_enabled: number; display_mode: string }>(
+          "SELECT reactions_enabled, display_mode FROM shows WHERE id = ?",
+          PRIMARY_SHOW_ID,
+        )
+        .toArray()[0];
+      const duplicate = this.ctx.getWebSockets().some((candidate) => {
+        const other = this.socketAttachment(candidate);
+        return (
+          other?.phase === "ready" &&
+          other.voterKey === attachment.voterKey &&
+          other.lastReactionInterval >= reaction.interval
+        );
+      });
+      if (
+        !show ||
+        duplicate ||
+        !validateReactionSummary({
+          slot: attachment.reactionSlot,
+          epoch: reaction.epoch,
+          interval: reaction.interval,
+          lastInterval: attachment.lastReactionInterval,
+          now: Date.now(),
+          enabled: show.reactions_enabled === 1,
+          emergency: show.display_mode === "EMERGENCY",
+          histogram: reaction.histogram,
+          eligibleSlots: attachment.reactionEligibleSlots,
+        })
+      ) {
+        this.rejectReaction(ws, attachment);
+        return;
+      }
+      ws.serializeAttachment({
+        ...attachment,
+        lastReactionInterval: reaction.interval,
+        reactionViolations: 0,
+      } satisfies ReadyAttachment);
+      const signal: ServerMessage = {
+        type: "reaction_signal",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: this.currentRevision(),
+        histogram: reaction.histogram,
+      };
+      this.broadcastAdmin(signal);
+      this.broadcastProjector(signal);
+      return;
+    }
+
     // Audience votes travel over HTTP because the anonymous voter identity is an
     // HttpOnly cookie that a WebSocket frame cannot carry.
     this.sendProtocolError(
@@ -1083,11 +1512,11 @@ export class ShowCoordinator extends DurableObject<Env> {
     attachment: AwaitingHelloAttachment,
   ): Promise<void> {
     const role = await authenticateSocketRole(
-      this.env,
       this.ctx.storage.sql,
       PRIMARY_SHOW_ID,
       hello,
       attachment.adminSessionHash,
+      attachment.projectorSessionHash,
     );
     if (!role) {
       this.sendProtocolError(
@@ -1104,8 +1533,15 @@ export class ShowCoordinator extends DurableObject<Env> {
       role,
       protocolVersion: PROTOCOL_VERSION,
       adminSessionHash: attachment.adminSessionHash,
+      projectorSessionHash: attachment.projectorSessionHash,
+      voterKey: attachment.voterKey,
+      reactionSlot: attachment.reactionSlot,
+      lastReactionInterval: -1,
+      reactionViolations: 0,
+      reactionEligibleSlots: this.reactionEligibleSlots(),
     } satisfies ReadyAttachment);
     this.sendSnapshot(ws, role);
+    if (role.kind === "audience") this.refreshReactionSampling(ws);
     this.broadcastConnectionCount();
   }
 
@@ -1467,6 +1903,74 @@ export class ShowCoordinator extends DurableObject<Env> {
       code,
       detail,
     });
+  }
+
+  private rejectReaction(ws: WebSocket, attachment: ReadyAttachment): void {
+    const violations = attachment.reactionViolations + 1;
+    ws.serializeAttachment({ ...attachment, reactionViolations: violations });
+    if (violations >= 3) ws.close(1008, "Reaction rate limit violated");
+  }
+
+  /** Coarse powers-of-two tuning keeps about five reporters without rotation timers. */
+  private reactionEligibleSlots(): number {
+    let population = 1;
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (attachment?.phase === "ready" && attachment.role.kind === "audience")
+        population += 1;
+    }
+    let band = 1;
+    while (band < population) band *= 2;
+    return Math.min(
+      REACTION_SLOT_COUNT,
+      Math.ceil((REACTION_TARGET_REPORTERS * REACTION_SLOT_COUNT) / band),
+    );
+  }
+
+  private refreshReactionSampling(newcomer: WebSocket): void {
+    const eligibleSlots = this.reactionEligibleSlots();
+    const serverNow = Date.now();
+    const audienceSockets = this.ctx.getWebSockets().filter((ws) => {
+      const attachment = this.socketAttachment(ws);
+      return (
+        attachment?.phase === "ready" &&
+        attachment.role.kind === "audience" &&
+        attachment.reactionSlot !== null
+      );
+    });
+    const bandChanged = audienceSockets.some((ws) => {
+      const attachment = this.socketAttachment(ws);
+      return (
+        attachment?.phase === "ready" &&
+        attachment.reactionEligibleSlots !== eligibleSlots
+      );
+    });
+    for (const ws of bandChanged ? audienceSockets : [newcomer]) {
+      const attachment = this.socketAttachment(ws);
+      if (
+        attachment?.phase !== "ready" ||
+        attachment.role.kind !== "audience" ||
+        attachment.reactionSlot === null
+      )
+        continue;
+      if (attachment.reactionEligibleSlots !== eligibleSlots) {
+        ws.serializeAttachment({
+          ...attachment,
+          reactionEligibleSlots: eligibleSlots,
+        });
+      }
+      this.sendOne(ws, {
+        type: "reaction_sampling",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: this.currentRevision(),
+        slot: attachment.reactionSlot,
+        serverNow,
+        epochMs: REACTION_EPOCH_MS,
+        intervalMs: REACTION_INTERVAL_MS,
+        eligibleSlots,
+        maxUnits: REACTION_MAX_UNITS,
+      });
+    }
   }
 
   private sendOne(ws: WebSocket, message: ServerMessage): void {

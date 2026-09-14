@@ -1,8 +1,16 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { DEFAULT_EVENT_NAME } from "../../shared/platform";
 
 export interface ShowIdentityPanelProps {
   /** Null until the show exists; the panel then creates it. */
-  current: { title: string; tagline: string } | null;
+  current: {
+    title: string;
+    tagline: string;
+    shortName?: string;
+    themeId?: string;
+    fontFamily?: string;
+    reactionsEnabled?: boolean;
+  } | null;
 }
 
 /**
@@ -11,7 +19,7 @@ export interface ShowIdentityPanelProps {
  * coordinator resnapshots every connected client.
  */
 export function ShowIdentityPanel({ current }: ShowIdentityPanelProps) {
-  const [title, setTitle] = useState(current?.title ?? "");
+  const [title, setTitle] = useState(current?.title ?? DEFAULT_EVENT_NAME);
   const [tagline, setTagline] = useState(current?.tagline ?? "");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -19,12 +27,12 @@ export function ShowIdentityPanel({ current }: ShowIdentityPanelProps) {
   const [resetOpen, setResetOpen] = useState(false);
 
   useEffect(() => {
-    setTitle(current?.title ?? "");
+    setTitle(current?.title ?? DEFAULT_EVENT_NAME);
     setTagline(current?.tagline ?? "");
   }, [current?.title, current?.tagline]);
 
   const dirty =
-    title.trim() !== (current?.title ?? "") ||
+    title.trim() !== (current?.title ?? DEFAULT_EVENT_NAME) ||
     tagline.trim() !== (current?.tagline ?? "");
 
   async function save(event: FormEvent<HTMLFormElement>): Promise<void> {
@@ -35,7 +43,14 @@ export function ShowIdentityPanel({ current }: ShowIdentityPanelProps) {
       method: "PUT",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title, tagline }),
+      body: JSON.stringify({
+        title,
+        tagline,
+        shortName: current?.shortName ?? "",
+        themeId: current?.themeId ?? "navy-bismarck",
+        fontFamily: current?.fontFamily ?? "system-ui",
+        reactionsEnabled: current?.reactionsEnabled ?? true,
+      }),
     });
     setBusy(false);
     if (response.ok) {

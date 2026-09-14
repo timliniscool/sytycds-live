@@ -11,6 +11,8 @@ import {
   showWebSocketUrl,
   useRealtimeSelector,
 } from "../realtime/RealtimeClient";
+import { PLATFORM_ATTRIBUTION, PLATFORM_NAME } from "../../shared/platform";
+import { useShowTheme } from "../theme";
 
 interface JudgeSurfaceProps {
   token: string;
@@ -45,6 +47,7 @@ export default function JudgeSurface({ token }: JudgeSurfaceProps) {
     client,
     (state) => state.lastJudgeSubmission,
   );
+  useShowTheme(projection?.show.themeId, projection?.show.fontFamily);
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [raw, setRaw] = useState("");
@@ -101,7 +104,7 @@ export default function JudgeSurface({ token }: JudgeSurfaceProps) {
   return (
     <main className="judge">
       <header className="judge__head">
-        <p className="judge__mark">SYTYCDS · ADJUDICATOR</p>
+        <p className="judge__mark">{PLATFORM_NAME} · ADJUDICATOR</p>
         {connection === "RECONNECTING" || connection === "DEGRADED" ? (
           <p className="judge__notice">Reconnecting…</p>
         ) : null}
@@ -256,6 +259,7 @@ export default function JudgeSurface({ token }: JudgeSurfaceProps) {
           </div>
         </div>
       )}
+      <small className="platform-attribution">{PLATFORM_ATTRIBUTION}</small>
     </main>
   );
 }

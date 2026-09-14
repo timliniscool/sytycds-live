@@ -131,26 +131,55 @@ export type FinalScoreResult =
       kind: "incomplete";
       missingJudges: readonly number[];
       audienceMissing: boolean;
+      judgeConfigurationMissing?: boolean;
     };
 
 export function calculateFinalScore(
   judgeScores: readonly (EffectiveJudgeScore | null | undefined)[],
   audienceMean: number | null | undefined,
+  audienceAllocation = 0.5,
 ): FinalScoreResult {
-  const missingJudges = [0, 1, 2, 3]
-    .map((index) =>
-      judgeScores[index] === null || judgeScores[index] === undefined
-        ? index + 1
-        : null,
+  if (
+    !Number.isFinite(audienceAllocation) ||
+    audienceAllocation < 0 ||
+    audienceAllocation > 1
+  ) {
+    throw new RangeError("Audience allocation must be between zero and one");
+  }
+  const judgeAllocation = 1 - audienceAllocation;
+  const missingJudges = judgeScores
+    .map((score, index) =>
+      score === null || score === undefined ? index + 1 : null,
     )
     .filter((index): index is number => index !== null);
-  const audienceMissing = audienceMean === null || audienceMean === undefined;
-  if (judgeScores.length !== 4 || missingJudges.length > 0 || audienceMissing) {
-    return { kind: "incomplete", missingJudges, audienceMissing };
+  const audienceMissing =
+    audienceAllocation > 0 &&
+    (audienceMean === null || audienceMean === undefined);
+  const judgeConfigurationMissing =
+    judgeAllocation > 0 && judgeScores.length === 0;
+  if (
+    (judgeAllocation > 0 && missingJudges.length > 0) ||
+    audienceMissing ||
+    judgeConfigurationMissing
+  ) {
+    return {
+      kind: "incomplete",
+      missingJudges,
+      audienceMissing,
+      ...(judgeConfigurationMissing ? { judgeConfigurationMissing: true } : {}),
+    };
   }
-  const judgeTotal = judgeScores.reduce<number>(
-    (sum, score) => sum + (score ?? 0),
-    0,
-  );
-  return { kind: "complete", value: judgeTotal / 8 + audienceMean / 2 };
+  let value = 0;
+  if (audienceAllocation > 0) value += audienceAllocation * audienceMean!;
+  if (judgeAllocation > 0) {
+    const judgeTotal = judgeScores.reduce<number>(
+      (sum, score) => sum + score!,
+      0,
+    );
+    value += judgeAllocation * (judgeTotal / judgeScores.length);
+  }
+  return {
+    kind: "complete",
+    value,
+  };
 }

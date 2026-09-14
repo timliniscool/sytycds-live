@@ -1,6 +1,7 @@
 const TOKEN_BYTES = 32;
 const ADMIN_SESSION_COOKIE = "sytycds_admin";
 const VOTER_COOKIE = "sytycds_voter";
+const PROJECTOR_COOKIE = "sytycds_projector";
 
 export interface CookieSettings {
   name: string;
@@ -85,10 +86,25 @@ export function voterCookieName(): string {
   return VOTER_COOKIE;
 }
 
+export function projectorSessionCookieName(): string {
+  return PROJECTOR_COOKIE;
+}
+
 export function sameSecret(left: string, right: string): boolean {
   const encoder = new TextEncoder();
   const leftBytes = encoder.encode(left);
   const rightBytes = encoder.encode(right);
+  let difference = leftBytes.length ^ rightBytes.length;
+  const maximum = Math.max(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < maximum; index += 1) {
+    difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+  }
+  return difference === 0;
+}
+
+export function sameBytes(left: ArrayBuffer, right: ArrayBuffer): boolean {
+  const leftBytes = new Uint8Array(left);
+  const rightBytes = new Uint8Array(right);
   let difference = leftBytes.length ^ rightBytes.length;
   const maximum = Math.max(leftBytes.length, rightBytes.length);
   for (let index = 0; index < maximum; index += 1) {

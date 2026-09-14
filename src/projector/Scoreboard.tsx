@@ -72,17 +72,9 @@ export function ScoreboardGraphic({
     audience.hasVotes ? (aggregate?.weightedMean ?? null) : null,
     AUDIENCE_TWEEN_MS,
   );
-  const tiles = [1, 2, 3, 4].map((slot) => {
-    const judge = judges.find((candidate) => candidate.slot === slot);
-    return judge
-      ? judgeTile(judge)
-      : {
-          name: `Judge ${slot}`,
-          primary: "WAITING",
-          secondary: null,
-          waiting: true,
-        };
-  });
+  const tiles = [...judges]
+    .sort((left, right) => left.slot - right.slot)
+    .map(judgeTile);
 
   return (
     <section className="stage scoreboard" key={act?.id ?? "scoreboard"}>

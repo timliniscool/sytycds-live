@@ -19,7 +19,7 @@ interface RankingRow extends Record<string, SqlStorageValue> {
 }
 
 /**
- * Rankings read only `finalised_results`. Live aggregates and provisional
+ * Rankings read only frozen v2 results. Live aggregates and provisional
  * values are deliberately not joined here: a completed show ranks on frozen
  * numbers, and a stray late vote can never reorder a published leaderboard.
  */
@@ -31,7 +31,7 @@ export function loadRanking(
     .exec<RankingRow>(
       `SELECT a.id, a.order_index, a.performer_name, a.school_year, a.act_name,
               a.act_type, a.public_description, a.withdrawn_at, r.final_score
-       FROM acts a LEFT JOIN finalised_results r
+       FROM acts a LEFT JOIN finalised_results_v2 r
          ON r.show_id = a.show_id AND r.act_id = a.id
        WHERE a.show_id = ? ORDER BY a.order_index`,
       showIdentifier,

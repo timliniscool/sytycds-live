@@ -20,6 +20,8 @@ import {
   type ProjectorPlaybackStatus,
   type ProjectorPreflightReportMessage,
   type ServerMessage,
+  type ReactionSamplingMessage,
+  type ReactionSignalMessage,
 } from "../../shared/protocol";
 
 /**
@@ -50,6 +52,8 @@ export interface RealtimeState {
   lastPreflightRequest: PreflightRequestMessage | null;
   /** Admin only: the projector's most recent self-report. */
   lastPreflightReport: ProjectorPreflightReportMessage | null;
+  reactionSampling: ReactionSamplingMessage | null;
+  lastReactionSignal: ReactionSignalMessage | null;
   audienceConnections: number;
   judgeConnections: ReadonlySet<string>;
   lastError: string | null;
@@ -97,6 +101,8 @@ const INITIAL_STATE: RealtimeState = {
   projectorTelemetry: null,
   lastPreflightRequest: null,
   lastPreflightReport: null,
+  reactionSampling: null,
+  lastReactionSignal: null,
   audienceConnections: 0,
   judgeConnections: new Set(),
   lastError: null,
@@ -574,6 +580,8 @@ export class RealtimeClient {
     let projectorTelemetry = this.state.projectorTelemetry;
     let lastPreflightRequest = this.state.lastPreflightRequest;
     let lastPreflightReport = this.state.lastPreflightReport;
+    let reactionSampling = this.state.reactionSampling;
+    let lastReactionSignal = this.state.lastReactionSignal;
     let audienceConnections = this.state.audienceConnections;
     let judgeConnections = this.state.judgeConnections;
 
@@ -673,6 +681,12 @@ export class RealtimeClient {
         audienceConnections = message.audience;
         judgeConnections = new Set(message.judgeIds);
         break;
+      case "reaction_sampling":
+        reactionSampling = message;
+        break;
+      case "reaction_signal":
+        lastReactionSignal = message;
+        break;
     }
 
     this.publish({
@@ -696,6 +710,8 @@ export class RealtimeClient {
       projectorTelemetry,
       lastPreflightRequest,
       lastPreflightReport,
+      reactionSampling,
+      lastReactionSignal,
       audienceConnections,
       judgeConnections,
       lastError: message.type === "protocol_error" ? message.detail : null,

@@ -21,10 +21,10 @@ describe("fixed surface routing", () => {
 
   it("provides route-specific document metadata", () => {
     expect(metadataForRoute(resolveRoute("/vote")).title).toBe(
-      "Vote · SYTYCDS",
+      "Vote · SYTYCDS Live",
     );
     expect(metadataForRoute(resolveRoute("/unknown")).title).toBe(
-      "Page not found · SYTYCDS",
+      "Page not found · SYTYCDS Live",
     );
   });
 });

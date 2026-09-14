@@ -155,6 +155,7 @@ export class ProjectorMediaEngine {
   } | null = null;
   private queue: Promise<void> = Promise.resolve();
   private readonly executed = new Set<string>();
+  private playbackExecutionId: string | null = null;
   private armed = false;
   private black = false;
   private visual: PlaybackState = "IDLE";
@@ -278,17 +279,20 @@ export class ProjectorMediaEngine {
             this.ack(command.executionId, true, "PREPARED");
             return;
           case "play":
+            this.playbackExecutionId = command.executionId;
             this.restartChannelsOf(cue);
             await this.apply(runtime, cues);
             this.ack(command.executionId, true, this.startedDetail());
             return;
           case "restart":
+            this.playbackExecutionId = command.executionId;
             this.rewindVideo();
             if (this.audioAssetId) this.audio.currentTime = 0;
             await this.apply(runtime, cues);
             this.ack(command.executionId, true, this.startedDetail());
             return;
           case "replay":
+            this.playbackExecutionId = command.executionId;
             if (!this.audioAssetId)
               throw new Error("no backing audio is loaded");
             this.audio.currentTime = 0;
@@ -309,6 +313,7 @@ export class ProjectorMediaEngine {
             this.ack(command.executionId, true, "PAUSED");
             return;
           case "resume":
+            this.playbackExecutionId = command.executionId;
             await this.apply(runtime, cues);
             this.ack(command.executionId, true, this.startedDetail());
             return;
@@ -550,7 +555,11 @@ export class ProjectorMediaEngine {
       if (current()) this.setVisual(video.ended ? "ENDED" : "PAUSED");
     });
     video.addEventListener("ended", () => {
-      if (current()) this.setVisual("ENDED");
+      if (current()) {
+        this.setVisual("ENDED");
+        if (this.playbackExecutionId)
+          this.ack(this.playbackExecutionId, true, "ENDED");
+      }
     });
     video.addEventListener("error", () => {
       if (current()) this.fail("video media error");
@@ -607,7 +616,11 @@ export class ProjectorMediaEngine {
         this.setAudio(audio.ended ? "ENDED" : "PAUSED");
     });
     audio.addEventListener("ended", () => {
-      if (current()) this.setAudio("ENDED");
+      if (current()) {
+        this.setAudio("ENDED");
+        if (this.playbackExecutionId)
+          this.ack(this.playbackExecutionId, true, "ENDED");
+      }
     });
     audio.addEventListener("error", () => {
       if (current() && this.audioAssetId) this.fail("audio media error");

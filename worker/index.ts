@@ -52,6 +52,8 @@ export default {
     if (
       url.pathname === "/api/ws" ||
       url.pathname.startsWith("/api/admin/") ||
+      url.pathname.startsWith("/api/projector/") ||
+      url.pathname.startsWith("/api/font/") ||
       url.pathname === "/api/vote" ||
       url.pathname === "/api/vote/status" ||
       url.pathname.startsWith("/api/media/")

@@ -31,6 +31,10 @@ function audience(
     role: "audience",
     show: {
       title: "Show",
+      shortName: "",
+      themeId: "navy-bismarck",
+      fontFamily: "system-ui",
+      reactionsEnabled: true,
       intermissionMessage: "Back in 15 minutes",
       emergencyMessage: "",
       displayMode: "PERFORMANCE",
@@ -153,6 +157,9 @@ function judge(
     role: "judge",
     show: {
       title: "Show",
+      shortName: "",
+      themeId: "navy-bismarck",
+      fontFamily: "system-ui",
       activeActId: activeAct?.id ?? null,
       revision: showRevision(4),
     },

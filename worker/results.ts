@@ -2,6 +2,7 @@ import { calculateFinalScore } from "../shared/scoring";
 import { type OperationalResult } from "../shared/domain";
 
 interface ResultInputRow extends Record<string, SqlStorageValue> {
+  id: string;
   slot: number;
   effective_score: number | null;
 }
@@ -17,21 +18,21 @@ function inputs(
   actIdentifier: string,
 ): {
   scores: (number | null)[];
+  judgeIds: string[];
   audienceMean: number | null;
+  audienceWeight: number;
 } {
   const rows = sql
     .exec<ResultInputRow>(
-      `SELECT j.slot, s.effective_score
-       FROM judges j LEFT JOIN judge_submissions s
+      `SELECT j.id, j.slot, s.effective_score
+       FROM show_judges j LEFT JOIN show_judge_submissions s
          ON s.show_id = j.show_id AND s.judge_id = j.id AND s.act_id = ?
-       WHERE j.show_id = ? AND j.revoked_at IS NULL ORDER BY j.slot`,
+       WHERE j.show_id = ? AND j.active = 1 ORDER BY j.slot`,
       actIdentifier,
       showIdentifier,
     )
     .toArray();
-  const scores = [1, 2, 3, 4].map(
-    (slot) => rows.find((row) => row.slot === slot)?.effective_score ?? null,
-  );
+  const scores = rows.map((row) => row.effective_score ?? null);
   const audience = sql
     .exec<{ weighted_mean: number | null; vote_count: number }>(
       `SELECT weighted_mean, vote_count FROM audience_aggregates
@@ -42,8 +43,15 @@ function inputs(
     .toArray()[0];
   return {
     scores,
+    judgeIds: rows.map((row) => row.id),
     audienceMean:
       audience && audience.vote_count > 0 ? audience.weighted_mean : null,
+    audienceWeight: sql
+      .exec<{ audience_weight: number }>(
+        "SELECT audience_weight FROM shows WHERE id = ?",
+        showIdentifier,
+      )
+      .one().audience_weight,
   };
 }
 
@@ -55,7 +63,7 @@ export function operationalResult(
 ): OperationalResult {
   const finalised = sql
     .exec<FinalisedRow>(
-      "SELECT final_score, finalised_at FROM finalised_results WHERE show_id = ? AND act_id = ?",
+      "SELECT final_score, finalised_at FROM finalised_results_v2 WHERE show_id = ? AND act_id = ?",
       showIdentifier,
       actIdentifier,
     )
@@ -66,14 +74,21 @@ export function operationalResult(
       value: finalised.final_score,
       finalisedAt: finalised.finalised_at,
     };
-  const { scores, audienceMean } = inputs(sql, showIdentifier, actIdentifier);
-  const calculated = calculateFinalScore(scores, audienceMean);
+  const { scores, audienceMean, audienceWeight } = inputs(
+    sql,
+    showIdentifier,
+    actIdentifier,
+  );
+  const calculated = calculateFinalScore(scores, audienceMean, audienceWeight);
   return calculated.kind === "complete"
     ? { kind: "provisional", value: calculated.value }
     : {
         kind: "incomplete",
         missingJudgeSlots: calculated.missingJudges,
         audienceMissing: calculated.audienceMissing,
+        ...(calculated.judgeConfigurationMissing
+          ? { judgeConfigurationMissing: true }
+          : {}),
       };
 }
 
@@ -93,27 +108,34 @@ export function finaliseResult(
     if (existing.kind === "incomplete")
       return {
         ok: false,
-        reason:
-          "A final result requires at least one audience vote and all four judge submissions",
+        reason: "The configured scoring inputs are not complete",
       };
-    const { scores, audienceMean } = inputs(sql, showIdentifier, actIdentifier);
-    if (audienceMean === null || scores.some((score) => score === null)) {
+    const { scores, judgeIds, audienceMean, audienceWeight } = inputs(
+      sql,
+      showIdentifier,
+      actIdentifier,
+    );
+    const judgeWeight = 1 - audienceWeight;
+    if (
+      (audienceWeight > 0 && audienceMean === null) ||
+      (judgeWeight > 0 &&
+        (scores.length === 0 || scores.some((score) => score === null)))
+    ) {
       return { ok: false, reason: "Result inputs changed while finalising" };
     }
     const timestamp = new Date().toISOString();
     sql.exec(
-      `INSERT INTO finalised_results (
-        show_id, act_id, audience_mean, judge_1_effective_score,
-        judge_2_effective_score, judge_3_effective_score, judge_4_effective_score,
-        final_score, finalised_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO finalised_results_v2 (
+        show_id, act_id, audience_mean, judge_scores_json, audience_weight,
+        judge_weight, active_judge_ids_json, formula_version, final_score, finalised_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?)`,
       showIdentifier,
       actIdentifier,
       audienceMean,
-      scores[0] ?? 0,
-      scores[1] ?? 0,
-      scores[2] ?? 0,
-      scores[3] ?? 0,
+      JSON.stringify(scores),
+      audienceWeight,
+      judgeWeight,
+      JSON.stringify(judgeIds),
       existing.value,
       timestamp,
     );

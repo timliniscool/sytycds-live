@@ -23,6 +23,8 @@ import {
   type ResultRevealState,
   type ShowRevision,
 } from "./domain";
+import type { ReactionHistogram } from "./reactions";
+import { capReactionHistogram } from "./reactions";
 import type {
   PreflightAssetRequest,
   ProjectorPreflightAsset,
@@ -82,6 +84,7 @@ export interface ProjectorAcknowledgement extends ProtocolEnvelope {
   type: "projector_ack";
   commandId: CommandId;
   succeeded: boolean;
+  state?: "received" | "prepared" | "started" | "paused" | "ended" | "failed";
   detail?: string;
 }
 
@@ -103,6 +106,13 @@ export interface ProjectorPreflightMessage extends ProtocolEnvelope {
   report: ProjectorPreflightReport;
 }
 
+export interface ReactionSummaryMessage extends ProtocolEnvelope {
+  type: "reaction_summary";
+  epoch: number;
+  interval: number;
+  histogram: ReactionHistogram;
+}
+
 export type ClientMessage =
   | ClientHello
   | AdminCommandMessage
@@ -111,7 +121,8 @@ export type ClientMessage =
   | ProjectorStatusMessage
   | ResyncRequest
   | PreflightRequest
-  | ProjectorPreflightMessage;
+  | ProjectorPreflightMessage
+  | ReactionSummaryMessage;
 
 export interface SnapshotMessage extends RevisionedServerMessage {
   type: "snapshot";
@@ -231,6 +242,7 @@ export interface ProjectorAcknowledgementMessage extends RevisionedServerMessage
   type: "projector_acknowledgement";
   commandId: CommandId;
   succeeded: boolean;
+  state?: "received" | "prepared" | "started" | "paused" | "ended" | "failed";
   detail?: string;
 }
 
@@ -243,6 +255,21 @@ export interface ConnectionCountMessage extends RevisionedServerMessage {
   type: "connection_count";
   audience: number;
   judgeIds: readonly string[];
+}
+
+export interface ReactionSamplingMessage extends RevisionedServerMessage {
+  type: "reaction_sampling";
+  slot: number;
+  serverNow: number;
+  epochMs: number;
+  intervalMs: number;
+  eligibleSlots: number;
+  maxUnits: number;
+}
+
+export interface ReactionSignalMessage extends RevisionedServerMessage {
+  type: "reaction_signal";
+  histogram: ReactionHistogram;
 }
 
 export interface ProtocolErrorMessage extends RevisionedServerMessage {
@@ -278,6 +305,8 @@ export type ServerMessage =
   | ProjectorAcknowledgementMessage
   | ProjectorTelemetryMessage
   | ConnectionCountMessage
+  | ReactionSamplingMessage
+  | ReactionSignalMessage
   | ProtocolErrorMessage
   | ForceResyncMessage;
 
@@ -501,6 +530,15 @@ export function parseClientMessage(
       const acknowledgementCommandId = parseCommandIdentifier(value.commandId);
       return acknowledgementCommandId &&
         typeof value.succeeded === "boolean" &&
+        (value.state === undefined ||
+          [
+            "received",
+            "prepared",
+            "started",
+            "paused",
+            "ended",
+            "failed",
+          ].includes(value.state as string)) &&
         (value.detail === undefined || typeof value.detail === "string")
         ? {
             ok: true,
@@ -509,6 +547,13 @@ export function parseClientMessage(
               protocolVersion: PROTOCOL_VERSION,
               commandId: acknowledgementCommandId,
               succeeded: value.succeeded,
+              ...(typeof value.state === "string"
+                ? {
+                    state: value.state as NonNullable<
+                      ProjectorAcknowledgement["state"]
+                    >,
+                  }
+                : {}),
               ...(typeof value.detail === "string"
                 ? { detail: value.detail }
                 : {}),
@@ -569,6 +614,31 @@ export function parseClientMessage(
             },
           }
         : { ok: false, reason: "Invalid projector preflight report" };
+    }
+    case "reaction_summary": {
+      const epoch = value.epoch;
+      const interval = value.interval;
+      const histogram = Array.isArray(value.histogram)
+        ? capReactionHistogram(value.histogram)
+        : null;
+      return typeof epoch === "number" &&
+        Number.isSafeInteger(epoch) &&
+        epoch >= 0 &&
+        typeof interval === "number" &&
+        Number.isSafeInteger(interval) &&
+        interval >= 0 &&
+        histogram
+        ? {
+            ok: true,
+            message: {
+              type: "reaction_summary",
+              protocolVersion: PROTOCOL_VERSION,
+              epoch,
+              interval,
+              histogram,
+            },
+          }
+        : { ok: false, reason: "Invalid reaction summary" };
     }
     default:
       return { ok: false, reason: "Unknown protocol message" };

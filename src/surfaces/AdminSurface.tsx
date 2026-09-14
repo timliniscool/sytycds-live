@@ -16,6 +16,7 @@ import { JudgeLinks } from "../admin/JudgeLinks";
 import { MediaConsole } from "../admin/MediaConsole";
 import { PreflightPanel } from "../admin/PreflightPanel";
 import { PublicTextPanel } from "../admin/PublicTextPanel";
+import { ProjectorPairingPanel } from "../admin/ProjectorPairingPanel";
 import { ResultsPanel } from "../admin/ResultsPanel";
 import { ShowIdentityPanel } from "../admin/ShowIdentityPanel";
 import {
@@ -23,6 +24,8 @@ import {
   showWebSocketUrl,
   useRealtimeSelector,
 } from "../realtime/RealtimeClient";
+import { PLATFORM_ATTRIBUTION, PLATFORM_NAME } from "../../shared/platform";
+import { useShowTheme } from "../theme";
 
 type AuthenticationState = "checking" | "signed-out" | "signed-in" | "failed";
 type ConsoleView = "show" | "results" | "setup" | "history";
@@ -30,7 +33,8 @@ type ConsoleView = "show" | "results" | "setup" | "history";
 export default function AdminSurface() {
   const [authentication, setAuthentication] =
     useState<AuthenticationState>("checking");
-  const [secret, setSecret] = useState("");
+  const [username, setUsername] = useState("admin");
+  const [password, setPassword] = useState("");
 
   useEffect(() => {
     void fetch("/api/admin/session", { credentials: "same-origin" })
@@ -51,9 +55,9 @@ export default function AdminSurface() {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ secret }),
+      body: JSON.stringify({ username, password }),
     });
-    setSecret("");
+    setPassword("");
     setAuthentication(response.ok ? "signed-in" : "signed-out");
   }
 
@@ -64,20 +68,29 @@ export default function AdminSurface() {
         aria-labelledby="admin-login-title"
       >
         <header>
-          <p>SYTYCDS / show control</p>
+          <p>{PLATFORM_NAME} / show control</p>
           <h1 id="admin-login-title">Operator sign-in</h1>
         </header>
         {authentication === "checking" ? (
           <p>Checking operator session…</p>
         ) : (
           <form onSubmit={submit}>
-            <label htmlFor="admin-secret">Show-control secret</label>
+            <label htmlFor="admin-username">Username</label>
             <input
-              id="admin-secret"
+              id="admin-username"
+              type="text"
+              autoComplete="username"
+              value={username}
+              onChange={(event) => setUsername(event.target.value)}
+              required
+            />
+            <label htmlFor="admin-password">Password</label>
+            <input
+              id="admin-password"
               type="password"
               autoComplete="current-password"
-              value={secret}
-              onChange={(event) => setSecret(event.target.value)}
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
               required
             />
             <button type="submit">Sign in</button>
@@ -86,6 +99,7 @@ export default function AdminSurface() {
             )}
           </form>
         )}
+        <footer>{PLATFORM_ATTRIBUTION}</footer>
       </main>
     );
   }
@@ -136,6 +150,7 @@ function Console() {
   const projection = useRealtimeSelector(client, (state) =>
     state.projection?.role === "admin" ? state.projection : null,
   );
+  useShowTheme(projection?.show.themeId, projection?.show.fontFamily);
   const connection = useRealtimeSelector(client, (state) => state.connection);
   const lastError = useRealtimeSelector(client, (state) => state.lastError);
   const showUnavailable = useRealtimeSelector(
@@ -237,7 +252,7 @@ function Console() {
           <ShowIdentityPanel current={null} />
         ) : (
           <p className="admin-loading">
-            <span className="admin-mark">SYTYCDS / CONTROL</span>
+            <span className="admin-mark">{PLATFORM_NAME} / CONTROL</span>
             {connection === "UNAUTHORISED"
               ? "The coordinator refused this operator session. Sign out and in again."
               : connection === "INCOMPATIBLE"
@@ -262,22 +277,28 @@ function Console() {
     judge.submission ? [judge.submission.effectiveScore] : [],
   );
   const judgeContribution =
-    submittedScores.length === 4
-      ? submittedScores.reduce((sum, score) => sum + score, 0) / 8
+    projection.show.audienceWeight < 1 &&
+    submittedScores.length === projection.judges.length &&
+    projection.judges.length > 0
+      ? (submittedScores.reduce((sum, score) => sum + score, 0) /
+          projection.judges.length) *
+        (1 - projection.show.audienceWeight)
       : null;
   const judgeMean =
-    submittedScores.length === 4
-      ? submittedScores.reduce((sum, score) => sum + score, 0) / 4
+    submittedScores.length === projection.judges.length &&
+    projection.judges.length > 0
+      ? submittedScores.reduce((sum, score) => sum + score, 0) /
+        projection.judges.length
       : null;
   const audienceContribution =
     aggregate?.weightedMean === null || aggregate?.weightedMean === undefined
       ? null
-      : aggregate.weightedMean / 2;
+      : aggregate.weightedMean * projection.show.audienceWeight;
   const result = active ? projection.results[active.id] : undefined;
   return (
     <main className="admin-console">
       <header className="admin-status">
-        <span className="admin-mark">SYTYCDS / CONTROL</span>
+        <span className="admin-mark">{PLATFORM_NAME} / CONTROL</span>
         <strong
           className={`connection connection--${connection.toLowerCase()}`}
         >
@@ -389,10 +410,15 @@ function Console() {
         {view === "setup" && (
           <>
             <PreflightPanel client={client} />
+            <ProjectorPairingPanel />
             <ShowIdentityPanel
               current={{
                 title: projection.show.title,
                 tagline: projection.show.tagline,
+                shortName: projection.show.shortName,
+                themeId: projection.show.themeId,
+                fontFamily: projection.show.fontFamily,
+                reactionsEnabled: projection.show.reactionsEnabled,
               }}
             />
             <PublicTextPanel
