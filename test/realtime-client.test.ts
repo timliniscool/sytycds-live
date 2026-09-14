@@ -400,6 +400,18 @@ describe("browser realtime client", () => {
       }),
     );
     expect(client.getState().showUnavailable).toBe(false);
+    // A reset while connected drops the stale projection as well.
+    socket.receive(
+      serialiseServerMessage({
+        type: "protocol_error",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: showRevision(0),
+        code: "show_unavailable",
+        detail: "No show has been created",
+      }),
+    );
+    expect(client.getState().projection).toBeNull();
+    expect(client.getState().showUnavailable).toBe(true);
     client.destroy();
   });
 

@@ -583,6 +583,16 @@ export class RealtimeClient {
           projection = applyPatches(projection, message);
         }
         break;
+      case "protocol_error":
+        // The show was erased underneath a connected client: whatever it
+        // still holds describes a show that no longer exists.
+        if (message.code === "show_unavailable") {
+          projection = null;
+          aggregates = new Map();
+          audienceVoting = null;
+          judgePermission = null;
+        }
+        break;
       case "aggregate_update": {
         const nextAggregates = new Map(aggregates);
         nextAggregates.set(message.aggregate.actId, message.aggregate);
@@ -662,8 +672,6 @@ export class RealtimeClient {
       case "connection_count":
         audienceConnections = message.audience;
         judgeConnections = new Set(message.judgeIds);
-        break;
-      case "protocol_error":
         break;
     }
 
