@@ -319,7 +319,7 @@ const PUBLIC_MODES_AND_RESULTS_SCHEMA: SchemaMigration = {
   ],
 };
 
-export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
+const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
   COMMAND_IDEMPOTENCY_SCHEMA,

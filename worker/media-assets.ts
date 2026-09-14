@@ -202,23 +202,19 @@ export function listMediaAssets(
   showIdentifier: string,
 ): MediaAsset[] {
   return sql
-    .exec<AssetRow>(
-      `SELECT id, object_key, original_filename, mime_type, size_bytes, version_identifier, uploaded_at, duration_ms, width, height
-     FROM media_assets WHERE show_id = ? AND deleted_at IS NULL ORDER BY uploaded_at DESC`,
+    .exec<AssetRow & { referenced: number }>(
+      `SELECT m.id, m.object_key, m.original_filename, m.mime_type, m.size_bytes,
+              m.version_identifier, m.uploaded_at, m.duration_ms, m.width, m.height,
+              EXISTS (
+                SELECT 1 FROM cue_asset_references r WHERE r.asset_id = m.id
+              ) AS referenced
+       FROM media_assets m
+       WHERE m.show_id = ? AND m.deleted_at IS NULL
+       ORDER BY m.uploaded_at DESC`,
       showIdentifier,
     )
     .toArray()
-    .map((row) =>
-      rowToAsset(
-        row,
-        sql
-          .exec<{ present: number }>(
-            "SELECT 1 AS present FROM cue_asset_references WHERE asset_id = ?",
-            row.id,
-          )
-          .toArray().length > 0,
-      ),
-    );
+    .map((row) => rowToAsset(row, row.referenced === 1));
 }
 
 export async function deleteMediaAsset(

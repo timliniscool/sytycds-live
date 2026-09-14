@@ -316,9 +316,7 @@ function parseCount(value: unknown): number | null {
 }
 
 /** Cache summaries are small counters; anything malformed drops the summary, not the message. */
-export function parseMediaCacheSummary(
-  value: unknown,
-): MediaCacheSummary | undefined {
+function parseMediaCacheSummary(value: unknown): MediaCacheSummary | undefined {
   if (!isRecord(value)) return undefined;
   const files = parseCount(value.files);
   const cached = parseCount(value.cached);

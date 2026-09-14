@@ -61,6 +61,7 @@ import { preflightAssetRequests, runServerPreflight } from "./preflight";
 import { configuredPublicOrigin } from "./public-origin";
 import { hasSameOrigin } from "./security";
 import { initialiseSchema, readSchemaVersion } from "./schema";
+import { parseShowInput, upsertShow } from "./show-config";
 import { authenticateSocketRole } from "./socket-auth";
 import {
   executeAdminCommand,
@@ -170,6 +171,9 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
     if (url.pathname === "/api/admin/history" && request.method === "GET") {
       return this.handleHistory(request, url);
+    }
+    if (url.pathname === "/api/admin/show" && request.method === "PUT") {
+      return this.handleUpsertShow(request);
     }
     if (url.pathname === "/api/admin/judges" && request.method === "GET") {
       return this.handleListJudges(request);
@@ -365,6 +369,33 @@ export class ShowCoordinator extends DurableObject<Env> {
       only: only && /^[a-z_]{1,40}$/u.test(only) ? only : undefined,
     });
     return Response.json({ items });
+  }
+
+  /** Provisioning: the first call creates the show, later calls rename it. */
+  private async handleUpsertShow(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    const input = parseShowInput(await this.adminBody(request));
+    if (!input) {
+      return Response.json(
+        { error: "A title of up to 120 characters is required" },
+        { status: 400 },
+      );
+    }
+    const result = upsertShow(this.ctx.storage, PRIMARY_SHOW_ID, input);
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: result.created ? "show.created" : "show.renamed",
+      actor: "admin",
+      data: { title: input.title },
+    });
+    // Every role's projection changes shape when the show appears or is
+    // renamed, including sockets that were told the show was unavailable.
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("audience");
+    this.broadcastSnapshots("judge");
+    return Response.json(result, { status: result.created ? 201 : 200 });
   }
 
   private async handleHistory(request: Request, url: URL): Promise<Response> {
@@ -1397,8 +1428,12 @@ export class ShowCoordinator extends DurableObject<Env> {
   }
 
   private sendOne(ws: WebSocket, message: ServerMessage): void {
+    this.sendRaw(ws, serialiseServerMessage(message));
+  }
+
+  private sendRaw(ws: WebSocket, payload: string): void {
     try {
-      ws.send(serialiseServerMessage(message));
+      ws.send(payload);
     } catch {
       ws.close(1011, "Unable to deliver message");
     }
@@ -1421,6 +1456,7 @@ export class ShowCoordinator extends DurableObject<Env> {
   }
 
   private sendJudge(judgeIdentifier: JudgeId, message: ServerMessage): void {
+    const payload = serialiseServerMessage(message);
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = this.socketAttachment(ws);
       if (
@@ -1428,22 +1464,24 @@ export class ShowCoordinator extends DurableObject<Env> {
         attachment.role.kind === "judge" &&
         attachment.role.judgeId === judgeIdentifier
       ) {
-        this.sendOne(ws, message);
+        this.sendRaw(ws, payload);
       }
     }
   }
 
+  /** One serialisation per broadcast; hundreds of phones share the bytes. */
   private broadcastRole(
     targetRole: ConnectionRole["kind"],
     message: ServerMessage,
   ): void {
+    const payload = serialiseServerMessage(message);
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = this.socketAttachment(ws);
       if (
         attachment?.phase === "ready" &&
         attachment.role.kind === targetRole
       ) {
-        this.sendOne(ws, message);
+        this.sendRaw(ws, payload);
       }
     }
   }

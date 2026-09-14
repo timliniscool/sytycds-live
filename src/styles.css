@@ -2396,3 +2396,53 @@ input:focus-visible {
     transform: none;
   }
 }
+
+/* ============================== admin: show identity ============================== */
+
+.show-identity {
+  border-bottom: 1px solid var(--admin-line);
+  background: #0d1719;
+}
+.admin-console--loading .show-identity {
+  width: min(36rem, 100%);
+  border: 1px solid var(--admin-line);
+}
+.show-identity__form {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 1fr);
+  align-items: center;
+  gap: 0.6rem 0.8rem;
+  padding: 0.8rem 1rem;
+}
+.show-identity__form label {
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+.show-identity__form input {
+  min-height: 38px;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--admin-line);
+  border-radius: var(--admin-radius);
+  background: #07110f;
+  color: var(--admin-ink);
+}
+.show-identity__form button {
+  grid-column: 2;
+  justify-self: start;
+  border-color: var(--admin-accent) !important;
+}
+.show-identity__form output {
+  grid-column: 2;
+  color: var(--admin-warning);
+  font-size: 0.8rem;
+}
+
+@media (max-width: 800px) {
+  .show-identity__form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .show-identity__form button,
+  .show-identity__form output {
+    grid-column: 1;
+  }
+}

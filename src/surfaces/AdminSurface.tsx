@@ -17,6 +17,7 @@ import { MediaConsole } from "../admin/MediaConsole";
 import { PreflightPanel } from "../admin/PreflightPanel";
 import { PublicTextPanel } from "../admin/PublicTextPanel";
 import { ResultsPanel } from "../admin/ResultsPanel";
+import { ShowIdentityPanel } from "../admin/ShowIdentityPanel";
 import {
   RealtimeClient,
   showWebSocketUrl,
@@ -136,6 +137,7 @@ function Console() {
     state.projection?.role === "admin" ? state.projection : null,
   );
   const connection = useRealtimeSelector(client, (state) => state.connection);
+  const lastError = useRealtimeSelector(client, (state) => state.lastError);
   // Every revisioned message advances this, while the projection keeps the
   // revision it was snapshotted at. Commands must be stamped with the former or
   // the second command of a snapshot is always rejected as stale.
@@ -151,10 +153,6 @@ function Console() {
   const judgeConnections = useRealtimeSelector(
     client,
     (state) => state.judgeConnections,
-  );
-  const telemetry = useRealtimeSelector(
-    client,
-    (state) => state.projectorTelemetry,
   );
   const projectorAcknowledgement = useRealtimeSelector(
     client,
@@ -230,10 +228,15 @@ function Console() {
   if (!projection)
     return (
       <main className="admin-console admin-console--loading">
-        <p className="admin-loading">
-          <span className="admin-mark">SYTYCDS / CONTROL</span>
-          Connecting to the show coordinator…
-        </p>
+        {lastError?.includes("unavailable") ? (
+          // A fresh deployment: the coordinator is up but no show exists yet.
+          <ShowIdentityPanel current={null} />
+        ) : (
+          <p className="admin-loading">
+            <span className="admin-mark">SYTYCDS / CONTROL</span>
+            Connecting to the show coordinator…
+          </p>
+        )}
       </main>
     );
   const active =
@@ -374,6 +377,12 @@ function Console() {
         {view === "setup" && (
           <>
             <PreflightPanel client={client} />
+            <ShowIdentityPanel
+              current={{
+                title: projection.show.title,
+                tagline: projection.show.tagline,
+              }}
+            />
             <PublicTextPanel
               intermissionMessage={projection.show.intermissionMessage}
               emergencyMessage={projection.show.emergencyMessage}
@@ -432,7 +441,7 @@ function Console() {
               act={active}
               runtime={projection.runtime}
               displayMode={projection.show.displayMode}
-              telemetry={telemetry}
+              client={client}
               projectorAcknowledgement={projectorAcknowledgement}
               commandAcknowledgement={acknowledgement}
               send={send}

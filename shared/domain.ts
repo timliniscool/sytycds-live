@@ -108,7 +108,10 @@ export interface PersistedCue {
  * labels and backstage notes are removed by the server projection, never hidden
  * by the display client.
  */
-export type ProjectorCue = Omit<PersistedCue, "operatorLabel" | "internalNote">;
+export type ProjectorCue = Omit<
+  PersistedCue,
+  "operatorLabel" | "internalNote" | "operations"
+>;
 
 export type CueOperation =
   | { kind: "visual"; visual: VisualCue }
@@ -221,15 +224,6 @@ export interface AudienceAggregate {
   weightedSum: number;
   totalWeight: number;
   weightedMean: number | null;
-}
-
-export interface PersistedResult {
-  showId: ShowId;
-  actId: ActId;
-  audienceMean: number | null;
-  judgeScores: readonly EffectiveJudgeScore[];
-  finalScore: number | null;
-  finalisedAt: string | null;
 }
 
 export interface AdminJudgeState {

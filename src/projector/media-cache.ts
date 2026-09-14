@@ -3,7 +3,7 @@ import type {
   MediaManifestEntry,
 } from "../../shared/domain";
 
-export const MEDIA_CACHE_NAME = "sytycds-media";
+const MEDIA_CACHE_NAME = "sytycds-media";
 
 /** The one URL scheme for media bytes; the service worker matches on it too. */
 export function assetUrl(assetId: string): string {
@@ -68,7 +68,7 @@ export function summariseCache(
   };
 }
 
-export function isQuotaError(error: unknown): boolean {
+function isQuotaError(error: unknown): boolean {
   return (
     (error instanceof DOMException && error.name === "QuotaExceededError") ||
     (error instanceof Error && /quota/iu.test(error.message))
@@ -193,24 +193,12 @@ export class MediaCache {
       if (!response.ok || !response.body) {
         throw new Error(`HTTP ${response.status}`);
       }
-      const chunks: BlobPart[] = [];
-      const reader = response.body.getReader();
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-        this.partialBytes += value.byteLength;
-        this.emit();
-      }
-      if (this.partialBytes !== entry.sizeBytes) {
-        throw new Error(
-          `received ${this.partialBytes} of ${entry.sizeBytes} bytes`,
-        );
-      }
-      const body = new Blob(chunks, { type: entry.mimeType });
-      await cache.put(
+      // One branch streams straight into the cache, the other counts bytes,
+      // so a large video never sits in page memory in full.
+      const [toCache, toCount] = response.body.tee();
+      const stored = cache.put(
         assetUrl(entry.id),
-        new Response(body, {
+        new Response(toCache, {
           headers: {
             "Content-Type": entry.mimeType,
             "Content-Length": String(entry.sizeBytes),
@@ -218,9 +206,23 @@ export class MediaCache {
           },
         }),
       );
+      const reader = toCount.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        this.partialBytes += value.byteLength;
+        this.emit();
+      }
+      await stored;
+      if (this.partialBytes !== entry.sizeBytes) {
+        await cache.delete(assetUrl(entry.id));
+        throw new Error(
+          `received ${this.partialBytes} of ${entry.sizeBytes} bytes`,
+        );
+      }
       // Verify the write actually landed before counting it as prepared.
-      const stored = await cache.match(assetUrl(entry.id));
-      if (stored?.headers.get(VERSION_HEADER) !== entry.version) {
+      const written = await cache.match(assetUrl(entry.id));
+      if (written?.headers.get(VERSION_HEADER) !== entry.version) {
         throw new Error("cache write could not be read back");
       }
       this.cachedIds.add(entry.id);

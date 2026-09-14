@@ -9,14 +9,18 @@ import type {
 import type {
   CommandAcknowledgementMessage,
   ProjectorAcknowledgementMessage,
-  ProjectorPlaybackStatus,
 } from "../../shared/protocol";
+import {
+  useRealtimeSelector,
+  type RealtimeClient,
+} from "../realtime/RealtimeClient";
 
 export interface MediaConsoleProps {
   act: AdminAct | null;
   runtime: ShowRuntimeState;
   displayMode: DisplayMode;
-  telemetry: ProjectorPlaybackStatus | null;
+  /** Telemetry ticks every half second; only this console re-renders for it. */
+  client: RealtimeClient;
   projectorAcknowledgement: ProjectorAcknowledgementMessage | null;
   commandAcknowledgement: CommandAcknowledgementMessage | null;
   send(type: AdminCommandType, extras?: Record<string, unknown>): string | null;
@@ -53,11 +57,15 @@ export function MediaConsole({
   act,
   runtime,
   displayMode,
-  telemetry,
+  client,
   projectorAcknowledgement,
   commandAcknowledgement,
   send,
 }: MediaConsoleProps) {
+  const telemetry = useRealtimeSelector(
+    client,
+    (state) => state.projectorTelemetry,
+  );
   const cues = act?.cues ?? [];
   const [selectedCueId, setSelectedCueId] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingCommand | null>(null);

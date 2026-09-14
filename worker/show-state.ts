@@ -221,7 +221,24 @@ function loadShow(sql: SqlStorage, id: string): ShowRow | null {
   );
 }
 
+const RUNTIME_COLUMNS = `previous_display_mode, global_judge_permission, prepared_cue_id,
+              active_visual_cue_id, active_audio_cue_id, visual_transport,
+              audio_transport, black_screen, emergency_presentation,
+              results_stage, results_revealed_groups`;
+
+function readRuntime(sql: SqlStorage, id: string): RuntimeRow | undefined {
+  return sql
+    .exec<RuntimeRow>(
+      `SELECT ${RUNTIME_COLUMNS} FROM show_runtime WHERE show_id = ?`,
+      id,
+    )
+    .toArray()[0];
+}
+
+/** Every projection reads this; only the very first one ever writes it. */
 function ensureRuntime(sql: SqlStorage, id: string): RuntimeRow {
+  const existing = readRuntime(sql, id);
+  if (existing) return existing;
   sql.exec(
     `INSERT OR IGNORE INTO show_runtime (
       show_id, previous_display_mode, global_judge_permission, prepared_cue_id,
@@ -231,17 +248,7 @@ function ensureRuntime(sql: SqlStorage, id: string): RuntimeRow {
     id,
     now(),
   );
-
-  const row = sql
-    .exec<RuntimeRow>(
-      `SELECT previous_display_mode, global_judge_permission, prepared_cue_id,
-              active_visual_cue_id, active_audio_cue_id, visual_transport,
-              audio_transport, black_screen, emergency_presentation,
-              results_stage, results_revealed_groups
-       FROM show_runtime WHERE show_id = ?`,
-      id,
-    )
-    .toArray()[0];
+  const row = readRuntime(sql, id);
   if (!row) {
     throw new Error("Unable to initialise show runtime state");
   }
@@ -1306,7 +1313,10 @@ function loadCues(
     .map((row) => toCue(showIdentifier, row));
 }
 
-/** Removes operator labels and backstage notes before a cue reaches the hall. */
+/**
+ * Removes operator labels, backstage notes and the operation list before a cue
+ * reaches the hall. The projector drives media from `visual` and `audio` only.
+ */
 function toProjectorCue(cue: PersistedCue): ProjectorCue {
   return {
     id: cue.id,
@@ -1316,7 +1326,6 @@ function toProjectorCue(cue: PersistedCue): ProjectorCue {
     visual: cue.visual,
     audio: cue.audio,
     durationMs: cue.durationMs,
-    operations: cue.operations,
   };
 }
 

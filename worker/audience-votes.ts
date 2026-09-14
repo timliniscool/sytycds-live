@@ -139,39 +139,37 @@ export function submitAudienceVote(
       }
       throw error;
     }
-    storage.sql.exec(
-      `INSERT INTO audience_aggregates (
-        show_id, act_id, vote_count, weighted_sum, total_weight, weighted_mean, updated_at
-      ) VALUES (?, ?, 1, ?, ?, ?, ?)
-      ON CONFLICT(show_id, act_id) DO UPDATE SET
-        vote_count = audience_aggregates.vote_count + 1,
-        weighted_sum = audience_aggregates.weighted_sum + excluded.weighted_sum,
-        total_weight = audience_aggregates.total_weight + excluded.total_weight,
-        weighted_mean = (audience_aggregates.weighted_sum + excluded.weighted_sum) /
-          (audience_aggregates.total_weight + excluded.total_weight),
-        updated_at = excluded.updated_at`,
-      showIdentifier,
-      request.actIdentifier,
-      request.score * weight,
-      weight,
-      request.score,
-      new Date().toISOString(),
-    );
+    const timestamp = new Date().toISOString();
+    // The upsert hands back the updated aggregate, so the hot path is one
+    // insert, one upsert and one revision bump with no read-back.
+    const aggregate = storage.sql
+      .exec<AggregateRow>(
+        `INSERT INTO audience_aggregates (
+          show_id, act_id, vote_count, weighted_sum, total_weight, weighted_mean, updated_at
+        ) VALUES (?, ?, 1, ?, ?, ?, ?)
+        ON CONFLICT(show_id, act_id) DO UPDATE SET
+          vote_count = audience_aggregates.vote_count + 1,
+          weighted_sum = audience_aggregates.weighted_sum + excluded.weighted_sum,
+          total_weight = audience_aggregates.total_weight + excluded.total_weight,
+          weighted_mean = (audience_aggregates.weighted_sum + excluded.weighted_sum) /
+            (audience_aggregates.total_weight + excluded.total_weight),
+          updated_at = excluded.updated_at
+        RETURNING vote_count, weighted_sum, total_weight, weighted_mean`,
+        showIdentifier,
+        request.actIdentifier,
+        request.score * weight,
+        weight,
+        request.score,
+        timestamp,
+      )
+      .one();
     const revision = show.revision + 1;
     storage.sql.exec(
       "UPDATE shows SET revision = ?, updated_at = ? WHERE id = ?",
       revision,
-      new Date().toISOString(),
+      timestamp,
       showIdentifier,
     );
-    const aggregate = storage.sql
-      .exec<AggregateRow>(
-        `SELECT vote_count, weighted_sum, total_weight, weighted_mean
-         FROM audience_aggregates WHERE show_id = ? AND act_id = ?`,
-        showIdentifier,
-        request.actIdentifier,
-      )
-      .one();
     // Milestones only: one line per order of magnitude, not one per vote.
     if (isVoteMilestone(aggregate.vote_count)) {
       recordAuditEvent(storage.sql, showIdentifier, {

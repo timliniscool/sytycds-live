@@ -1,0 +1,19 @@
+# Served by Cloudflare Workers static assets for every asset response.
+# API and WebSocket responses get their headers from worker/index.ts.
+
+/*
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: DENY
+  Referrer-Policy: strict-origin-when-cross-origin
+  Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=()
+  Cross-Origin-Opener-Policy: same-origin
+  Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self'; worker-src 'self'; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'
+
+# The service worker must never be served stale.
+/media-sw.js
+  Cache-Control: no-cache
+  Service-Worker-Allowed: /projector
+
+# The app shell is small and must pick up each deployment immediately.
+/index.html
+  Cache-Control: no-cache

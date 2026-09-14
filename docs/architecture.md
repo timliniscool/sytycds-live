@@ -166,6 +166,15 @@ checks, close-mid-burst and act-change races, 100 and 500 phones with fan-out
 and reconnect storms, repeated operator clicks, query plans on the vote path,
 per-vote transaction cost and role payload sizes.
 
+## Deployment
+
+`docs/deployment.md` is the operator's runbook: install, Wrangler login, R2
+bucket, secrets, canonical origin, first and later deployments, rollback and
+the smoke test. The show itself is provisioned from the console (`PUT
+/api/admin/show`), so a fresh deployment needs no database seeding. Static
+assets carry security headers from `public/_headers`; API responses get theirs
+from `worker/index.ts`.
+
 ## State lifetime
 
 Persistent state belongs in coordinator SQLite: show configuration, acts and cues, display/voting state, hashed identities and credentials, accepted submissions, aggregates, revisions, idempotency records, and result publication state. R2 persists media bytes.

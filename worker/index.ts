@@ -6,6 +6,26 @@ interface CoordinatorHealth {
   schemaVersion: number;
 }
 
+/**
+ * API responses are never cacheable and never sniffable. WebSocket upgrades
+ * (status 101) are returned untouched because their headers belong to the
+ * handshake. Static assets get their headers from `public/_headers`.
+ */
+function withApiHeaders(response: Response): Response {
+  if (response.status === 101) return response;
+  const headers = new Headers(response.headers);
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  headers.set("X-Frame-Options", "DENY");
+  // Media bytes are immutable per asset version and carry their own policy.
+  if (!headers.has("Cache-Control")) headers.set("Cache-Control", "no-store");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -17,14 +37,16 @@ export default {
       );
 
       if (!response.ok) {
-        return Response.json(
-          { ok: false, error: "Coordinator unavailable" },
-          { status: 503 },
+        return withApiHeaders(
+          Response.json(
+            { ok: false, error: "Coordinator unavailable" },
+            { status: 503 },
+          ),
         );
       }
 
       const coordinator = (await response.json()) as CoordinatorHealth;
-      return Response.json({ ok: true, coordinator });
+      return withApiHeaders(Response.json({ ok: true, coordinator }));
     }
 
     if (
@@ -35,13 +57,11 @@ export default {
       url.pathname.startsWith("/api/media/")
     ) {
       const id = env.SHOW_COORDINATOR.idFromName("primary");
-      return env.SHOW_COORDINATOR.get(id).fetch(request);
+      return withApiHeaders(await env.SHOW_COORDINATOR.get(id).fetch(request));
     }
 
-    if (url.pathname.startsWith("/api/")) {
-      return Response.json({ error: "Not found" }, { status: 404 });
-    }
-
-    return Response.json({ error: "Not found" }, { status: 404 });
+    return withApiHeaders(
+      Response.json({ error: "Not found" }, { status: 404 }),
+    );
   },
 } satisfies ExportedHandler<Env>;

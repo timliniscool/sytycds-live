@@ -45,7 +45,7 @@ export function JoinCode({
   );
 }
 
-export function displayUrl(url: string): string {
+function displayUrl(url: string): string {
   return url.replace(/^https?:\/\//u, "").replace(/\/$/u, "");
 }
 
