@@ -13,12 +13,24 @@ import {
   type ClientHello,
   type ClientMessage,
   type CommandAcknowledgementMessage,
+  type JudgeSubmissionUpdateMessage,
   type MediaCommandMessage,
+  type ProjectorAcknowledgementMessage,
+  type ProjectorPlaybackStatus,
   type ServerMessage,
 } from "../../shared/protocol";
 
+/**
+ * `UNAUTHORISED` and `INCOMPATIBLE` are terminal: retrying a rejected judge
+ * token or a stale protocol only produces an endless reconnect loop.
+ */
 export type RealtimeConnectionState =
-  "CONNECTING" | "LIVE" | "RECONNECTING" | "DEGRADED" | "INCOMPATIBLE";
+  | "CONNECTING"
+  | "LIVE"
+  | "RECONNECTING"
+  | "DEGRADED"
+  | "INCOMPATIBLE"
+  | "UNAUTHORISED";
 
 export interface RealtimeState {
   connection: RealtimeConnectionState;
@@ -29,6 +41,9 @@ export interface RealtimeState {
   judgePermission: JudgePermissionState | null;
   lastMediaCommand: MediaCommandMessage | null;
   lastCommandAcknowledgement: CommandAcknowledgementMessage | null;
+  lastProjectorAcknowledgement: ProjectorAcknowledgementMessage | null;
+  lastJudgeSubmission: JudgeSubmissionUpdateMessage | null;
+  projectorTelemetry: ProjectorPlaybackStatus | null;
   audienceConnections: number;
   judgeConnections: ReadonlySet<string>;
   lastError: string | null;
@@ -66,6 +81,9 @@ const INITIAL_STATE: RealtimeState = {
   judgePermission: null,
   lastMediaCommand: null,
   lastCommandAcknowledgement: null,
+  lastProjectorAcknowledgement: null,
+  lastJudgeSubmission: null,
+  projectorTelemetry: null,
   audienceConnections: 0,
   judgeConnections: new Set(),
   lastError: null,
@@ -143,10 +161,7 @@ function applyPatches(
           break;
       }
     }
-    if (
-      patch.kind === "display" &&
-      (next.role === "admin" || next.role === "projector")
-    ) {
+    if (patch.kind === "display") {
       if (next.role === "admin") {
         next = {
           ...next,
@@ -156,7 +171,7 @@ function applyPatches(
           },
           runtime: { ...next.runtime, blackScreen: patch.blackScreen },
         };
-      } else {
+      } else if (next.role === "projector") {
         next = {
           ...next,
           show: {
@@ -164,6 +179,14 @@ function applyPatches(
             displayMode: patch.displayMode as typeof next.show.displayMode,
           },
           runtime: { ...next.runtime, blackScreen: patch.blackScreen },
+        };
+      } else if (next.role === "audience") {
+        next = {
+          ...next,
+          show: {
+            ...next.show,
+            displayMode: patch.displayMode as typeof next.show.displayMode,
+          },
         };
       }
     }
@@ -252,20 +275,18 @@ export class RealtimeClient {
   constructor(private readonly options: RealtimeClientOptions) {
     this.createSocket = options.createSocket ?? defaultSocketFactory;
     this.random = options.random ?? Math.random;
-    if (typeof window !== "undefined") {
-      window.addEventListener("online", this.onOnline);
-      window.addEventListener("offline", this.onOffline);
-      document.addEventListener("visibilitychange", this.onVisibilityChange);
-    }
+    this.listenToBrowser();
   }
 
   connect(): void {
-    if (
-      this.disposed ||
-      !this.online ||
-      this.socket ||
-      this.state.connection === "INCOMPATIBLE"
-    ) {
+    // A component may unmount and mount again around the same client: a page
+    // returning from Suspense, or React re-running effects. A released client
+    // has to be able to come back, or the surface never reconnects.
+    if (this.disposed) {
+      this.disposed = false;
+      this.listenToBrowser();
+    }
+    if (!this.online || this.socket || this.isTerminal()) {
       return;
     }
     if (this.retryTimer !== null) {
@@ -299,23 +320,29 @@ export class RealtimeClient {
         });
       }
     };
-    socket.onclose = () => {
+    socket.onclose = (event) => {
       if (this.socket !== socket) {
         return;
       }
       this.socket = null;
-      if (!this.disposed && this.state.connection !== "INCOMPATIBLE") {
+      // 1008 is the coordinator refusing this role credential. Reconnecting with
+      // the same rejected token would loop forever, so the state is terminal.
+      if (event?.code === 1008) {
+        this.publish({
+          ...this.state,
+          connection: "UNAUTHORISED",
+          lastError: "This link was not accepted",
+        });
+        return;
+      }
+      if (!this.disposed && !this.isTerminal()) {
         this.scheduleReconnect();
       }
     };
   }
 
   send(message: ClientMessage): boolean {
-    if (
-      !this.socket ||
-      this.socket.readyState !== OPEN ||
-      this.state.connection === "INCOMPATIBLE"
-    ) {
+    if (!this.socket || this.socket.readyState !== OPEN || this.isTerminal()) {
       return false;
     }
     this.socket.send(JSON.stringify(message));
@@ -331,6 +358,22 @@ export class RealtimeClient {
       protocolVersion: PROTOCOL_VERSION,
       lastRevision: this.state.revision,
     });
+  }
+
+  private listenToBrowser(): void {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.addEventListener("online", this.onOnline);
+    window.addEventListener("offline", this.onOffline);
+    document.addEventListener("visibilitychange", this.onVisibilityChange);
+  }
+
+  private isTerminal(): boolean {
+    return (
+      this.state.connection === "INCOMPATIBLE" ||
+      this.state.connection === "UNAUTHORISED"
+    );
   }
 
   getState(): RealtimeState {
@@ -455,6 +498,9 @@ export class RealtimeClient {
     let judgePermission = this.state.judgePermission;
     let lastMediaCommand = this.state.lastMediaCommand;
     let lastCommandAcknowledgement = this.state.lastCommandAcknowledgement;
+    let lastProjectorAcknowledgement = this.state.lastProjectorAcknowledgement;
+    let lastJudgeSubmission = this.state.lastJudgeSubmission;
+    let projectorTelemetry = this.state.projectorTelemetry;
     let audienceConnections = this.state.audienceConnections;
     let judgeConnections = this.state.judgeConnections;
 
@@ -505,7 +551,14 @@ export class RealtimeClient {
       case "command_ack":
         lastCommandAcknowledgement = message;
         break;
+      case "judge_submission_update":
+        lastJudgeSubmission = message;
+        break;
       case "projector_acknowledgement":
+        lastProjectorAcknowledgement = message;
+        break;
+      case "projector_telemetry":
+        projectorTelemetry = message.status;
         break;
       case "connection_count":
         audienceConnections = message.audience;
@@ -517,7 +570,9 @@ export class RealtimeClient {
 
     this.publish({
       ...this.state,
-      connection: "LIVE",
+      // A protocol error is a rejected message, not a lost connection.
+      connection:
+        message.type === "protocol_error" ? this.state.connection : "LIVE",
       revision:
         this.state.revision === null ||
         Number(message.revision) > Number(this.state.revision)
@@ -529,6 +584,9 @@ export class RealtimeClient {
       judgePermission,
       lastMediaCommand,
       lastCommandAcknowledgement,
+      lastProjectorAcknowledgement,
+      lastJudgeSubmission,
+      projectorTelemetry,
       audienceConnections,
       judgeConnections,
       lastError: message.type === "protocol_error" ? message.detail : null,

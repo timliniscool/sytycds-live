@@ -23,7 +23,7 @@ import {
   readAdminSession,
 } from "./admin-auth";
 import {
-  hasAudienceVote,
+  audienceVoteScore,
   parseAudienceVoteRequest,
   resolveVoterIdentity,
   submitAudienceVote,
@@ -408,14 +408,13 @@ export class ShowCoordinator extends DurableObject<Env> {
       return Response.json({ locked: false }, { status: 400 });
     }
     const identity = await resolveVoterIdentity(request);
-    const response = Response.json({
-      locked: hasAudienceVote(
-        this.ctx.storage.sql,
-        PRIMARY_SHOW_ID,
-        actIdentifier,
-        identity.hash,
-      ),
-    });
+    const score = audienceVoteScore(
+      this.ctx.storage.sql,
+      PRIMARY_SHOW_ID,
+      actIdentifier,
+      identity.hash,
+    );
+    const response = Response.json({ locked: score !== null, score });
     if (identity.setCookie) {
       response.headers.set("Set-Cookie", identity.setCookie);
     }
@@ -441,7 +440,9 @@ export class ShowCoordinator extends DurableObject<Env> {
       parsed,
     );
     const response = Response.json(
-      outcome.ok ? { accepted: true, locked: true } : { code: outcome.code },
+      outcome.ok
+        ? { accepted: true, locked: true, score: parsed.score }
+        : { code: outcome.code },
       {
         status: outcome.ok
           ? 200
@@ -806,6 +807,26 @@ export class ShowCoordinator extends DurableObject<Env> {
       return;
     }
 
+    if (parsed.message.type === "projector_status") {
+      if (attachment.role.kind !== "projector") {
+        this.sendProtocolError(
+          ws,
+          "unauthorised",
+          "Only a projector may report playback telemetry",
+        );
+        return;
+      }
+      // Telemetry is ephemeral operator assistance: it is relayed to admin and
+      // never written to SQLite, so hibernation simply drops it.
+      this.broadcastAdmin({
+        type: "projector_telemetry",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: this.currentRevision(),
+        status: parsed.message.status,
+      });
+      return;
+    }
+
     if (parsed.message.type === "judge_submit") {
       if (attachment.role.kind !== "judge") {
         this.sendProtocolError(
@@ -844,10 +865,12 @@ export class ShowCoordinator extends DurableObject<Env> {
       return;
     }
 
+    // Audience votes travel over HTTP because the anonymous voter identity is an
+    // HttpOnly cookie that a WebSocket frame cannot carry.
     this.sendProtocolError(
       ws,
       "unsupported_action",
-      "Audience voting and judge submission are not enabled in this release",
+      "This message is not accepted on the show socket",
     );
   }
 
@@ -993,6 +1016,9 @@ export class ShowCoordinator extends DurableObject<Env> {
             ...(command.type === "SEEK_MEDIA"
               ? { positionMs: command.positionMs }
               : {}),
+            ...(action === "black"
+              ? { blackScreen: projector.runtime.blackScreen }
+              : {}),
           });
         }
       }
@@ -1033,6 +1059,7 @@ export class ShowCoordinator extends DurableObject<Env> {
     | "pause"
     | "resume"
     | "stop"
+    | "stop_all"
     | "restart"
     | "replay"
     | "seek"
@@ -1051,6 +1078,8 @@ export class ShowCoordinator extends DurableObject<Env> {
         return "resume";
       case "STOP_MEDIA":
         return "stop";
+      case "STOP_ALL_MEDIA":
+        return "stop_all";
       case "RESTART_MEDIA":
         return "restart";
       case "REPLAY_MEDIA":

@@ -45,6 +45,10 @@ export type JudgePermissionState = "OPEN" | "CLOSED";
 export type ResultRevealState = "HIDDEN" | "REVEALED";
 export type MediaTransportState = "STOPPED" | "PREPARED" | "PLAYING" | "PAUSED";
 
+/** What a projector's own media elements report, as opposed to operator intent. */
+export type MediaPlaybackState =
+  "IDLE" | "LOADED" | "PLAYING" | "PAUSED" | "ENDED" | "ERROR";
+
 export type ConnectionRole =
   | { kind: "admin" }
   | { kind: "projector" }
@@ -79,6 +83,13 @@ export interface PersistedCue {
   operations: readonly CueOperation[];
   internalNote: string;
 }
+
+/**
+ * The projector needs enough of a cue to load media and nothing more. Operator
+ * labels and backstage notes are removed by the server projection, never hidden
+ * by the display client.
+ */
+export type ProjectorCue = Omit<PersistedCue, "operatorLabel" | "internalNote">;
 
 export type CueOperation =
   | { kind: "visual"; visual: VisualCue }
@@ -122,6 +133,8 @@ export interface AdminAct extends PublicAct {
 export interface PersistedShow {
   id: ShowId;
   title: string;
+  /** Optional second line for lobby graphics; empty when the show sets none. */
+  tagline: string;
   displayMode: DisplayMode;
   audienceVoteState: AudienceVoteState;
   resultRevealState: ResultRevealState;
@@ -221,10 +234,10 @@ export interface ProjectorShowProjection {
   role: "projector";
   show: Pick<
     PersistedShow,
-    "title" | "displayMode" | "activeActId" | "revision"
+    "title" | "tagline" | "displayMode" | "activeActId" | "revision"
   >;
   activeAct: PublicAct | null;
-  activeCues: readonly PersistedCue[];
+  activeCues: readonly ProjectorCue[];
   runtime: Pick<
     ShowRuntimeState,
     | "preparedCueId"
@@ -240,9 +253,10 @@ export interface ProjectorShowProjection {
 
 export interface AudienceShowProjection {
   role: "audience";
+  /** `displayMode` is already public on the projector, so phones may mirror it. */
   show: Pick<
     PersistedShow,
-    "title" | "activeActId" | "audienceVoteState" | "revision"
+    "title" | "displayMode" | "activeActId" | "audienceVoteState" | "revision"
   >;
   activeAct: PublicAct | null;
   revealedResult?: number | null;

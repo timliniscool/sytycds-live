@@ -51,6 +51,31 @@ Audience voting uses a separate 256-bit random first-party voter cookie (`HttpOn
 
 Judge URLs contain a random 256-bit token, while SQLite stores only its SHA-256 digest. Tokens are shown only during initial provisioning or rotation; they cannot safely be retrieved later. Operators should rotate a judge token to generate a replacement link, immediately invalidating the previous link.
 
+## Media channels and operator feedback
+
+The visual and backing-audio transports are separate state, and every media
+command says which channel it touches. `PLAY_CUE` drives only the channels its
+cue actually carries, so a visual cue never silences a backing track and an
+audio cue never clears the screen. `STOP_MEDIA` ends the visual channel alone;
+`STOP_ALL_MEDIA` is the panic control that ends both, clears both active cues
+and returns the projector to its display-mode graphics. `REPLAY_MEDIA` restarts
+the current backing track from the beginning and leaves vision untouched, which
+is the one-press emergency action during a performance. `BLACK_SCREEN` toggles
+and never touches audio.
+
+Operator confidence comes from two return paths. The projector acknowledges each
+media command by execution ID, and a failed acknowledgement is raised in the
+console and in the always-visible status bar rather than logged. Separately the
+projector samples its own media elements and forwards playback state, position
+and duration as `projector_status`; the coordinator relays it to admin only, and
+it is never written to SQLite. Unchanged telemetry repeats on a slow heartbeat so
+an operator who reloads mid-show sees the transport immediately.
+
+Admin commands are stamped with the newest revision the client has observed, not
+the revision embedded in its last snapshot, and one media command is in flight at
+a time. The optimistic revision check in the coordinator remains the authority; a
+duplicate delivery is absorbed by the command log.
+
 ## State lifetime
 
 Persistent state belongs in coordinator SQLite: show configuration, acts and cues, display/voting state, hashed identities and credentials, accepted submissions, aggregates, revisions, idempotency records, and result publication state. R2 persists media bytes.
@@ -93,6 +118,8 @@ Wrangler generates `worker-configuration.d.ts` from `wrangler.jsonc`; binding an
 - A final score does not exist until all required inputs exist and is never clamped or client-authored.
 - Realtime messages will carry monotonically increasing revisions; reconnect snapshots supersede stale deltas.
 - Visual and backing-audio transports remain independent; projector command success requires acknowledgement.
+- The projector receives cue media keys but never operator labels or backstage notes; those are stripped in the server projection.
+- Audience phones receive the public display mode, never cue, media or result state that has not been revealed.
 - Missing R2 media, stale clients, disconnects, retries, eviction, and reloads must fail visibly and recover without corrupting accepted state.
 
 ## Decision record: edge-coordinated single-show runtime

@@ -35,6 +35,7 @@ export type AdminCommandType =
   | "PAUSE_MEDIA"
   | "RESUME_MEDIA"
   | "STOP_MEDIA"
+  | "STOP_ALL_MEDIA"
   | "RESTART_MEDIA"
   | "REPLAY_MEDIA"
   | "SEEK_MEDIA"
@@ -68,6 +69,7 @@ export type AdminCommand =
   | (AdminCommandBase & { type: "PAUSE_MEDIA" })
   | (AdminCommandBase & { type: "RESUME_MEDIA" })
   | (AdminCommandBase & { type: "STOP_MEDIA" })
+  | (AdminCommandBase & { type: "STOP_ALL_MEDIA" })
   | (AdminCommandBase & { type: "RESTART_MEDIA" })
   | (AdminCommandBase & { type: "REPLAY_MEDIA" })
   | (AdminCommandBase & { type: "SEEK_MEDIA"; positionMs: number })
@@ -120,6 +122,7 @@ const COMMAND_TYPES: ReadonlySet<AdminCommandType> = new Set([
   "PAUSE_MEDIA",
   "RESUME_MEDIA",
   "STOP_MEDIA",
+  "STOP_ALL_MEDIA",
   "RESTART_MEDIA",
   "REPLAY_MEDIA",
   "SEEK_MEDIA",
@@ -323,6 +326,7 @@ export function parseAdminCommand(value: unknown): AdminCommandParseResult {
     case "PAUSE_MEDIA":
     case "RESUME_MEDIA":
     case "STOP_MEDIA":
+    case "STOP_ALL_MEDIA":
     case "RESTART_MEDIA":
     case "REPLAY_MEDIA":
     case "NEXT_CUE":

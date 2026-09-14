@@ -5,17 +5,16 @@ import type {
 import { parseAdminCommand } from "./admin-command";
 import {
   commandId,
-  isAudienceScore,
   PROTOCOL_VERSION,
   showRevision,
   type AudienceAggregate,
-  type AudienceScore,
   type AudienceVoteState,
   type ClientProjection,
   type CommandId,
   type CueId,
   type JudgePermissionState,
   type JudgeRawInput,
+  type MediaPlaybackState,
   type ProtocolVersion,
   type PublicAct,
   type ResultRevealState,
@@ -46,16 +45,26 @@ export interface AdminCommandMessage extends ProtocolEnvelope {
   command: AdminCommand;
 }
 
-export interface AudienceVoteMessage extends ProtocolEnvelope {
-  type: "audience_vote";
-  commandId: CommandId;
-  score: AudienceScore;
-}
-
 export interface JudgeSubmitMessage extends ProtocolEnvelope {
   type: "judge_submit";
   commandId: CommandId;
   input: JudgeRawInput;
+}
+
+/** Ephemeral projector playback telemetry; never persisted, admin-only. */
+export interface ProjectorPlaybackStatus {
+  visual: MediaPlaybackState;
+  audio: MediaPlaybackState;
+  positionMs: number | null;
+  durationMs: number | null;
+  armed: boolean;
+  black: boolean;
+  error: string | null;
+}
+
+export interface ProjectorStatusMessage extends ProtocolEnvelope {
+  type: "projector_status";
+  status: ProjectorPlaybackStatus;
 }
 
 export interface ProjectorAcknowledgement extends ProtocolEnvelope {
@@ -73,9 +82,9 @@ export interface ResyncRequest extends ProtocolEnvelope {
 export type ClientMessage =
   | ClientHello
   | AdminCommandMessage
-  | AudienceVoteMessage
   | JudgeSubmitMessage
   | ProjectorAcknowledgement
+  | ProjectorStatusMessage
   | ResyncRequest;
 
 export interface SnapshotMessage extends RevisionedServerMessage {
@@ -138,6 +147,7 @@ export interface MediaCommandMessage extends RevisionedServerMessage {
     | "pause"
     | "resume"
     | "stop"
+    | "stop_all"
     | "restart"
     | "replay"
     | "seek"
@@ -146,6 +156,8 @@ export interface MediaCommandMessage extends RevisionedServerMessage {
     | "black";
   cueId: CueId | null;
   positionMs?: number;
+  /** Authoritative black-screen state, sent with the `black` action only. */
+  blackScreen?: boolean;
 }
 
 export interface ResultRevealMessage extends RevisionedServerMessage {
@@ -163,6 +175,11 @@ export interface ProjectorAcknowledgementMessage extends RevisionedServerMessage
   commandId: CommandId;
   succeeded: boolean;
   detail?: string;
+}
+
+export interface ProjectorTelemetryMessage extends RevisionedServerMessage {
+  type: "projector_telemetry";
+  status: ProjectorPlaybackStatus;
 }
 
 export interface ConnectionCountMessage extends RevisionedServerMessage {
@@ -197,6 +214,7 @@ export type ServerMessage =
   | ResultRevealMessage
   | CommandAcknowledgementMessage
   | ProjectorAcknowledgementMessage
+  | ProjectorTelemetryMessage
   | ConnectionCountMessage
   | ProtocolErrorMessage
   | ForceResyncMessage;
@@ -214,6 +232,45 @@ function parseCommandIdentifier(value: unknown): CommandId | null {
   return typeof value === "string" && IDENTIFIER.test(value)
     ? commandId(value)
     : null;
+}
+
+const PLAYBACK_STATES: ReadonlySet<string> = new Set([
+  "IDLE",
+  "LOADED",
+  "PLAYING",
+  "PAUSED",
+  "ENDED",
+  "ERROR",
+]);
+
+function parseMilliseconds(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? Math.round(value)
+    : null;
+}
+
+function parseProjectorStatus(value: unknown): ProjectorPlaybackStatus | null {
+  if (
+    !isRecord(value) ||
+    typeof value.visual !== "string" ||
+    !PLAYBACK_STATES.has(value.visual) ||
+    typeof value.audio !== "string" ||
+    !PLAYBACK_STATES.has(value.audio) ||
+    typeof value.armed !== "boolean" ||
+    typeof value.black !== "boolean"
+  ) {
+    return null;
+  }
+  const detail = typeof value.error === "string" ? value.error : null;
+  return {
+    visual: value.visual as MediaPlaybackState,
+    audio: value.audio as MediaPlaybackState,
+    positionMs: parseMilliseconds(value.positionMs),
+    durationMs: parseMilliseconds(value.durationMs),
+    armed: value.armed,
+    black: value.black,
+    error: detail === null ? null : detail.slice(0, 200),
+  };
 }
 
 function parseObjectPayload(payload: string | ArrayBuffer): unknown {
@@ -272,20 +329,6 @@ export function parseClientMessage(
           }
         : { ok: false, reason: parsedCommand.reason };
     }
-    case "audience_vote": {
-      const voteCommandId = parseCommandIdentifier(value.commandId);
-      return voteCommandId && isAudienceScore(value.score)
-        ? {
-            ok: true,
-            message: {
-              type: "audience_vote",
-              protocolVersion: PROTOCOL_VERSION,
-              commandId: voteCommandId,
-              score: value.score,
-            },
-          }
-        : { ok: false, reason: "Invalid audience vote" };
-    }
     case "judge_submit": {
       const submitCommandId = parseCommandIdentifier(value.commandId);
       return submitCommandId && isJudgeRawInput(value.input)
@@ -318,6 +361,19 @@ export function parseClientMessage(
             },
           }
         : { ok: false, reason: "Invalid projector acknowledgement" };
+    }
+    case "projector_status": {
+      const status = parseProjectorStatus(value.status);
+      return status
+        ? {
+            ok: true,
+            message: {
+              type: "projector_status",
+              protocolVersion: PROTOCOL_VERSION,
+              status,
+            },
+          }
+        : { ok: false, reason: "Invalid projector status" };
     }
     case "resync_request":
       return typeof value.lastRevision === "number" &&

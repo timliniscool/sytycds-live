@@ -186,21 +186,24 @@ export function submitAudienceVote(
   });
 }
 
-export function hasAudienceVote(
+/**
+ * Returns this browser's own accepted score for an act, so a reload restores
+ * the locked state instead of appearing to offer a second vote.
+ */
+export function audienceVoteScore(
   sql: SqlStorage,
   showIdentifier: string,
   actIdentifier: string,
   voterHash: ArrayBuffer,
-): boolean {
-  return (
-    sql
-      .exec<{ present: number }>(
-        `SELECT 1 AS present FROM audience_votes
-         WHERE show_id = ? AND act_id = ? AND voter_id_hash = ?`,
-        showIdentifier,
-        actIdentifier,
-        voterHash,
-      )
-      .toArray().length > 0
-  );
+): number | null {
+  const row = sql
+    .exec<{ score: number }>(
+      `SELECT score FROM audience_votes
+       WHERE show_id = ? AND act_id = ? AND voter_id_hash = ?`,
+      showIdentifier,
+      actIdentifier,
+      voterHash,
+    )
+    .toArray()[0];
+  return row ? row.score : null;
 }

@@ -21,6 +21,7 @@ import {
   type MediaTransportState,
   type PersistedCue,
   type PersistedShow,
+  type ProjectorCue,
   type ProjectorShowProjection,
   type PublicAct,
   type ShowRuntimeState,
@@ -52,6 +53,7 @@ export interface CommandExecutionResult {
 interface ShowRow extends Record<string, SqlStorageValue> {
   id: string;
   title: string;
+  tagline: string;
   display_mode: string;
   audience_vote_state: string;
   result_reveal_state: string;
@@ -151,8 +153,8 @@ function loadShow(sql: SqlStorage, id: string): ShowRow | null {
   return (
     sql
       .exec<ShowRow>(
-        `SELECT id, title, display_mode, audience_vote_state, result_reveal_state,
-                active_act_id, revision
+        `SELECT id, title, tagline, display_mode, audience_vote_state,
+                result_reveal_state, active_act_id, revision
          FROM shows WHERE id = ?`,
         id,
       )
@@ -210,6 +212,7 @@ function persistedShow(row: ShowRow): PersistedShow {
   return {
     id: showId(row.id),
     title: row.title,
+    tagline: row.tagline,
     displayMode: requireDisplayMode(row.display_mode),
     audienceVoteState: row.audience_vote_state === "OPEN" ? "OPEN" : "CLOSED",
     resultRevealState:
@@ -798,16 +801,20 @@ function executeTransition(
           changes: [],
         };
       }
+      // A cue only drives the channels it actually carries. Playing a visual
+      // cue must leave a backing track running, and an audio-only cue must not
+      // wipe what is on screen.
       runtimeUpdate(
         sql,
         show.id,
         `prepared_cue_id = ?, active_visual_cue_id = ?, active_audio_cue_id = ?,
-         visual_transport = ?, audio_transport = ?, black_screen = 0`,
+         visual_transport = ?, audio_transport = ?, black_screen = ?`,
         cue.id,
-        cue.visual_kind ? cue.id : null,
-        cue.audio_kind ? cue.id : null,
+        cue.visual_kind ? cue.id : runtime.active_visual_cue_id,
+        cue.audio_kind ? cue.id : runtime.active_audio_cue_id,
         cue.visual_kind ? "PLAYING" : runtime.visual_transport,
         cue.audio_kind ? "PLAYING" : runtime.audio_transport,
+        cue.visual_kind ? 0 : runtime.black_screen,
       );
       return { accepted: true, changes: ["media"] };
     }
@@ -837,7 +844,18 @@ function executeTransition(
           : runtime.audio_transport,
       );
       return { accepted: true, changes: ["media"] };
+    // STOP ends the visual channel only. A backing track deliberately survives
+    // it, because a visual cue ending is not a reason to silence the hall.
     case "STOP_MEDIA":
+      runtimeUpdate(
+        sql,
+        show.id,
+        "active_visual_cue_id = NULL, visual_transport = 'STOPPED'",
+      );
+      return { accepted: true, changes: ["media"] };
+    // STOP ALL is the panic control: every transport ends and the projector
+    // returns to its display-mode graphics. It is always available.
+    case "STOP_ALL_MEDIA":
       runtimeUpdate(
         sql,
         show.id,
@@ -845,21 +863,17 @@ function executeTransition(
          visual_transport = 'STOPPED', audio_transport = 'STOPPED', black_screen = 0`,
       );
       return { accepted: true, changes: ["media"] };
+    // REPLAY is the emergency backing-audio action: one press restarts the
+    // current track from the beginning without disturbing the visual channel.
     case "REPLAY_MEDIA":
-      if (!runtime.active_visual_cue_id && !runtime.active_audio_cue_id) {
+      if (!runtime.active_audio_cue_id) {
         return {
           accepted: false,
-          reason: "There is no active media to replay",
+          reason: "There is no backing audio to replay",
           changes: [],
         };
       }
-      runtimeUpdate(
-        sql,
-        show.id,
-        "visual_transport = ?, audio_transport = ?, black_screen = 0",
-        runtime.active_visual_cue_id ? "PLAYING" : "STOPPED",
-        runtime.active_audio_cue_id ? "PLAYING" : "STOPPED",
-      );
+      runtimeUpdate(sql, show.id, "audio_transport = 'PLAYING'");
       return { accepted: true, changes: ["media"] };
     case "RESTART_MEDIA":
       if (!runtime.active_visual_cue_id && !runtime.active_audio_cue_id) {
@@ -873,8 +887,8 @@ function executeTransition(
         sql,
         show.id,
         "visual_transport = ?, audio_transport = ?, black_screen = 0",
-        runtime.active_visual_cue_id ? "PLAYING" : "STOPPED",
-        runtime.active_audio_cue_id ? "PLAYING" : "STOPPED",
+        runtime.active_visual_cue_id ? "PLAYING" : runtime.visual_transport,
+        runtime.active_audio_cue_id ? "PLAYING" : runtime.audio_transport,
       );
       return { accepted: true, changes: ["media"] };
     case "SEEK_MEDIA":
@@ -920,8 +934,15 @@ function executeTransition(
       runtimeUpdate(sql, show.id, "prepared_cue_id = ?", selected.id);
       return { accepted: true, changes: ["media"] };
     }
+    // Black screen toggles so the operator can return to the graphics with the
+    // same control, and it never touches the audio transport.
     case "BLACK_SCREEN":
-      runtimeUpdate(sql, show.id, "black_screen = 1");
+      runtimeUpdate(
+        sql,
+        show.id,
+        "black_screen = ?",
+        runtime.black_screen === 1 ? 0 : 1,
+      );
       return { accepted: true, changes: ["media"] };
   }
 }
@@ -1049,6 +1070,20 @@ function loadCues(
     .map((row) => toCue(showIdentifier, row));
 }
 
+/** Removes operator labels and backstage notes before a cue reaches the hall. */
+function toProjectorCue(cue: PersistedCue): ProjectorCue {
+  return {
+    id: cue.id,
+    showId: cue.showId,
+    actId: cue.actId,
+    position: cue.position,
+    visual: cue.visual,
+    audio: cue.audio,
+    durationMs: cue.durationMs,
+    operations: cue.operations,
+  };
+}
+
 function permissionForJudge(
   sql: SqlStorage,
   show: ShowRow,
@@ -1095,6 +1130,7 @@ export function projectShowState(
       role: "audience",
       show: {
         title: persisted.title,
+        displayMode: persisted.displayMode,
         activeActId: persisted.activeActId,
         audienceVoteState: persisted.audienceVoteState,
         revision: persisted.revision,
@@ -1115,12 +1151,15 @@ export function projectShowState(
       role: "projector",
       show: {
         title: persisted.title,
+        tagline: persisted.tagline,
         displayMode: persisted.displayMode,
         activeActId: persisted.activeActId,
         revision: persisted.revision,
       },
       activeAct: publicActive,
-      activeCues: active ? loadCues(storage.sql, show.id, active.id) : [],
+      activeCues: active
+        ? loadCues(storage.sql, show.id, active.id).map(toProjectorCue)
+        : [],
       runtime: {
         preparedCueId: runtime.prepared_cue_id
           ? cueId(runtime.prepared_cue_id)

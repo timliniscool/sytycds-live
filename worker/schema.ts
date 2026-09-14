@@ -277,12 +277,35 @@ const RESULTS_ACTS_MEDIA_SCHEMA: SchemaMigration = {
   ],
 };
 
+const SHOW_IDENTITY_SCHEMA: SchemaMigration = {
+  version: 6,
+  name: "show_lobby_identity",
+  statements: [
+    // Lobby graphics carry an optional tagline beside the event title; both are
+    // show configuration, not per-act content.
+    "ALTER TABLE shows ADD COLUMN tagline TEXT NOT NULL DEFAULT ''",
+  ],
+};
+
+const CUE_REFERENCE_INTEGRITY_SCHEMA: SchemaMigration = {
+  version: 7,
+  name: "cue_parent_key_for_asset_references",
+  statements: [
+    // `cue_asset_references` names `cues(show_id, id)` as its parent key, but
+    // that pair carried no unique index, so SQLite rejected every write to the
+    // child table with "foreign key mismatch". This index is the parent key.
+    "CREATE UNIQUE INDEX idx_cues_show_id ON cues (show_id, id)",
+  ],
+};
+
 export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
   COMMAND_IDEMPOTENCY_SCHEMA,
   AUTH_AND_VOTER_SCHEMA,
   RESULTS_ACTS_MEDIA_SCHEMA,
+  SHOW_IDENTITY_SCHEMA,
+  CUE_REFERENCE_INTEGRITY_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

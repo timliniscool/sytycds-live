@@ -1,8 +1,10 @@
-import type { PersistedCue } from "../../shared/domain";
-import type { MediaCommandMessage } from "../../shared/protocol";
+import type { MediaPlaybackState, ProjectorCue } from "../../shared/domain";
+import type {
+  MediaCommandMessage,
+  ProjectorPlaybackStatus,
+} from "../../shared/protocol";
 
-export type PlaybackState =
-  "IDLE" | "LOADED" | "PLAYING" | "PAUSED" | "ENDED" | "ERROR";
+export type PlaybackState = MediaPlaybackState;
 
 export interface ProjectorMediaStatus {
   visual: PlaybackState;
@@ -84,9 +86,7 @@ export class ProjectorMediaEngine {
     this.audio.pause();
     this.audio.removeAttribute("src");
     this.audio.load();
-    this.stopVideo();
-    this.removeImage();
-    this.visual = "IDLE";
+    this.stopVisual();
     this.audioState = "IDLE";
     this.black = false;
     this.emit();
@@ -97,9 +97,30 @@ export class ProjectorMediaEngine {
     this.host = null;
   }
 
+  /**
+   * The transport detail an operator needs but the projector must not render:
+   * what is on screen, what is audible, and how far through the track we are.
+   */
+  telemetry(): ProjectorPlaybackStatus {
+    const timed = this.video ?? (this.audio.src ? this.audio : null);
+    const duration =
+      timed && Number.isFinite(timed.duration)
+        ? Math.round(timed.duration * 1000)
+        : null;
+    return {
+      visual: this.visual,
+      audio: this.audioState,
+      positionMs: timed ? Math.round(timed.currentTime * 1000) : null,
+      durationMs: duration,
+      armed: this.armed,
+      black: this.black,
+      error: this.error,
+    };
+  }
+
   async execute(
     command: MediaCommandMessage,
-    cue: PersistedCue | null,
+    cue: ProjectorCue | null,
   ): Promise<void> {
     if (Number(command.revision) < this.lastRevision) return;
     this.lastRevision = Number(command.revision);
@@ -124,13 +145,23 @@ export class ProjectorMediaEngine {
           await this.resume();
           this.ack(command.executionId, true, "STARTED");
           break;
+        // STOP ends the visual channel only; a backing track keeps running.
         case "stop":
+          this.stopVisual();
+          this.emit();
+          this.ack(command.executionId, true, "STOPPED");
+          break;
+        case "stop_all":
           this.stopAll();
-          this.ack(command.executionId, true, "PAUSED");
+          this.ack(command.executionId, true, "STOPPED");
           break;
         case "restart":
-        case "replay":
           await this.restart();
+          this.ack(command.executionId, true, "STARTED");
+          break;
+        // REPLAY is the emergency backing-audio action and leaves vision alone.
+        case "replay":
+          await this.replayAudio();
           this.ack(command.executionId, true, "STARTED");
           break;
         case "seek":
@@ -138,9 +169,9 @@ export class ProjectorMediaEngine {
           this.ack(command.executionId, true, "STARTED");
           break;
         case "black":
-          this.black = true;
+          this.black = command.blackScreen ?? true;
           this.emit();
-          this.ack(command.executionId, true, "PREPARED");
+          this.ack(command.executionId, true, this.black ? "BLACK" : "VISIBLE");
           break;
         case "next":
         case "previous":
@@ -152,11 +183,11 @@ export class ProjectorMediaEngine {
       this.fail(
         error instanceof Error ? error.message : "media command failed",
       );
-      this.ack(command.executionId, false, "ERROR");
+      this.ack(command.executionId, false, this.error ?? "ERROR");
     }
   }
 
-  private async prepare(cue: PersistedCue | null): Promise<void> {
+  private async prepare(cue: ProjectorCue | null): Promise<void> {
     if (!cue) throw new Error("cue is unavailable");
     this.black = false;
     if (cue.visual) await this.loadVisual(cue);
@@ -166,7 +197,7 @@ export class ProjectorMediaEngine {
     this.emit();
   }
 
-  private async play(cue: PersistedCue | null): Promise<void> {
+  private async play(cue: ProjectorCue | null): Promise<void> {
     if (cue) await this.prepare(cue);
     if (!this.armed && (this.audio.src || this.video))
       throw new Error("ARM SHOW / ENABLE AUDIO is required");
@@ -194,13 +225,20 @@ export class ProjectorMediaEngine {
     await this.resume();
   }
 
+  private async replayAudio(): Promise<void> {
+    if (!this.audio.src) throw new Error("no backing audio is loaded");
+    if (!this.armed) throw new Error("ARM SHOW / ENABLE AUDIO is required");
+    this.audio.currentTime = 0;
+    await this.audio.play();
+  }
+
   private seek(positionMs: number): void {
     const seconds = positionMs / 1000;
     if (this.video?.readyState) this.video.currentTime = seconds;
     if (this.audio.readyState) this.audio.currentTime = seconds;
   }
 
-  private async loadVisual(cue: PersistedCue): Promise<void> {
+  private async loadVisual(cue: ProjectorCue): Promise<void> {
     const visual = cue.visual;
     if (!visual || visual.kind === "BLACK") {
       this.black = true;
@@ -276,6 +314,12 @@ export class ProjectorMediaEngine {
       video.src = source;
       video.load();
     });
+  }
+
+  private stopVisual(): void {
+    this.stopVideo();
+    this.removeImage();
+    this.visual = "IDLE";
   }
 
   private stopVideo(): void {

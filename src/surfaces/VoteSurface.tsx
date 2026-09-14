@@ -1,11 +1,294 @@
+import { useEffect, useRef, useState } from "react";
+
+import { PROTOCOL_VERSION, type AudienceScore } from "../../shared/domain";
+import {
+  RealtimeClient,
+  showWebSocketUrl,
+  useRealtimeSelector,
+} from "../realtime/RealtimeClient";
+import {
+  AUDIENCE_SCORES,
+  connectionNotice,
+  deriveVoteView,
+  rejectionMessage,
+  type VoteRejection,
+  type VoteSubmission,
+} from "../vote/vote-view";
+
+interface VoteResponse {
+  accepted?: boolean;
+  locked?: boolean;
+  score?: number | null;
+  code?: string;
+}
+
+const REJECTIONS: ReadonlySet<string> = new Set([
+  "VOTING_CLOSED",
+  "ALREADY_VOTED",
+  "WRONG_ACT",
+  "INVALID_SCORE",
+  "BAD_REQUEST",
+]);
+
+function asRejection(code: string | undefined): VoteRejection {
+  return code && REJECTIONS.has(code) ? (code as VoteRejection) : "BAD_REQUEST";
+}
+
 export default function VoteSurface() {
+  const clientRef = useRef<RealtimeClient | null>(null);
+  if (!clientRef.current) {
+    clientRef.current = new RealtimeClient({
+      url: showWebSocketUrl(window.location),
+      hello: {
+        type: "hello",
+        protocolVersion: PROTOCOL_VERSION,
+        requestedRole: "audience",
+      },
+    });
+  }
+  const client = clientRef.current;
+  const projection = useRealtimeSelector(client, (state) =>
+    state.projection?.role === "audience" ? state.projection : null,
+  );
+  const connection = useRealtimeSelector(client, (state) => state.connection);
+
+  const [submission, setSubmission] = useState<VoteSubmission>({
+    kind: "idle",
+  });
+  const [sawVotingOpen, setSawVotingOpen] = useState(false);
+  const actId = projection?.show.activeActId ?? null;
+  const votingOpen = projection?.show.audienceVoteState === "OPEN";
+
+  useEffect(() => {
+    client.connect();
+    return () => client.destroy();
+  }, [client]);
+
+  // A new act is a new vote. The locked state is then restored from the server
+  // rather than trusted from this phone, so a reload cannot unlock anything.
+  useEffect(() => {
+    setSubmission({ kind: "idle" });
+    setSawVotingOpen(false);
+    if (!actId) return;
+    const controller = new AbortController();
+    void fetch(`/api/vote/status?actId=${encodeURIComponent(actId)}`, {
+      credentials: "same-origin",
+      signal: controller.signal,
+    })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((result: VoteResponse | null) => {
+        if (result?.locked) {
+          setSubmission({ kind: "locked", score: result.score ?? null });
+        }
+      })
+      .catch(() => undefined);
+    return () => controller.abort();
+  }, [actId]);
+
+  useEffect(() => {
+    if (votingOpen) setSawVotingOpen(true);
+  }, [votingOpen]);
+
+  async function submit(score: AudienceScore): Promise<void> {
+    if (!actId) return;
+    setSubmission({ kind: "submitting", score });
+    try {
+      const response = await fetch("/api/vote", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ actId, score }),
+      });
+      const result = (await response.json()) as VoteResponse;
+      if (response.ok && result.accepted) {
+        setSubmission({ kind: "locked", score });
+        return;
+      }
+      // A duplicate delivery of an accepted vote is a locked vote, not an error.
+      if (result.code === "ALREADY_VOTED") {
+        setSubmission({ kind: "locked", score: null });
+        return;
+      }
+      setSubmission({
+        kind: "rejected",
+        reason: asRejection(result.code),
+        score,
+      });
+    } catch {
+      setSubmission({ kind: "rejected", reason: "NETWORK", score });
+    }
+  }
+
+  const view = deriveVoteView({
+    connection,
+    projection,
+    submission,
+    sawVotingOpen,
+  });
+  const notice = connectionNotice(connection);
+  const pendingScore =
+    submission.kind === "selected" ||
+    submission.kind === "confirming" ||
+    submission.kind === "submitting" ||
+    submission.kind === "rejected"
+      ? submission.score
+      : null;
+
   return (
-    <main className="surface surface--vote" aria-labelledby="vote-title">
-      <header>
-        <p>SO YOU THINK YOU CAN DO STUFF</p>
-        <h1 id="vote-title">Audience voting</h1>
+    <main className="vote" aria-live="polite">
+      <header className="vote__head">
+        <p className="vote__mark">SO YOU THINK YOU CAN DO STUFF</p>
+        {view.kind === "VOTING" ||
+        view.kind === "ACT" ||
+        view.kind === "CLOSED" ? (
+          <>
+            <h1 className="vote__act">{view.act.actName}</h1>
+            <p className="vote__performer">
+              {view.act.performerName} · {view.act.schoolYear}
+            </p>
+          </>
+        ) : (
+          <h1 className="vote__act">
+            {projection?.show.title ?? "Audience voting"}
+          </h1>
+        )}
+        {notice && <p className="vote__notice">{notice}</p>}
       </header>
-      <p>Waiting for the operator to open voting.</p>
+
+      {view.kind === "CONNECTING" && (
+        <Message body="Connecting to the show…" detail="Keep this page open." />
+      )}
+      {view.kind === "UNAVAILABLE" && <Message body={view.detail} />}
+      {view.kind === "LOBBY" && (
+        <Message
+          body="Voting has not started."
+          detail="Your score selector appears here the moment the operator opens voting."
+        />
+      )}
+      {view.kind === "INTERMISSION" && (
+        <Message body="Intermission" detail="Voting resumes after the break." />
+      )}
+      {view.kind === "HOLD" && (
+        <Message body="Please wait" detail="The show is paused for a moment." />
+      )}
+      {view.kind === "ACT" && (
+        <Message body="Enjoy the act" detail="Voting opens shortly." />
+      )}
+      {view.kind === "CLOSED" && (
+        <Message
+          body="Voting has closed"
+          detail="Scores for this act are locked in."
+        />
+      )}
+      {view.kind === "RESULTS" && (
+        <Message
+          body="Final results"
+          detail={
+            view.revealedResult === null
+              ? "Watch the main screen."
+              : `${view.act?.actName ?? "This act"} scored ${view.revealedResult.toFixed(2)}.`
+          }
+        />
+      )}
+      {view.kind === "LOCKED" && (
+        <section className="vote__locked">
+          <p className="vote__locked-label">Your score is locked in</p>
+          <p className="vote__locked-score">{view.score ?? "✓"}</p>
+          <p className="vote__locked-detail">
+            This cannot be changed. Thanks for voting.
+          </p>
+        </section>
+      )}
+
+      {view.kind === "VOTING" && (
+        <>
+          <div
+            className="vote__scale"
+            role="group"
+            aria-label="Choose a score from 0 to 10"
+          >
+            {AUDIENCE_SCORES.map((score) => {
+              const selected = pendingScore === score;
+              return (
+                <button
+                  key={score}
+                  type="button"
+                  className={`vote__score${selected ? " vote__score--on" : ""}`}
+                  aria-pressed={selected}
+                  disabled={submission.kind === "submitting"}
+                  onClick={() => setSubmission({ kind: "selected", score })}
+                >
+                  {score}
+                </button>
+              );
+            })}
+          </div>
+          <footer className="vote__action">
+            {submission.kind === "rejected" && (
+              <p className="vote__error" role="alert">
+                {rejectionMessage(submission.reason)}
+              </p>
+            )}
+            <button
+              type="button"
+              className="vote__lock"
+              disabled={
+                pendingScore === null || submission.kind === "submitting"
+              }
+              onClick={() => {
+                if (submission.kind === "selected") {
+                  setSubmission({
+                    kind: "confirming",
+                    score: submission.score,
+                  });
+                }
+              }}
+            >
+              {pendingScore === null
+                ? "Choose a score"
+                : submission.kind === "submitting"
+                  ? "Sending…"
+                  : `Lock in ${pendingScore}`}
+            </button>
+          </footer>
+        </>
+      )}
+
+      {submission.kind === "confirming" && (
+        <div className="vote__confirm" role="dialog" aria-modal="true">
+          <div className="vote__confirm-card">
+            <p className="vote__confirm-title">
+              Lock in <b>{submission.score}</b>?
+            </p>
+            <p className="vote__confirm-detail">This cannot be changed.</p>
+            <button
+              type="button"
+              className="vote__lock"
+              onClick={() => void submit(submission.score)}
+            >
+              Yes, lock it in
+            </button>
+            <button
+              type="button"
+              className="vote__cancel"
+              onClick={() =>
+                setSubmission({ kind: "selected", score: submission.score })
+              }
+            >
+              Change my score
+            </button>
+          </div>
+        </div>
+      )}
     </main>
+  );
+}
+
+function Message({ body, detail }: { body: string; detail?: string }) {
+  return (
+    <section className="vote__message">
+      <p className="vote__message-body">{body}</p>
+      {detail && <p className="vote__message-detail">{detail}</p>}
+    </section>
   );
 }

@@ -8,7 +8,7 @@ import {
   readAdminSession,
 } from "../worker/admin-auth";
 import {
-  hasAudienceVote,
+  audienceVoteScore,
   resolveVoterIdentity,
   submitAudienceVote,
 } from "../worker/audience-votes";
@@ -138,8 +138,8 @@ describe("admin sessions, anonymous voters, and judge tokens", () => {
       );
       expect(modified.setCookie).toBeUndefined();
       expect(
-        hasAudienceVote(storage.sql, PRIMARY_SHOW_ID, "act-1", modified.hash),
-      ).toBe(false);
+        audienceVoteScore(storage.sql, PRIMARY_SHOW_ID, "act-1", modified.hash),
+      ).toBeNull();
       const firstVote = submitAudienceVote(
         storage,
         PRIMARY_SHOW_ID,
@@ -161,8 +161,8 @@ describe("admin sessions, anonymous voters, and judge tokens", () => {
       expect(firstVote.ok).toBe(true);
       expect(duplicate).toEqual({ ok: false, code: "ALREADY_VOTED" });
       expect(
-        hasAudienceVote(storage.sql, PRIMARY_SHOW_ID, "act-1", first.hash),
-      ).toBe(true);
+        audienceVoteScore(storage.sql, PRIMARY_SHOW_ID, "act-1", first.hash),
+      ).toBe(7);
       expect(
         submitAudienceVote(storage, PRIMARY_SHOW_ID, modified.hash, {
           actIdentifier: "act-2",

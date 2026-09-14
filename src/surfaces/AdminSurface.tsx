@@ -10,6 +10,7 @@ import type {
   AdminCommand,
   AdminCommandType,
 } from "../../shared/admin-command";
+import { MediaConsole } from "../admin/MediaConsole";
 import {
   RealtimeClient,
   showWebSocketUrl,
@@ -122,6 +123,10 @@ function Console() {
     state.projection?.role === "admin" ? state.projection : null,
   );
   const connection = useRealtimeSelector(client, (state) => state.connection);
+  // Every revisioned message advances this, while the projection keeps the
+  // revision it was snapshotted at. Commands must be stamped with the former or
+  // the second command of a snapshot is always rejected as stale.
+  const revision = useRealtimeSelector(client, (state) => state.revision);
   const acknowledgement = useRealtimeSelector(
     client,
     (state) => state.lastCommandAcknowledgement,
@@ -134,6 +139,14 @@ function Console() {
     client,
     (state) => state.judgeConnections,
   );
+  const telemetry = useRealtimeSelector(
+    client,
+    (state) => state.projectorTelemetry,
+  );
+  const projectorAcknowledgement = useRealtimeSelector(
+    client,
+    (state) => state.lastProjectorAcknowledgement,
+  );
   useEffect(() => {
     client.connect();
     return () => client.destroy();
@@ -143,15 +156,19 @@ function Console() {
       setNotice(acknowledgement.acknowledgement.reason);
   }, [acknowledgement]);
 
+  /** Returns the command ID so a caller can wait for its acknowledgement. */
   function send(
     type: AdminCommandType,
     extras: Record<string, unknown> = {},
-  ): void {
-    if (!projection) return;
+  ): string | null {
+    if (!projection) return null;
+    const identifier = id();
     const command = {
       protocolVersion: PROTOCOL_VERSION,
-      commandId: commandId(id()),
-      expectedRevision: showRevision(Number(projection.show.revision)),
+      commandId: commandId(identifier),
+      expectedRevision: showRevision(
+        Number(revision ?? projection.show.revision),
+      ),
       type,
       ...extras,
     } as AdminCommand;
@@ -161,8 +178,11 @@ function Console() {
         protocolVersion: PROTOCOL_VERSION,
         command,
       })
-    )
+    ) {
       setNotice("Control link is not live");
+      return null;
+    }
+    return identifier;
   }
   const mediaPlaying =
     projection?.runtime.visualTransport === "PLAYING" ||
@@ -232,10 +252,15 @@ function Console() {
         >
           {connection}
         </strong>
-        <span>REV {projection.show.revision}</span>
+        <span>REV {revision ?? projection.show.revision}</span>
         <span>
           PROJECTOR {projection.show.displayMode.replaceAll("_", " ")}
         </span>
+        {projectorAcknowledgement && !projectorAcknowledgement.succeeded && (
+          <strong className="admin-status__alarm">
+            PROJECTOR COMMAND FAILED
+          </strong>
+        )}
         {notice && <output>{notice}</output>}
       </header>
       <section className="running-order" aria-labelledby="running-order-title">
@@ -292,274 +317,267 @@ function Console() {
           </button>
         </div>
       </section>
-      <section className="current-workspace" aria-label="Current act workspace">
-        <div className="region-title">
-          <p>CURRENT ACT</p>
-          <h2>{active ? active.actName : "No act selected"}</h2>
-          <span>
-            {active?.performerName} {active ? `· ${active.schoolYear}` : ""}
-          </span>
-        </div>
-        <div className="display-controls">
-          <p>DISPLAY MODE</p>
-          {MODES.map((mode) => (
+      <div className="admin-column">
+        <section
+          className="current-workspace"
+          aria-label="Current act workspace"
+        >
+          <div className="region-title">
+            <p>CURRENT ACT</p>
+            <h2>{active ? active.actName : "No act selected"}</h2>
+            <span>
+              {active?.performerName} {active ? `· ${active.schoolYear}` : ""}
+            </span>
+          </div>
+          <div className="display-controls">
+            <p>DISPLAY MODE</p>
+            {MODES.map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={
+                  projection.show.displayMode === mode ? "is-active" : ""
+                }
+                onClick={() => {
+                  if (
+                    mode === "EMERGENCY" &&
+                    !window.confirm("Activate emergency display?")
+                  )
+                    return;
+                  send("SET_DISPLAY_MODE", { mode });
+                }}
+              >
+                {mode.replaceAll("_", " ")}
+              </button>
+            ))}
             <button
-              key={mode}
               type="button"
-              className={
-                projection.show.displayMode === mode ? "is-active" : ""
-              }
+              className={projection.runtime.blackScreen ? "is-active" : ""}
+              onClick={() => send("BLACK_SCREEN")}
+            >
+              BLACK
+            </button>
+            {projection.show.displayMode === "HOLD" && (
+              <small>Restore target is retained by the coordinator.</small>
+            )}
+          </div>
+        </section>
+        <MediaConsole
+          act={active}
+          runtime={projection.runtime}
+          telemetry={telemetry}
+          projectorAcknowledgement={projectorAcknowledgement}
+          commandAcknowledgement={acknowledgement}
+          send={send}
+        />
+        <section
+          className={`voting-workspace ${votingOpen ? "voting-workspace--open" : ""}`}
+          aria-label="Audience voting"
+        >
+          <div className="region-title">
+            <p>AUDIENCE VOTING</p>
+            <h2>{votingOpen ? "OPEN" : "CLOSED"}</h2>
+            <span>{active?.actName ?? "Select an act"}</span>
+          </div>
+          <div className="vote-metrics">
+            <span>
+              <b>{aggregate?.voteCount ?? 0}</b> accepted votes
+            </span>
+            <span>
+              <b>{aggregate?.weightedMean?.toFixed(2) ?? "—"}</b> weighted mean
+            </span>
+            <span>
+              <b>{audienceConnections}</b> audience phones
+            </span>
+            <span>
+              <b>{connection}</b> update health
+            </span>
+          </div>
+          <div className="vote-actions">
+            <button
+              type="button"
+              disabled={!active || votingOpen}
               onClick={() => {
                 if (
-                  mode === "EMERGENCY" &&
-                  !window.confirm("Activate emergency display?")
+                  active &&
+                  window.confirm(`Open voting for ${active.actName}?`)
                 )
-                  return;
-                send("SET_DISPLAY_MODE", { mode });
+                  send("OPEN_AUDIENCE_VOTING");
               }}
             >
-              {mode.replaceAll("_", " ")}
+              OPEN AUDIENCE VOTING
             </button>
-          ))}
-          <button
-            type="button"
-            className={projection.runtime.blackScreen ? "is-active" : ""}
-            onClick={() => send("BLACK_SCREEN")}
-          >
-            BLACK
-          </button>
-          {projection.show.displayMode === "HOLD" && (
-            <small>Restore target is retained by the coordinator.</small>
-          )}
-        </div>
-      </section>
-      <section
-        className={`voting-workspace ${votingOpen ? "voting-workspace--open" : ""}`}
-        aria-label="Audience voting"
-      >
-        <div className="region-title">
-          <p>AUDIENCE VOTING</p>
-          <h2>{votingOpen ? "OPEN" : "CLOSED"}</h2>
-          <span>{active?.actName ?? "Select an act"}</span>
-        </div>
-        <div className="vote-metrics">
-          <span>
-            <b>{aggregate?.voteCount ?? 0}</b> accepted votes
-          </span>
-          <span>
-            <b>{aggregate?.weightedMean?.toFixed(2) ?? "—"}</b> weighted mean
-          </span>
-          <span>
-            <b>{audienceConnections}</b> audience phones
-          </span>
-          <span>
-            <b>{connection}</b> update health
-          </span>
-        </div>
-        <div className="vote-actions">
-          <button
-            type="button"
-            disabled={!active || votingOpen}
-            onClick={() => {
-              if (
-                active &&
-                window.confirm(`Open voting for ${active.actName}?`)
-              )
-                send("OPEN_AUDIENCE_VOTING");
-            }}
-          >
-            OPEN AUDIENCE VOTING
-          </button>
-          <button
-            type="button"
-            disabled={!votingOpen}
-            onClick={() => send("CLOSE_AUDIENCE_VOTING")}
-          >
-            CLOSE AUDIENCE VOTING
-          </button>
-        </div>
-      </section>
-      <section className="judge-workspace" aria-labelledby="judge-title">
-        <div className="region-title">
-          <p>ADJUDICATORS</p>
-          <h2 id="judge-title">Judge control matrix</h2>
-          <span>
-            Connection, permission, and submitted score are independent.
-          </span>
-        </div>
-        <div className="judge-global">
-          <button type="button" onClick={() => send("OPEN_ALL_JUDGES")}>
-            OPEN ALL
-          </button>
-          <button type="button" onClick={() => send("CLOSE_ALL_JUDGES")}>
-            CLOSE ALL
-          </button>
-        </div>
-        <div className="judge-grid">
-          {projection.judges.map((judge) => (
-            <article className="judge-row" key={judge.id}>
-              <header>
-                <b>{judge.displayName}</b>
-                <small>
-                  Judge {judge.slot} ·{" "}
+            <button
+              type="button"
+              disabled={!votingOpen}
+              onClick={() => send("CLOSE_AUDIENCE_VOTING")}
+            >
+              CLOSE AUDIENCE VOTING
+            </button>
+          </div>
+        </section>
+        <section className="judge-workspace" aria-labelledby="judge-title">
+          <div className="region-title">
+            <p>ADJUDICATORS</p>
+            <h2 id="judge-title">Judge control matrix</h2>
+            <span>
+              Connection, permission, and submitted score are independent.
+            </span>
+          </div>
+          <div className="judge-global">
+            <button type="button" onClick={() => send("OPEN_ALL_JUDGES")}>
+              OPEN ALL
+            </button>
+            <button type="button" onClick={() => send("CLOSE_ALL_JUDGES")}>
+              CLOSE ALL
+            </button>
+          </div>
+          <div className="judge-grid">
+            {projection.judges.map((judge) => (
+              <article className="judge-row" key={judge.id}>
+                <header>
+                  <b>{judge.displayName}</b>
+                  <small>
+                    Judge {judge.slot} ·{" "}
+                    <span
+                      className={
+                        judgeConnections.has(judge.id)
+                          ? "signal signal--live"
+                          : "signal"
+                      }
+                    >
+                      {judgeConnections.has(judge.id) ? "CONNECTED" : "OFFLINE"}
+                    </span>
+                  </small>
+                </header>
+                <div>
                   <span
                     className={
-                      judgeConnections.has(judge.id)
+                      judge.permission === "OPEN"
                         ? "signal signal--live"
                         : "signal"
                     }
                   >
-                    {judgeConnections.has(judge.id) ? "CONNECTED" : "OFFLINE"}
+                    {judge.permission}
                   </span>
-                </small>
-              </header>
-              <div>
-                <span
-                  className={
-                    judge.permission === "OPEN"
-                      ? "signal signal--live"
-                      : "signal"
-                  }
-                >
-                  {judge.permission}
-                </span>
-                <span
-                  className={
-                    judge.submission ? "signal signal--locked" : "signal"
-                  }
-                >
-                  {judge.submission ? "LOCKED" : "WAITING"}
-                </span>
-              </div>
-              {judge.submission ? (
-                <p>
-                  <b>{judge.submission.input.raw}</b>
-                  {Math.abs(
-                    judge.submission.effectiveScore -
-                      (judge.submission.parsed.finiteValue ??
-                        judge.submission.effectiveScore),
-                  ) > 0.001 && (
-                    <> → {judge.submission.effectiveScore.toFixed(3)}</>
-                  )}
-                  <small>
-                    {new Date(
-                      judge.submission.submittedAt,
-                    ).toLocaleTimeString()}
-                  </small>
-                </p>
-              ) : (
-                <p className="judge-empty">No score submitted</p>
-              )}
-              <footer>
-                <button
-                  type="button"
-                  disabled={Boolean(judge.submission)}
-                  onClick={() => send("OPEN_JUDGE", { judgeId: judge.id })}
-                >
-                  OPEN
-                </button>
-                <button
-                  type="button"
-                  onClick={() => send("CLOSE_JUDGE", { judgeId: judge.id })}
-                >
-                  CLOSE
-                </button>
-              </footer>
-            </article>
-          ))}
-        </div>
-      </section>
-      <section className="score-workspace" aria-labelledby="score-title">
-        <div className="region-title">
-          <p>LIVE SCORING</p>
-          <h2 id="score-title">
-            {result?.kind === "incomplete"
-              ? "INCOMPLETE"
-              : result?.kind === "finalised"
-                ? "FINALISED"
-                : "PROVISIONAL"}
-          </h2>
-          <span>
-            {result?.kind === "incomplete"
-              ? `${result.missingJudgeSlots.length} judge score(s) and${result.audienceMissing ? " audience votes" : ""} remaining`
-              : active?.actName}
-          </span>
-        </div>
-        <div className="score-metrics">
-          <span>
-            <small>Audience weighted</small>
-            <b>{aggregate?.weightedMean?.toFixed(2) ?? "—"}</b>
-            <em>{aggregate?.voteCount ?? 0} votes</em>
-          </span>
-          <span>
-            <small>Audience 50%</small>
-            <b>{audienceContribution?.toFixed(3) ?? "—"}</b>
-          </span>
-          <span>
-            <small>Judge mean</small>
-            <b>{judgeMean?.toFixed(3) ?? "—"}</b>
-          </span>
-          <span>
-            <small>Judges 50%</small>
-            <b>{judgeContribution?.toFixed(3) ?? "—"}</b>
-            <em>{submittedScores.length}/4 locked</em>
-          </span>
-          <span>
-            <small>Final result</small>
-            <b>
-              {result?.kind === "incomplete" || !result
-                ? "—"
-                : result.value.toFixed(3)}
-            </b>
-          </span>
-        </div>
-        <div className="score-actions">
-          <button
-            type="button"
-            disabled={result?.kind !== "provisional"}
-            onClick={() => send("FINALISE_RESULT")}
-          >
-            FINALISE
-          </button>
-          <button
-            type="button"
-            disabled={
-              result?.kind !== "finalised" ||
-              projection.show.resultRevealState === "REVEALED"
-            }
-            onClick={() => send("REVEAL_RESULT")}
-          >
-            REVEAL
-          </button>
-          <button
-            type="button"
-            disabled={projection.show.resultRevealState !== "REVEALED"}
-            onClick={() => send("HIDE_RESULT")}
-          >
-            HIDE
-          </button>
-        </div>
-      </section>
-      <section className="media-workspace" aria-label="Media workspace">
-        <div>
-          <p>MEDIA</p>
-          <b>
-            Visual {projection.runtime.visualTransport} · Audio{" "}
-            {projection.runtime.audioTransport}
-          </b>
-        </div>
-        <div>
-          <button type="button" onClick={() => send("PAUSE_MEDIA")}>
-            Pause
-          </button>
-          <button type="button" onClick={() => send("RESUME_MEDIA")}>
-            Resume
-          </button>
-          <button type="button" onClick={() => send("STOP_MEDIA")}>
-            Stop all
-          </button>
-        </div>
-      </section>
+                  <span
+                    className={
+                      judge.submission ? "signal signal--locked" : "signal"
+                    }
+                  >
+                    {judge.submission ? "LOCKED" : "WAITING"}
+                  </span>
+                </div>
+                {judge.submission ? (
+                  <p>
+                    <b>{judge.submission.input.raw}</b>
+                    {Math.abs(
+                      judge.submission.effectiveScore -
+                        (judge.submission.parsed.finiteValue ??
+                          judge.submission.effectiveScore),
+                    ) > 0.001 && (
+                      <> → {judge.submission.effectiveScore.toFixed(3)}</>
+                    )}
+                    <small>
+                      {new Date(
+                        judge.submission.submittedAt,
+                      ).toLocaleTimeString()}
+                    </small>
+                  </p>
+                ) : (
+                  <p className="judge-empty">No score submitted</p>
+                )}
+                <footer>
+                  <button
+                    type="button"
+                    disabled={Boolean(judge.submission)}
+                    onClick={() => send("OPEN_JUDGE", { judgeId: judge.id })}
+                  >
+                    OPEN
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => send("CLOSE_JUDGE", { judgeId: judge.id })}
+                  >
+                    CLOSE
+                  </button>
+                </footer>
+              </article>
+            ))}
+          </div>
+        </section>
+        <section className="score-workspace" aria-labelledby="score-title">
+          <div className="region-title">
+            <p>LIVE SCORING</p>
+            <h2 id="score-title">
+              {result?.kind === "incomplete"
+                ? "INCOMPLETE"
+                : result?.kind === "finalised"
+                  ? "FINALISED"
+                  : "PROVISIONAL"}
+            </h2>
+            <span>
+              {result?.kind === "incomplete"
+                ? `${result.missingJudgeSlots.length} judge score(s) and${result.audienceMissing ? " audience votes" : ""} remaining`
+                : active?.actName}
+            </span>
+          </div>
+          <div className="score-metrics">
+            <span>
+              <small>Audience weighted</small>
+              <b>{aggregate?.weightedMean?.toFixed(2) ?? "—"}</b>
+              <em>{aggregate?.voteCount ?? 0} votes</em>
+            </span>
+            <span>
+              <small>Audience 50%</small>
+              <b>{audienceContribution?.toFixed(3) ?? "—"}</b>
+            </span>
+            <span>
+              <small>Judge mean</small>
+              <b>{judgeMean?.toFixed(3) ?? "—"}</b>
+            </span>
+            <span>
+              <small>Judges 50%</small>
+              <b>{judgeContribution?.toFixed(3) ?? "—"}</b>
+              <em>{submittedScores.length}/4 locked</em>
+            </span>
+            <span>
+              <small>Final result</small>
+              <b>
+                {result?.kind === "incomplete" || !result
+                  ? "—"
+                  : result.value.toFixed(3)}
+              </b>
+            </span>
+          </div>
+          <div className="score-actions">
+            <button
+              type="button"
+              disabled={result?.kind !== "provisional"}
+              onClick={() => send("FINALISE_RESULT")}
+            >
+              FINALISE
+            </button>
+            <button
+              type="button"
+              disabled={
+                result?.kind !== "finalised" ||
+                projection.show.resultRevealState === "REVEALED"
+              }
+              onClick={() => send("REVEAL_RESULT")}
+            >
+              REVEAL
+            </button>
+            <button
+              type="button"
+              disabled={projection.show.resultRevealState !== "REVEALED"}
+              onClick={() => send("HIDE_RESULT")}
+            >
+              HIDE
+            </button>
+          </div>
+        </section>
+      </div>
     </main>
   );
 }

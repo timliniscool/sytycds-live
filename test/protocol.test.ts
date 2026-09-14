@@ -37,6 +37,7 @@ describe("realtime protocol", () => {
       role: "audience",
       show: {
         title: "Show",
+        displayMode: "LOBBY",
         activeActId: null,
         audienceVoteState: "CLOSED",
         revision: showRevision(2),
