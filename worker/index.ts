@@ -27,7 +27,12 @@ export default {
       return Response.json({ ok: true, coordinator });
     }
 
-    if (request.method === "GET" && url.pathname === "/api/ws") {
+    if (
+      url.pathname === "/api/ws" ||
+      url.pathname.startsWith("/api/admin/") ||
+      url.pathname === "/api/vote" ||
+      url.pathname === "/api/vote/status"
+    ) {
       const id = env.SHOW_COORDINATOR.idFromName("primary");
       return env.SHOW_COORDINATOR.get(id).fetch(request);
     }

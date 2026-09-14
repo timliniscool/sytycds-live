@@ -216,10 +216,32 @@ const COMMAND_IDEMPOTENCY_SCHEMA: SchemaMigration = {
   ],
 };
 
+const AUTH_AND_VOTER_SCHEMA: SchemaMigration = {
+  version: 4,
+  name: "admin_sessions_and_login_rate_limits",
+  statements: [
+    `CREATE TABLE admin_sessions (
+      token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+      expires_at INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    ) STRICT`,
+    "CREATE INDEX idx_admin_sessions_expiry ON admin_sessions (expires_at)",
+    `CREATE TABLE admin_login_limits (
+      subject_hash BLOB PRIMARY KEY NOT NULL CHECK (length(subject_hash) = 32),
+      window_started_at INTEGER NOT NULL,
+      failed_count INTEGER NOT NULL CHECK (failed_count >= 0),
+      blocked_until INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL
+    ) STRICT`,
+  ],
+};
+
 export const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
   COMMAND_IDEMPOTENCY_SCHEMA,
+  AUTH_AND_VOTER_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

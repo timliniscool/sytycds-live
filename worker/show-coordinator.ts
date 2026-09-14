@@ -4,6 +4,7 @@ import type { AdminCommand } from "../shared/admin-command";
 import {
   PROTOCOL_VERSION,
   showRevision,
+  type AudienceAggregate,
   type ConnectionRole,
   type JudgeId,
 } from "../shared/domain";
@@ -14,6 +15,26 @@ import {
   type ServerMessage,
 } from "../shared/protocol";
 import { isRecord } from "../shared/trust";
+import {
+  configuredAdminSecret,
+  createAdminSession,
+  destroyAdminSession,
+  isAdminSessionHashActive,
+  readAdminSession,
+} from "./admin-auth";
+import {
+  hasAudienceVote,
+  parseAudienceVoteRequest,
+  resolveVoterIdentity,
+  submitAudienceVote,
+} from "./audience-votes";
+import {
+  createJudges,
+  listJudges,
+  revokeJudge,
+  rotateJudgeToken,
+} from "./judge-lifecycle";
+import { hasSameOrigin } from "./security";
 import { initialiseSchema, readSchemaVersion } from "./schema";
 import { authenticateSocketRole } from "./socket-auth";
 import {
@@ -31,12 +52,14 @@ interface CoordinatorHealth {
 
 interface AwaitingHelloAttachment {
   phase: "awaiting_hello";
+  adminSessionHash: ArrayBuffer | null;
 }
 
 interface ReadyAttachment {
   phase: "ready";
   role: ConnectionRole;
   protocolVersion: typeof PROTOCOL_VERSION;
+  adminSessionHash: ArrayBuffer | null;
 }
 
 type SocketAttachment = AwaitingHelloAttachment | ReadyAttachment;
@@ -49,7 +72,10 @@ function isSocketAttachment(value: unknown): value is SocketAttachment {
     return false;
   }
   if (value.phase === "awaiting_hello") {
-    return true;
+    return (
+      value.adminSessionHash === null ||
+      value.adminSessionHash instanceof ArrayBuffer
+    );
   }
   if (
     value.protocolVersion !== PROTOCOL_VERSION ||
@@ -59,22 +85,34 @@ function isSocketAttachment(value: unknown): value is SocketAttachment {
     return false;
   }
   if (value.role.kind === "judge") {
-    return typeof value.role.judgeId === "string";
+    return (
+      typeof value.role.judgeId === "string" &&
+      (value.adminSessionHash === null ||
+        value.adminSessionHash instanceof ArrayBuffer)
+    );
   }
   return (
-    value.role.kind === "admin" ||
-    value.role.kind === "projector" ||
-    value.role.kind === "audience"
+    (value.adminSessionHash === null ||
+      value.adminSessionHash instanceof ArrayBuffer) &&
+    (value.role.kind === "admin" ||
+      value.role.kind === "projector" ||
+      value.role.kind === "audience")
   );
 }
 
 export class ShowCoordinator extends DurableObject<Env> {
+  private aggregateFlushTimer: number | null = null;
+  private readonly pendingAggregateUpdates = new Map<
+    string,
+    Extract<ServerMessage, { type: "aggregate_update" }>
+  >();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     initialiseSchema(ctx.storage);
   }
 
-  fetch(request: Request): Response {
+  async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/health") {
       const health: CoordinatorHealth = {
@@ -87,10 +125,297 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/api/ws") {
       return this.upgradeWebSocket(request);
     }
+    if (url.pathname === "/api/admin/login" && request.method === "POST") {
+      return this.handleAdminLogin(request);
+    }
+    if (url.pathname === "/api/admin/session" && request.method === "GET") {
+      return this.handleAdminSession(request);
+    }
+    if (url.pathname === "/api/admin/logout" && request.method === "POST") {
+      return this.handleAdminLogout(request);
+    }
+    if (url.pathname === "/api/admin/command" && request.method === "POST") {
+      return this.handleAdminHttpCommand(request);
+    }
+    if (url.pathname === "/api/admin/judges" && request.method === "GET") {
+      return this.handleListJudges(request);
+    }
+    if (
+      url.pathname === "/api/admin/judges/initialize" &&
+      request.method === "POST"
+    ) {
+      return this.handleCreateJudges(request);
+    }
+    const judgeActionMatch =
+      /^\/api\/admin\/judges\/([A-Za-z0-9_-]{1,128})\/(rotate|revoke)$/u.exec(
+        url.pathname,
+      );
+    if (judgeActionMatch && request.method === "POST") {
+      const judgeId = judgeActionMatch[1] ?? "";
+      return judgeActionMatch[2] === "rotate"
+        ? this.handleRotateJudge(request, judgeId)
+        : this.handleRevokeJudge(request, judgeId);
+    }
+    if (url.pathname === "/api/vote/status" && request.method === "GET") {
+      return this.handleVoteStatus(request, url);
+    }
+    if (url.pathname === "/api/vote" && request.method === "POST") {
+      return this.handleAudienceVote(request);
+    }
     return Response.json({ error: "Not found" }, { status: 404 });
   }
 
-  private upgradeWebSocket(request: Request): Response {
+  private async authenticatedAdmin(
+    request: Request,
+    mutation: boolean,
+  ): Promise<ArrayBuffer | null> {
+    if (mutation && !hasSameOrigin(request)) {
+      return null;
+    }
+    const session = hasSameOrigin(request)
+      ? await readAdminSession(this.ctx.storage.sql, request)
+      : null;
+    return session?.tokenHash ?? null;
+  }
+
+  private async handleAdminLogin(request: Request): Promise<Response> {
+    const secret = configuredAdminSecret(this.env);
+    if (!secret) {
+      return Response.json({ authenticated: false }, { status: 503 });
+    }
+    const result = await createAdminSession(this.ctx.storage, request, secret);
+    return Response.json(
+      { authenticated: result.ok },
+      {
+        status: result.status,
+        ...(result.setCookie
+          ? { headers: { "Set-Cookie": result.setCookie } }
+          : {}),
+      },
+    );
+  }
+
+  private async handleAdminSession(request: Request): Promise<Response> {
+    const session = await this.authenticatedAdmin(request, false);
+    return Response.json({ authenticated: session !== null });
+  }
+
+  private async handleAdminLogout(request: Request): Promise<Response> {
+    if (!hasSameOrigin(request)) {
+      return Response.json({ authenticated: false }, { status: 403 });
+    }
+    const cookie = await destroyAdminSession(this.ctx.storage, request);
+    return Response.json(
+      { authenticated: false },
+      { headers: { "Set-Cookie": cookie } },
+    );
+  }
+
+  private async handleAdminHttpCommand(request: Request): Promise<Response> {
+    const session = await this.authenticatedAdmin(request, true);
+    if (!session) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    let command: unknown;
+    try {
+      command = await request.json();
+    } catch {
+      return Response.json({ error: "Invalid command" }, { status: 400 });
+    }
+    const execution = executeAdminCommand(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      { kind: "admin" },
+      command,
+    );
+    if (execution.acknowledgement.status === "accepted") {
+      const parsed = parseClientMessage(
+        JSON.stringify({
+          type: "admin_command",
+          protocolVersion: PROTOCOL_VERSION,
+          command,
+        }),
+      );
+      if (parsed.ok && parsed.message.type === "admin_command") {
+        this.broadcastChanges(execution.changes, parsed.message.command);
+      }
+    }
+    return Response.json(execution.acknowledgement);
+  }
+
+  private async handleListJudges(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    return Response.json({
+      judges: listJudges(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+    });
+  }
+
+  private async handleCreateJudges(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ error: "Bad request" }, { status: 400 });
+    }
+    const labels =
+      isRecord(body) &&
+      Array.isArray(body.labels) &&
+      body.labels.every((label) => typeof label === "string")
+        ? body.labels
+        : null;
+    if (!labels) {
+      return Response.json({ error: "Bad request" }, { status: 400 });
+    }
+    const issued = await createJudges(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      labels,
+    );
+    if (!issued) {
+      return Response.json(
+        { error: "Unable to create judges" },
+        { status: 409 },
+      );
+    }
+    const origin = new URL(request.url).origin;
+    return Response.json({
+      judges: issued.map((judge) => ({
+        judgeId: judge.judgeId,
+        slot: judge.slot,
+        displayName: judge.displayName,
+        link: `${origin}/judge/${judge.token}`,
+      })),
+    });
+  }
+
+  private async handleRotateJudge(
+    request: Request,
+    requestedJudgeId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    const issued = await rotateJudgeToken(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      requestedJudgeId,
+    );
+    if (!issued) {
+      return Response.json({ error: "Judge not found" }, { status: 404 });
+    }
+    return Response.json({
+      judgeId: issued.judgeId,
+      slot: issued.slot,
+      displayName: issued.displayName,
+      link: `${new URL(request.url).origin}/judge/${issued.token}`,
+    });
+  }
+
+  private async handleRevokeJudge(
+    request: Request,
+    requestedJudgeId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    if (!revokeJudge(this.ctx.storage, PRIMARY_SHOW_ID, requestedJudgeId)) {
+      return Response.json(
+        { error: "Active judge not found" },
+        { status: 404 },
+      );
+    }
+    return Response.json({ judgeId: requestedJudgeId, active: false });
+  }
+
+  private async handleVoteStatus(
+    request: Request,
+    url: URL,
+  ): Promise<Response> {
+    const actIdentifier = url.searchParams.get("actId");
+    if (!actIdentifier || !/^[A-Za-z0-9_-]{1,128}$/u.test(actIdentifier)) {
+      return Response.json({ locked: false }, { status: 400 });
+    }
+    const identity = await resolveVoterIdentity(request);
+    const response = Response.json({
+      locked: hasAudienceVote(
+        this.ctx.storage.sql,
+        PRIMARY_SHOW_ID,
+        actIdentifier,
+        identity.hash,
+      ),
+    });
+    if (identity.setCookie) {
+      response.headers.set("Set-Cookie", identity.setCookie);
+    }
+    return response;
+  }
+
+  private async handleAudienceVote(request: Request): Promise<Response> {
+    let body: unknown;
+    try {
+      body = await request.json();
+    } catch {
+      return Response.json({ code: "BAD_REQUEST" }, { status: 400 });
+    }
+    const parsed = parseAudienceVoteRequest(body);
+    if (!parsed.ok) {
+      return Response.json({ code: parsed.code }, { status: 400 });
+    }
+    const identity = await resolveVoterIdentity(request);
+    const outcome = submitAudienceVote(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      identity.hash,
+      parsed,
+    );
+    const response = Response.json(
+      outcome.ok ? { accepted: true, locked: true } : { code: outcome.code },
+      {
+        status: outcome.ok
+          ? 200
+          : outcome.code === "INVALID_SCORE" || outcome.code === "BAD_REQUEST"
+            ? 400
+            : 409,
+      },
+    );
+    if (identity.setCookie) {
+      response.headers.set("Set-Cookie", identity.setCookie);
+    }
+    if (outcome.ok) {
+      this.queueAggregateUpdate(outcome.revision, outcome.aggregate);
+    }
+    return response;
+  }
+
+  private queueAggregateUpdate(
+    revision: ReturnType<typeof showRevision>,
+    aggregate: AudienceAggregate,
+  ): void {
+    this.pendingAggregateUpdates.set(aggregate.actId, {
+      type: "aggregate_update",
+      protocolVersion: PROTOCOL_VERSION,
+      revision,
+      aggregate,
+    });
+    if (this.aggregateFlushTimer !== null) {
+      return;
+    }
+    this.aggregateFlushTimer = setTimeout(() => {
+      this.aggregateFlushTimer = null;
+      for (const update of this.pendingAggregateUpdates.values()) {
+        this.broadcastAdmin(update);
+        this.broadcastProjector(update);
+      }
+      this.pendingAggregateUpdates.clear();
+    }, 250);
+  }
+
+  private async upgradeWebSocket(request: Request): Promise<Response> {
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return Response.json(
         { error: "WebSocket upgrade required" },
@@ -101,9 +426,13 @@ export class ShowCoordinator extends DurableObject<Env> {
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
+    const session = hasSameOrigin(request)
+      ? await readAdminSession(this.ctx.storage.sql, request)
+      : null;
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment({
       phase: "awaiting_hello",
+      adminSessionHash: session?.tokenHash ?? null,
     } satisfies AwaitingHelloAttachment);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -133,7 +462,7 @@ export class ShowCoordinator extends DurableObject<Env> {
         );
         return;
       }
-      await this.handleHello(ws, parsed.message);
+      await this.handleHello(ws, parsed.message, attachment);
       return;
     }
 
@@ -152,6 +481,17 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
 
     if (parsed.message.type === "admin_command") {
+      if (
+        attachment.role.kind !== "admin" ||
+        !attachment.adminSessionHash ||
+        !isAdminSessionHashActive(
+          this.ctx.storage.sql,
+          attachment.adminSessionHash,
+        )
+      ) {
+        this.sendProtocolError(ws, "unauthorised", "Admin session expired");
+        return;
+      }
       this.handleAdminCommand(ws, attachment.role, parsed.message.command);
       return;
     }
@@ -187,12 +527,17 @@ export class ShowCoordinator extends DurableObject<Env> {
     // Hibernation-safe connections are discovered from attachments; no memory cleanup is required.
   }
 
-  private async handleHello(ws: WebSocket, hello: ClientHello): Promise<void> {
+  private async handleHello(
+    ws: WebSocket,
+    hello: ClientHello,
+    attachment: AwaitingHelloAttachment,
+  ): Promise<void> {
     const role = await authenticateSocketRole(
       this.env,
       this.ctx.storage.sql,
       PRIMARY_SHOW_ID,
       hello,
+      attachment.adminSessionHash,
     );
     if (!role) {
       this.sendProtocolError(
@@ -208,6 +553,7 @@ export class ShowCoordinator extends DurableObject<Env> {
       phase: "ready",
       role,
       protocolVersion: PROTOCOL_VERSION,
+      adminSessionHash: attachment.adminSessionHash,
     } satisfies ReadyAttachment);
     this.sendSnapshot(ws, role);
   }

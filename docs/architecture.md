@@ -6,7 +6,7 @@ The repository began as an empty Git repository containing only `.gitattributes`
 
 This baseline is a single npm package. It requires Node 22.12 or newer and npm 11 or newer; setup was verified locally with Node 26.8.1 and npm 11.19.0. `package-lock.json` is the dependency lock and npm is the sole package manager.
 
-The implemented foundation is deliberately narrow: a React SPA, a Worker API, a bound SQLite Durable Object, an R2 binding, and an infrastructure test. Voting, show control, media playback, authentication, role projections, and WebSockets are not implemented yet.
+The implemented foundation is deliberately narrow: a React SPA, a Worker API, a bound SQLite Durable Object, an R2 binding, and Workers-runtime tests. It now includes centralized show-control commands, role-projected hibernating WebSockets, small admin session authentication, a pure scoring engine, anonymous vote identity, the transactional audience vote path, and judge-token lifecycle. Media playback and final public interfaces remain later work.
 
 ## Runtime boundaries and authority
 
@@ -41,7 +41,15 @@ The initial schema contains show state; ordered acts; independent visual/audio c
 
 `show_runtime` persists the values that are unsafe to hold only in a Durable Object instance: the safe display mode to restore from HOLD or EMERGENCY, global judge-permission default, prepared and active visual/audio cue IDs, each transport state, and black-screen override. `worker/show-state.ts` is the sole admin mutator. It validates an optimistic expected revision, enforces act and judge ownership, writes command idempotency/audit records, applies one transition, and increments the show revision in a single SQLite transaction. Display changes cannot alter voting; INTERMISSION retains the selected act; submitted judges cannot be reopened; and black screen does not stop audio.
 
-The `/api/ws` endpoint is handled by the coordinator with the Durable Object WebSocket Hibernation API. A compact attachment records only negotiated role and protocol version, so sockets survive object eviction without an in-memory connection map. Initial snapshots are projected per role and later traffic consists of revisioned patches, voting/permission updates, media commands, and acknowledgements. Audience connections remain anonymous at this layer; judges authenticate by comparing a SHA-256 URL-token digest with the stored hash. Admin and projector roles fail closed until `ADMIN_ACCESS_TOKEN` and `PROJECTOR_ACCESS_TOKEN` are configured as Worker secrets.
+The `/api/ws` endpoint is handled by the coordinator with the Durable Object WebSocket Hibernation API. A compact attachment records only negotiated role and protocol version plus the hash of an authenticated admin session where needed, so sockets survive object eviction without an in-memory connection map. Initial snapshots are projected per role and later traffic consists of revisioned patches, voting/permission updates, media commands, and acknowledgements. Audience connections remain anonymous at this layer; judges authenticate by comparing a SHA-256 URL-token digest with the stored hash. Admin sessions are backed by a random HttpOnly, SameSite=Strict cookie and checked again for every admin command. Projector roles fail closed until `PROJECTOR_ACCESS_TOKEN` is configured as a Worker secret.
+
+## Credentials, sessions, and anonymous identity
+
+Set `ADMIN_ACCESS_TOKEN` and `PROJECTOR_ACCESS_TOKEN` with Wrangler/Cloudflare secrets; neither belongs in `wrangler.jsonc`, the repository, nor a frontend bundle. `POST /api/admin/login` compares the deployment secret using a timing-safe Web Crypto comparison, applies a small per-subject failed-login limit, and issues an eight-hour server-backed session cookie. Admin mutations require that session and a same-origin request; the cookie's Strict same-site policy provides the additional browser CSRF defence. Login is deliberately the only unauthenticated admin write endpoint.
+
+Audience voting uses a separate 256-bit random first-party voter cookie (`HttpOnly`, `SameSite=Lax`, and `Secure` over HTTPS). SQLite sees only its SHA-256 digest, which is unique per show and act. A syntactically valid altered cookie intentionally identifies a different anonymous browser: no anonymous browser scheme can prevent deliberate cookie replacement, so the product makes no claim of one vote per physical person.
+
+Judge URLs contain a random 256-bit token, while SQLite stores only its SHA-256 digest. Tokens are shown only during initial provisioning or rotation; they cannot safely be retrieved later. Operators should rotate a judge token to generate a replacement link, immediately invalidating the previous link.
 
 ## State lifetime
 
