@@ -1,60 +1,119 @@
-import { useEffect, useState } from "react";
+import { Component, lazy, Suspense, useEffect, type ReactNode } from "react";
 
-type RuntimeStatus =
-  | { state: "checking" }
-  | { state: "ready"; storage: string }
-  | { state: "unavailable" };
+import { metadataForRoute, resolveRoute, type Route } from "./router";
 
-interface HealthResponse {
-  ok: true;
-  coordinator: {
-    ok: true;
-    storage: string;
-  };
+const AdminSurface = lazy(() => import("./surfaces/AdminSurface"));
+const ProjectorSurface = lazy(() => import("./surfaces/ProjectorSurface"));
+const VoteSurface = lazy(() => import("./surfaces/VoteSurface"));
+const JudgeSurface = lazy(() => import("./surfaces/JudgeSurface"));
+
+interface ErrorBoundaryProps {
+  children: ReactNode;
+}
+
+interface ErrorBoundaryState {
+  failed: boolean;
+}
+
+class SurfaceErrorBoundary extends Component<
+  ErrorBoundaryProps,
+  ErrorBoundaryState
+> {
+  state: ErrorBoundaryState = { failed: false };
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <FatalScreen title="Unable to start this show surface" />;
+    }
+
+    return this.props.children;
+  }
+}
+
+function supportsRequiredBrowserFeatures(): boolean {
+  return (
+    typeof window.Promise !== "undefined" &&
+    typeof window.fetch === "function" &&
+    typeof window.WebSocket === "function" &&
+    typeof window.crypto?.getRandomValues === "function"
+  );
+}
+
+function RouteDocumentMetadata({ route }: { route: Route }) {
+  useEffect(() => {
+    const metadata = metadataForRoute(route);
+    document.title = metadata.title;
+    document.documentElement.style.setProperty(
+      "--surface-theme",
+      metadata.themeColor,
+    );
+
+    const description = document.querySelector<HTMLMetaElement>(
+      'meta[name="description"]',
+    );
+    description?.setAttribute("content", metadata.description);
+
+    const themeColor = document.querySelector<HTMLMetaElement>(
+      'meta[name="theme-color"]',
+    );
+    themeColor?.setAttribute("content", metadata.themeColor);
+  }, [route]);
+
+  return null;
+}
+
+function FatalScreen({ title }: { title: string }) {
+  return (
+    <main className="fatal-screen">
+      <p>SYTYCDS</p>
+      <h1>{title}</h1>
+      <p>Please use a current browser, then reload this page.</p>
+    </main>
+  );
+}
+
+function NotFoundSurface() {
+  return (
+    <main className="not-found" aria-labelledby="not-found-title">
+      <p>SYTYCDS</p>
+      <h1 id="not-found-title">This show surface does not exist.</h1>
+      <a href="/vote">Go to audience voting</a>
+    </main>
+  );
+}
+
+function Surface({ route }: { route: Route }) {
+  switch (route.kind) {
+    case "admin":
+      return <AdminSurface />;
+    case "projector":
+      return <ProjectorSurface />;
+    case "vote":
+      return <VoteSurface />;
+    case "judge":
+      return <JudgeSurface token={route.token} />;
+    case "not-found":
+      return <NotFoundSurface />;
+  }
 }
 
 export function App() {
-  const [status, setStatus] = useState<RuntimeStatus>({ state: "checking" });
+  const route = resolveRoute(window.location.pathname);
 
-  useEffect(() => {
-    const controller = new AbortController();
-
-    async function checkRuntime() {
-      try {
-        const response = await fetch("/api/health", {
-          headers: { Accept: "application/json" },
-          signal: controller.signal,
-        });
-
-        if (!response.ok) {
-          throw new Error(`Health check failed with ${response.status}`);
-        }
-
-        const result = (await response.json()) as HealthResponse;
-        setStatus({ state: "ready", storage: result.coordinator.storage });
-      } catch (error: unknown) {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          return;
-        }
-        setStatus({ state: "unavailable" });
-      }
-    }
-
-    void checkRuntime();
-    return () => controller.abort();
-  }, []);
+  if (!supportsRequiredBrowserFeatures()) {
+    return <FatalScreen title="This browser cannot run the live show" />;
+  }
 
   return (
-    <main>
-      <p className="eyebrow">So You Think You Can Do Stuff</p>
-      <h1>Runtime baseline</h1>
-      <p className={`status status--${status.state}`} role="status">
-        <span aria-hidden="true" />
-        {status.state === "checking" && "Checking Worker runtime…"}
-        {status.state === "ready" &&
-          `Worker and ${status.storage} coordinator ready`}
-        {status.state === "unavailable" && "Worker runtime unavailable"}
-      </p>
-    </main>
+    <SurfaceErrorBoundary>
+      <RouteDocumentMetadata route={route} />
+      <Suspense fallback={<FatalScreen title="Starting show surface…" />}>
+        <Surface route={route} />
+      </Suspense>
+    </SurfaceErrorBoundary>
   );
 }

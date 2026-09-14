@@ -26,10 +26,22 @@ admin / projector / vote / judge browsers
 
 - **Browsers:** render their role-specific interface, collect input, perform local media playback, reconnect, and reconcile server revisions. Browsers are never authoritative for show state, accepted votes, judge submissions, scores, or result visibility.
 - **Worker:** serves the built SPA, terminates public HTTP/WebSocket requests, applies request-level security and role checks, and routes show operations to the coordinator. It must not keep important state in isolate memory.
-- **ShowCoordinator Durable Object:** the single writer and authoritative coordinator for one show. It will own command ordering, validation, idempotency, role-specific state projections, score transactions, aggregate updates, and hibernatable WebSocket fan-out. The current class only initializes and reports bootstrap schema metadata.
+- **ShowCoordinator Durable Object:** the single writer and authoritative coordinator for one show. It owns schema initialization and will own command ordering, validation, idempotency, role-specific state projections, score transactions, aggregate updates, and hibernatable WebSocket fan-out.
 - **R2:** stores uploaded performance media. SQLite stores metadata and object keys, not media bodies. R2 content is delivered through explicitly authorised Worker paths or suitable signed access rather than becoming coordinator state.
 
-The four browser roles are operator (`/admin`), public display (`/projector`), audience voter (`/vote`), and one of exactly four token-authenticated adjudicators (`/judge/:token`). The SPA fallback already permits these paths, but route-specific UI and authentication are intentionally deferred.
+The four browser roles are operator (`/admin`), public display (`/projector`), audience voter (`/vote`), and one of exactly four token-authenticated adjudicators (`/judge/:token`). The fixed React path resolver only accepts these routes and lazy-loads the relevant semantic surface. The Worker asset fallback permits direct navigation and refresh on each route. Authentication and live data are intentionally deferred.
+
+## SQLite schema and migrations
+
+`worker/schema.ts` is the sole schema definition and migration runner. Each migration is an ordered set of direct SQL statements run inside a Durable Object SQLite transaction; its row is recorded in `schema_migrations` only after all statements succeed. An unknown newer version or a missing earlier version is fatal. Re-initialisation detects prior rows and makes no duplicate changes.
+
+The initial schema contains show state; ordered acts; independent visual/audio cue metadata; four-slot hashed-token judges; per-act judge permissions and insert-once submissions; anonymous insert-once audience votes; their incremental aggregates; result snapshots and finalised results; idempotent command records; and audit events. Composite keys keep an act and judge associated with the same show. The audience-vote primary key enforces one hash per act and the aggregate table is keyed for a constant-time update, so the hot path never needs to scan votes. The four available judge slots are constrained to 1–4; future show-setup validation must require all four before a show is opened.
+
+## Authoritative transitions and realtime
+
+`show_runtime` persists the values that are unsafe to hold only in a Durable Object instance: the safe display mode to restore from HOLD or EMERGENCY, global judge-permission default, prepared and active visual/audio cue IDs, each transport state, and black-screen override. `worker/show-state.ts` is the sole admin mutator. It validates an optimistic expected revision, enforces act and judge ownership, writes command idempotency/audit records, applies one transition, and increments the show revision in a single SQLite transaction. Display changes cannot alter voting; INTERMISSION retains the selected act; submitted judges cannot be reopened; and black screen does not stop audio.
+
+The `/api/ws` endpoint is handled by the coordinator with the Durable Object WebSocket Hibernation API. A compact attachment records only negotiated role and protocol version, so sockets survive object eviction without an in-memory connection map. Initial snapshots are projected per role and later traffic consists of revisioned patches, voting/permission updates, media commands, and acknowledgements. Audience connections remain anonymous at this layer; judges authenticate by comparing a SHA-256 URL-token digest with the stored hash. Admin and projector roles fail closed until `ADMIN_ACCESS_TOKEN` and `PROJECTOR_ACCESS_TOKEN` are configured as Worker secrets.
 
 ## State lifetime
 

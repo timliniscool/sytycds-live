@@ -27,6 +27,11 @@ export default {
       return Response.json({ ok: true, coordinator });
     }
 
+    if (request.method === "GET" && url.pathname === "/api/ws") {
+      const id = env.SHOW_COORDINATOR.idFromName("primary");
+      return env.SHOW_COORDINATOR.get(id).fetch(request);
+    }
+
     if (url.pathname.startsWith("/api/")) {
       return Response.json({ error: "Not found" }, { status: 404 });
     }

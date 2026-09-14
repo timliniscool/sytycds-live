@@ -2,6 +2,8 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
+import { LATEST_SCHEMA_VERSION } from "../worker/schema";
+
 describe("runtime baseline", () => {
   it("binds one SQLite-backed show coordinator", async () => {
     const id = env.SHOW_COORDINATOR.idFromName("primary");
@@ -12,7 +14,7 @@ describe("runtime baseline", () => {
     await expect(response.json()).resolves.toEqual({
       ok: true,
       storage: "SQLite",
-      schemaVersion: 0,
+      schemaVersion: LATEST_SCHEMA_VERSION,
     });
 
     await runInDurableObject(stub, (_instance, state) => {
