@@ -1,6 +1,7 @@
 # Copy to `.dev.vars` for local development. Never commit `.dev.vars`.
 # In production these are Worker secrets: `npx wrangler secret put <NAME>`.
-ADMIN_ACCESS_TOKEN=change-me-operator-secret
-PROJECTOR_ACCESS_TOKEN=change-me-projector-token
+ADMIN_USERNAME=operator
+ADMIN_PASSWORD=change-me-to-a-long-random-password
+GOOGLE_FONTS_API_KEY=
 # Leave empty locally so the QR uses the dev server's own origin.
 PUBLIC_ORIGIN=

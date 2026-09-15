@@ -18,7 +18,9 @@ const SESSION_LIFETIME_SECONDS = 8 * 60 * 60;
 const LOGIN_WINDOW_MS = 10 * 60 * 1000;
 const LOGIN_BLOCK_MS = 15 * 60 * 1000;
 const LOGIN_MAX_FAILURES = 5;
-export const ADMIN_PBKDF2_ITERATIONS = 210_000;
+// Cloudflare Workers Web Crypto currently rejects PBKDF2 counts above 100k.
+// Use the platform maximum so production and local verification are identical.
+export const ADMIN_PBKDF2_ITERATIONS = 100_000;
 
 interface SessionRow extends Record<string, SqlStorageValue> {
   expires_at: number;
@@ -48,6 +50,13 @@ export interface BootstrapCredential {
   password: string;
 }
 
+export type AdminRecoveryResult =
+  | "recovered"
+  | "not_configured"
+  | "not_accepted"
+  | "already_used"
+  | "invalid_credential";
+
 export function configuredAdminCredential(
   env: object,
 ): BootstrapCredential | null {
@@ -65,6 +74,11 @@ export function configuredAdminCredential(
         ? values.ADMIN_ACCESS_TOKEN
         : null;
   return password ? { username, password } : null;
+}
+
+export function configuredAdminRecoveryToken(env: object): string | null {
+  const value = (env as Record<string, unknown>).ADMIN_RECOVERY_TOKEN;
+  return typeof value === "string" && isOpaqueToken(value) ? value : null;
 }
 
 function randomSalt(): Uint8Array<ArrayBuffer> {
@@ -319,6 +333,81 @@ export async function rotateAdminCredential(
     );
   });
   return true;
+}
+
+/**
+ * Break-glass recovery replaces only the admin verifier and sessions. The
+ * temporary secret is single-use even if its Cloudflare binding is not removed
+ * promptly; show, scoring and media tables are never touched.
+ */
+export async function recoverAdminCredential(
+  storage: DurableObjectStorage,
+  bootstrap: BootstrapCredential | null,
+  configuredToken: string | null,
+  presentedToken: string,
+): Promise<AdminRecoveryResult> {
+  if (!configuredToken) return "not_configured";
+  if (
+    !isOpaqueToken(presentedToken) ||
+    !sameSecret(presentedToken, configuredToken)
+  )
+    return "not_accepted";
+  if (
+    !bootstrap ||
+    bootstrap.username.length === 0 ||
+    bootstrap.username.length > 120 ||
+    bootstrap.password.length < 12 ||
+    bootstrap.password.length > 1024
+  )
+    return "invalid_credential";
+
+  const recoveryHash = await tokenHash(configuredToken);
+  if (
+    storage.sql
+      .exec<{ present: number }>(
+        "SELECT 1 AS present FROM admin_credential_recoveries WHERE token_hash = ?",
+        recoveryHash,
+      )
+      .toArray().length > 0
+  )
+    return "already_used";
+
+  const salt = randomSalt();
+  const verifier = await passwordVerifier(
+    bootstrap.password,
+    salt,
+    ADMIN_PBKDF2_ITERATIONS,
+  );
+  try {
+    storage.transactionSync(() => {
+      storage.sql.exec(
+        "INSERT INTO admin_credential_recoveries (token_hash, used_at) VALUES (?, ?)",
+        recoveryHash,
+        new Date().toISOString(),
+      );
+      storage.sql.exec(
+        `INSERT INTO admin_credentials (singleton, username, salt, verifier, iterations, updated_at)
+         VALUES (1, ?, ?, ?, ?, ?)
+         ON CONFLICT(singleton) DO UPDATE SET username=excluded.username, salt=excluded.salt,
+           verifier=excluded.verifier, iterations=excluded.iterations, updated_at=excluded.updated_at`,
+        bootstrap.username,
+        salt.buffer,
+        verifier,
+        ADMIN_PBKDF2_ITERATIONS,
+        new Date().toISOString(),
+      );
+      storage.sql.exec("DELETE FROM admin_sessions");
+      storage.sql.exec("DELETE FROM admin_login_limits");
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      /UNIQUE constraint failed/u.test(error.message)
+    )
+      return "already_used";
+    throw error;
+  }
+  return "recovered";
 }
 
 export async function readAdminSession(

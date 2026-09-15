@@ -17,10 +17,12 @@ import {
 import { isRecord } from "../shared/trust";
 import {
   configuredAdminCredential,
+  configuredAdminRecoveryToken,
   createAdminSession,
   destroyAdminSession,
   isAdminSessionHashActive,
   readAdminSession,
+  recoverAdminCredential,
   rotateAdminCredential,
 } from "./admin-auth";
 import {
@@ -240,6 +242,9 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (url.pathname === "/api/admin/login" && request.method === "POST") {
       return this.handleAdminLogin(request);
     }
+    if (url.pathname === "/api/admin/recover" && request.method === "POST") {
+      return this.handleAdminRecovery(request);
+    }
     if (url.pathname === "/api/admin/session" && request.method === "GET") {
       return this.handleAdminSession(request);
     }
@@ -420,6 +425,44 @@ export class ShowCoordinator extends DurableObject<Env> {
           : {}),
       },
     );
+  }
+
+  private async handleAdminRecovery(request: Request): Promise<Response> {
+    if (!hasSameOrigin(request))
+      return Response.json({ recovered: false }, { status: 403 });
+    const recoveryToken = configuredAdminRecoveryToken(this.env);
+    if (!recoveryToken)
+      return Response.json({ recovered: false }, { status: 404 });
+    const body = await this.adminBody(request);
+    if (
+      !isRecord(body) ||
+      typeof body.token !== "string" ||
+      body.confirm !== "RECOVER ADMIN CREDENTIAL"
+    )
+      return Response.json({ recovered: false }, { status: 400 });
+
+    const result = await recoverAdminCredential(
+      this.ctx.storage,
+      configuredAdminCredential(this.env),
+      recoveryToken,
+      body.token,
+    );
+    if (result === "invalid_credential")
+      return Response.json(
+        {
+          recovered: false,
+          error: "Configured password must contain at least 12 characters",
+        },
+        { status: 503 },
+      );
+    if (result !== "recovered")
+      return Response.json({ recovered: false }, { status: 401 });
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "admin.credential_recovered",
+      actor: "system",
+      data: {},
+    });
+    return Response.json({ recovered: true });
   }
 
   private async handleAdminSession(request: Request): Promise<Response> {

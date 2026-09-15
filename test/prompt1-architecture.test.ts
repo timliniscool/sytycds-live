@@ -14,9 +14,11 @@ import {
 import { calculateFinalScore } from "../shared/scoring";
 import { ReactionReporter } from "../src/vote/reaction-reporter";
 import {
+  ADMIN_PBKDF2_ITERATIONS,
   createAdminSession,
   destroyAdminSession,
   readAdminSession,
+  recoverAdminCredential,
 } from "../worker/admin-auth";
 import {
   generateProjectorPairingCode,
@@ -138,6 +140,88 @@ describe("dynamic scoring configuration", () => {
 });
 
 describe("credential architecture", () => {
+  it("stays within the Cloudflare Workers PBKDF2 limit", () => {
+    expect(ADMIN_PBKDF2_ITERATIONS).toBe(100_000);
+  });
+
+  it("recovers the stored admin credential exactly once without touching show data", async () => {
+    await withStorage("admin-recovery", async (storage) => {
+      upsertShow(storage, PRIMARY_SHOW_ID, {
+        title: "Recovery must preserve me",
+        tagline: "",
+      });
+      const oldLogin = await createAdminSession(
+        storage,
+        new Request("https://show.test/api/admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: "old",
+            password: "old-password-value",
+          }),
+        }),
+        { username: "old", password: "old-password-value" },
+        PRIMARY_SHOW_ID,
+      );
+      expect(oldLogin.ok).toBe(true);
+      const token = "A".repeat(43);
+      expect(
+        await recoverAdminCredential(
+          storage,
+          { username: "operator", password: "new-password-value" },
+          token,
+          "B".repeat(43),
+        ),
+      ).toBe("not_accepted");
+      expect(
+        await recoverAdminCredential(
+          storage,
+          { username: "operator", password: "new-password-value" },
+          token,
+          token,
+        ),
+      ).toBe("recovered");
+      expect(
+        storage.sql
+          .exec<{ title: string }>(
+            "SELECT title FROM shows WHERE id = ?",
+            PRIMARY_SHOW_ID,
+          )
+          .one().title,
+      ).toBe("Recovery must preserve me");
+      expect(
+        storage.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM admin_sessions",
+          )
+          .one().count,
+      ).toBe(0);
+      expect(
+        await recoverAdminCredential(
+          storage,
+          { username: "another", password: "another-password" },
+          token,
+          token,
+        ),
+      ).toBe("already_used");
+
+      const newLogin = await createAdminSession(
+        storage,
+        new Request("https://show.test/api/admin/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            username: "operator",
+            password: "new-password-value",
+          }),
+        }),
+        { username: "ignored", password: "ignored-password" },
+        PRIMARY_SHOW_ID,
+      );
+      expect(newLogin.ok).toBe(true);
+    });
+  });
+
   it("verifies username/password server-side and creates an HttpOnly session", async () => {
     await withStorage("admin-password-p1", async (storage) => {
       const result = await createAdminSession(

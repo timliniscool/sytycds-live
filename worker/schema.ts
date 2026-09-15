@@ -495,6 +495,22 @@ const ACT_PUBLIC_IMAGE_SCHEMA: SchemaMigration = {
   statements: ["ALTER TABLE acts ADD COLUMN public_image_asset_id TEXT"],
 };
 
+/**
+ * Records successful break-glass credential recovery tokens. The token itself
+ * remains a temporary Worker secret; only its digest is retained so the same
+ * secret cannot ever be replayed.
+ */
+const ADMIN_CREDENTIAL_RECOVERY_SCHEMA: SchemaMigration = {
+  version: 11,
+  name: "one_time_admin_credential_recovery",
+  statements: [
+    `CREATE TABLE admin_credential_recoveries (
+      token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+      used_at TEXT NOT NULL
+    ) STRICT`,
+  ],
+};
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -506,6 +522,7 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   PUBLIC_MODES_AND_RESULTS_SCHEMA,
   CONFIGURATION_AND_DYNAMIC_JUDGES_SCHEMA,
   ACT_PUBLIC_IMAGE_SCHEMA,
+  ADMIN_CREDENTIAL_RECOVERY_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

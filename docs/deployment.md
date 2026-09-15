@@ -94,6 +94,25 @@ dashboard afterwards.
 existing installation upgrading from the earlier token login. It is treated as
 the bootstrap password and should be replaced by `ADMIN_PASSWORD`, then removed.
 
+### Break-glass admin recovery
+
+Changing the deployment secrets does not overwrite a verifier already stored
+in the Durable Object. If every admin session and the previous credential are
+lost, use the one-time recovery procedure rather than deleting the coordinator:
+
+1. Generate a random 32-byte base64url token locally.
+2. Temporarily store it as the Worker secret `ADMIN_RECOVERY_TOKEN`.
+3. Deploy a Worker version containing the recovery endpoint.
+4. `POST /api/admin/recover` with that token and the exact confirmation phrase
+   `RECOVER ADMIN CREDENTIAL`.
+5. Verify login with the configured `ADMIN_USERNAME` and `ADMIN_PASSWORD`.
+6. Delete `ADMIN_RECOVERY_TOKEN` immediately.
+
+The successful token digest is stored once, preventing replay even before the
+secret is removed. Recovery replaces only the admin verifier, clears login
+rate limits and invalidates existing admin sessions. It does not alter shows,
+acts, cues, media, votes, judge scores or results.
+
 The first `secret put` on a brand-new Worker may ask to create the Worker;
 answer yes.
 
