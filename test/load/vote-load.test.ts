@@ -11,6 +11,11 @@ import { describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, type AudienceScore } from "../../shared/domain";
 import type { ServerMessage } from "../../shared/protocol";
 import { AUDIENCE_WEIGHTS } from "../../shared/scoring";
+import {
+  REACTION_INTERVAL_MS,
+  REACTION_TARGET_REPORTERS,
+  reactionTrafficEstimate,
+} from "../../shared/reactions";
 import { createAdminSession } from "../../worker/admin-auth";
 import { PRIMARY_SHOW_ID, executeAdminCommand } from "../../worker/show-state";
 
@@ -441,7 +446,7 @@ describe("audience vote path under load", () => {
 });
 
 describe("realtime fan-out under load", () => {
-  for (const phones of [100, 500]) {
+  for (const phones of [100, 500, 1_000]) {
     it(`connects ${phones} phones, fans out one state change, and survives a reconnect storm`, async () => {
       const { stub, cookie } = await coordinator(`load-sockets-${phones}`);
       const admin = await connect(
@@ -601,5 +606,38 @@ describe("realtime fan-out under load", () => {
     expect(size(audience)).toBeLessThan(2_000);
     admin.ws.close();
     audience.ws.close();
+  });
+});
+
+describe("three-hour reaction traffic model", () => {
+  it("keeps 54 million local taps to 10,800 sampled packets", () => {
+    const phones = 1_000;
+    const seconds = 3 * 60 * 60;
+    const tapsPerPhoneSecond = 5;
+    const totalLocalTaps = phones * tapsPerPhoneSecond * seconds;
+    const packets = reactionTrafficEstimate(phones, seconds);
+    const averagePacketsPerSecond = packets / seconds;
+    // Eligible reporters occupy consecutive rotating slots and locally spread
+    // themselves across the five-second interval.
+    const peakPacketsPerSecond = Math.ceil(
+      REACTION_TARGET_REPORTERS / (REACTION_INTERVAL_MS / 1_000),
+    );
+    const billableTwentyMessageUnits = Math.ceil(packets / 20);
+    expect(totalLocalTaps).toBe(54_000_000);
+    expect(packets).toBe(10_800);
+    expect(averagePacketsPerSecond).toBe(1);
+    expect(peakPacketsPerSecond).toBe(1);
+    expect(REACTION_INTERVAL_MS).toBe(5_000);
+    expect(billableTwentyMessageUnits).toBe(540);
+    report([
+      {
+        scenario: "1000 phones × 5 taps/s × 3h",
+        "local taps": totalLocalTaps,
+        "packets total": packets,
+        "packets/s avg": averagePacketsPerSecond,
+        "packets/s peak": peakPacketsPerSecond,
+        "20-message units": billableTwentyMessageUnits,
+      },
+    ]);
   });
 });

@@ -51,6 +51,8 @@ export default {
 
     if (
       url.pathname === "/api/ws" ||
+      url.pathname === "/api/public/config" ||
+      url.pathname.startsWith("/api/public/media/") ||
       url.pathname.startsWith("/api/admin/") ||
       url.pathname.startsWith("/api/projector/") ||
       url.pathname.startsWith("/api/font/") ||

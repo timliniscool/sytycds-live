@@ -12,7 +12,7 @@ import {
   useRealtimeSelector,
 } from "../realtime/RealtimeClient";
 import { PLATFORM_ATTRIBUTION, PLATFORM_NAME } from "../../shared/platform";
-import { useShowTheme } from "../theme";
+import { useShowDocumentTitle, useShowTheme } from "../theme";
 
 interface JudgeSurfaceProps {
   token: string;
@@ -48,6 +48,7 @@ export default function JudgeSurface({ token }: JudgeSurfaceProps) {
     (state) => state.lastJudgeSubmission,
   );
   useShowTheme(projection?.show.themeId, projection?.show.fontFamily);
+  useShowDocumentTitle(projection?.show.title, "Judge");
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [raw, setRaw] = useState("");

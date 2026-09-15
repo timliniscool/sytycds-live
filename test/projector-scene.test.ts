@@ -35,6 +35,7 @@ const imageCue: ProjectorCue = {
   visual: { kind: "IMAGE", sourceKey: "asset-1", title: null },
   audio: null,
   durationMs: null,
+  operations: [],
 };
 
 const titleCue: ProjectorCue = {
@@ -55,6 +56,7 @@ function projection(
       shortName: "",
       themeId: "navy-bismarck",
       fontFamily: "system-ui",
+      reactionsEnabled: true,
       intermissionMessage: "Back at 8",
       emergencyMessage: "",
       displayMode: "PERFORMANCE",

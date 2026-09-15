@@ -333,7 +333,6 @@ const CONFIGURATION_AND_DYNAMIC_JUDGES_SCHEMA: SchemaMigration = {
     "ALTER TABLE shows ADD COLUMN font_family TEXT NOT NULL DEFAULT 'system-ui'",
     "ALTER TABLE shows ADD COLUMN audience_weight REAL NOT NULL DEFAULT 0.5 CHECK (audience_weight >= 0 AND audience_weight <= 1)",
     "ALTER TABLE shows ADD COLUMN reactions_enabled INTEGER NOT NULL DEFAULT 1 CHECK (reactions_enabled IN (0, 1))",
-    "ALTER TABLE acts ADD COLUMN public_image_asset_id TEXT",
     `CREATE TABLE show_judges (
       id TEXT PRIMARY KEY NOT NULL CHECK (length(id) > 0),
       show_id TEXT NOT NULL,
@@ -485,6 +484,17 @@ const CONFIGURATION_AND_DYNAMIC_JUDGES_SCHEMA: SchemaMigration = {
   ],
 };
 
+/**
+ * Prompt-2 act artwork was added after configuration migration 9 had already
+ * shipped. Keep it in a new migration so existing coordinators receive the
+ * column; editing migration 9 would update only fresh installations.
+ */
+const ACT_PUBLIC_IMAGE_SCHEMA: SchemaMigration = {
+  version: 10,
+  name: "act_public_image",
+  statements: ["ALTER TABLE acts ADD COLUMN public_image_asset_id TEXT"],
+};
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -495,6 +505,7 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   CUE_REFERENCE_INTEGRITY_SCHEMA,
   PUBLIC_MODES_AND_RESULTS_SCHEMA,
   CONFIGURATION_AND_DYNAMIC_JUDGES_SCHEMA,
+  ACT_PUBLIC_IMAGE_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

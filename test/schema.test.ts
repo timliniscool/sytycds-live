@@ -26,6 +26,12 @@ describe("coordinator SQLite schema", () => {
           )
           .one().count,
       ).toBe(LATEST_SCHEMA_VERSION);
+      expect(
+        state.storage.sql
+          .exec<{ name: string }>("PRAGMA table_info(acts)")
+          .toArray()
+          .some(({ name }) => name === "public_image_asset_id"),
+      ).toBe(true);
     });
   });
 

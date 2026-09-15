@@ -14,9 +14,14 @@ import {
   type VoteRejection,
   type VoteSubmission,
 } from "../vote/vote-view";
-import { REACTION_IDS, type ReactionId } from "../../shared/reactions";
+import {
+  REACTION_IDS,
+  type ReactionHistogram,
+  type ReactionId,
+} from "../../shared/reactions";
 import { ReactionReporter } from "../vote/reaction-reporter";
-import { useShowTheme } from "../theme";
+import { ReactionLane, reactionGlyph } from "../reactions/ReactionLane";
+import { useShowDocumentTitle, useShowTheme } from "../theme";
 import { PLATFORM_ATTRIBUTION } from "../../shared/platform";
 
 interface VoteResponse {
@@ -61,7 +66,12 @@ export default function VoteSurface() {
   );
   const reactionReporter = useRef(new ReactionReporter());
   const [reactionPulse, setReactionPulse] = useState<ReactionId | null>(null);
+  const [localReaction, setLocalReaction] = useState<{
+    key: number;
+    histogram: ReactionHistogram;
+  } | null>(null);
   useShowTheme(projection?.show.themeId, projection?.show.fontFamily);
+  useShowDocumentTitle(projection?.show.title, "Vote");
 
   const [submission, setSubmission] = useState<VoteSubmission>({
     kind: "idle",
@@ -123,6 +133,10 @@ export default function VoteSurface() {
 
   function react(id: ReactionId): void {
     reactionReporter.current.tap(id);
+    const counts = [0, 0, 0, 0, 0] as [number, number, number, number, number];
+    const index = REACTION_IDS.indexOf(id);
+    if (index >= 0) counts[index] = 1;
+    setLocalReaction({ key: Date.now() + Math.random(), histogram: counts });
     setReactionPulse(id);
     navigator.vibrate?.(8);
     window.setTimeout(
@@ -190,6 +204,13 @@ export default function VoteSurface() {
         view.kind === "ACT" ||
         view.kind === "CLOSED" ? (
           <>
+            {view.act.publicImageAssetId && (
+              <img
+                className="vote__act-image"
+                src={`/api/public/media/${encodeURIComponent(view.act.publicImageAssetId)}`}
+                alt=""
+              />
+            )}
             <h1 className="vote__act">{view.act.actName}</h1>
             <p className="vote__performer">
               {view.act.performerName} · {view.act.schoolYear}
@@ -376,27 +397,28 @@ export default function VoteSurface() {
       )}
       {projection?.show.reactionsEnabled &&
         projection.show.displayMode !== "EMERGENCY" && (
-          <aside className="vote__reactions" aria-label="Reactions">
-            {REACTION_IDS.map((id) => (
-              <button
-                key={id}
-                type="button"
-                aria-label={id}
-                className={reactionPulse === id ? "vote__reaction--pulse" : ""}
-                onClick={() => react(id)}
-              >
-                {
-                  {
-                    applause: "👏",
-                    heart: "♥",
-                    fire: "🔥",
-                    laugh: "😂",
-                    wow: "😮",
-                  }[id]
-                }
-              </button>
-            ))}
-          </aside>
+          <>
+            <ReactionLane
+              local
+              eventKey={localReaction?.key ?? null}
+              histogram={localReaction?.histogram ?? null}
+            />
+            <aside className="vote__reactions" aria-label="Reactions">
+              {REACTION_IDS.map((id) => (
+                <button
+                  key={id}
+                  type="button"
+                  aria-label={id}
+                  className={
+                    reactionPulse === id ? "vote__reaction--pulse" : ""
+                  }
+                  onClick={() => react(id)}
+                >
+                  {reactionGlyph(id)}
+                </button>
+              ))}
+            </aside>
+          </>
         )}
       <small className="platform-attribution">{PLATFORM_ATTRIBUTION}</small>
     </main>

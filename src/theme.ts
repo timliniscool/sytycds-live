@@ -1,38 +1,50 @@
 import { useEffect } from "react";
 import { DEFAULT_THEME_ID, isThemeId, themeById } from "../shared/themes";
 
+export function applyShowTheme(
+  themeId: unknown,
+  fontFamily: string | undefined,
+  projector = false,
+): void {
+  const theme = themeById(isThemeId(themeId) ? themeId : DEFAULT_THEME_ID);
+  const palette = projector ? theme.projector : theme.web;
+  const root = document.documentElement;
+  root.dataset.theme = theme.id;
+  const properties = {
+    "--theme-background": palette.background,
+    "--theme-surface": palette.surface,
+    "--theme-surface-strong": palette.strongSurface,
+    "--theme-text": palette.text,
+    "--theme-muted": palette.muted,
+    "--theme-accent": palette.accent,
+    "--theme-accent-strong": palette.accentStrong,
+    "--theme-accent-soft": palette.accentSoft,
+    "--theme-border": palette.border,
+    "--theme-focus": palette.focus,
+    "--theme-hover": palette.hover,
+    "--theme-active": palette.active,
+    "--theme-success": palette.success,
+    "--theme-warning": palette.warning,
+    "--theme-danger": palette.danger,
+    "--theme-on-accent": palette.onAccent,
+  } as const;
+  for (const [name, value] of Object.entries(properties))
+    root.style.setProperty(name, value);
+  root.style.setProperty(
+    "--theme-font",
+    fontFamily && fontFamily !== "system-ui"
+      ? `"${fontFamily.replaceAll('"', "")}", system-ui, sans-serif`
+      : "system-ui, sans-serif",
+  );
+}
+
 export function useShowTheme(
   themeId: unknown,
   fontFamily: string | undefined,
   projector = false,
 ): void {
   useEffect(() => {
-    const theme = themeById(isThemeId(themeId) ? themeId : DEFAULT_THEME_ID);
-    const palette = projector ? theme.projector : theme.web;
-    const root = document.documentElement;
-    root.dataset.theme = theme.id;
-    root.style.setProperty("--theme-background", palette.background);
-    root.style.setProperty("--theme-surface", palette.surface);
-    root.style.setProperty("--theme-surface-strong", palette.strongSurface);
-    root.style.setProperty("--theme-text", palette.text);
-    root.style.setProperty("--theme-muted", palette.muted);
-    root.style.setProperty("--theme-accent", palette.accent);
-    root.style.setProperty("--theme-accent-strong", palette.accentStrong);
-    root.style.setProperty("--theme-accent-soft", palette.accentSoft);
-    root.style.setProperty("--theme-border", palette.border);
-    root.style.setProperty("--theme-focus", palette.focus);
-    root.style.setProperty("--theme-hover", palette.hover);
-    root.style.setProperty("--theme-active", palette.active);
-    root.style.setProperty("--theme-success", palette.success);
-    root.style.setProperty("--theme-warning", palette.warning);
-    root.style.setProperty("--theme-danger", palette.danger);
-    root.style.setProperty("--theme-on-accent", palette.onAccent);
-    root.style.setProperty(
-      "--theme-font",
-      fontFamily && fontFamily !== "system-ui"
-        ? `"${fontFamily.replaceAll('"', "")}", system-ui, sans-serif`
-        : "system-ui, sans-serif",
-    );
+    applyShowTheme(themeId, fontFamily, projector);
     let fontLink = document.querySelector<HTMLLinkElement>(
       "link[data-sytycds-font]",
     );
@@ -46,4 +58,15 @@ export function useShowTheme(
       fontLink.href = `/api/font/selected.css?v=${encodeURIComponent(fontFamily)}`;
     } else fontLink?.remove();
   }, [themeId, fontFamily, projector]);
+}
+
+export function useShowDocumentTitle(
+  eventTitle: string | undefined,
+  surface: string,
+): void {
+  useEffect(() => {
+    document.title = eventTitle
+      ? `${surface} · ${eventTitle}`
+      : `${surface} · SYTYCDS Live`;
+  }, [eventTitle, surface]);
 }

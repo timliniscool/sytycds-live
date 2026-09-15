@@ -113,6 +113,11 @@ export interface ReactionSummaryMessage extends ProtocolEnvelope {
   histogram: ReactionHistogram;
 }
 
+export interface ClearReactionsMessage extends ProtocolEnvelope {
+  type: "clear_reactions";
+  commandId: CommandId;
+}
+
 export type ClientMessage =
   | ClientHello
   | AdminCommandMessage
@@ -122,7 +127,8 @@ export type ClientMessage =
   | ResyncRequest
   | PreflightRequest
   | ProjectorPreflightMessage
-  | ReactionSummaryMessage;
+  | ReactionSummaryMessage
+  | ClearReactionsMessage;
 
 export interface SnapshotMessage extends RevisionedServerMessage {
   type: "snapshot";
@@ -272,6 +278,11 @@ export interface ReactionSignalMessage extends RevisionedServerMessage {
   histogram: ReactionHistogram;
 }
 
+export interface ReactionClearMessage extends RevisionedServerMessage {
+  type: "reaction_clear";
+  commandId: CommandId;
+}
+
 export interface ProtocolErrorMessage extends RevisionedServerMessage {
   type: "protocol_error";
   code:
@@ -307,6 +318,7 @@ export type ServerMessage =
   | ConnectionCountMessage
   | ReactionSamplingMessage
   | ReactionSignalMessage
+  | ReactionClearMessage
   | ProtocolErrorMessage
   | ForceResyncMessage;
 
@@ -639,6 +651,19 @@ export function parseClientMessage(
             },
           }
         : { ok: false, reason: "Invalid reaction summary" };
+    }
+    case "clear_reactions": {
+      const clearCommandId = parseCommandIdentifier(value.commandId);
+      return clearCommandId
+        ? {
+            ok: true,
+            message: {
+              type: "clear_reactions",
+              protocolVersion: PROTOCOL_VERSION,
+              commandId: clearCommandId,
+            },
+          }
+        : { ok: false, reason: "Invalid reaction clear command" };
     }
     default:
       return { ok: false, reason: "Unknown protocol message" };

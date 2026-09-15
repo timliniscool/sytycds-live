@@ -6,14 +6,14 @@ The repository began as an empty Git repository containing only `.gitattributes`
 
 This baseline is a single npm package. It requires Node 22.12 or newer and npm 11 or newer; setup was verified locally with Node 26.8.1 and npm 11.19.0. `package-lock.json` is the dependency lock and npm is the sole package manager.
 
-The implemented foundation is deliberately narrow: a React SPA, a Worker API, a bound SQLite Durable Object, an R2 binding, and Workers-runtime tests. It now includes centralized show-control commands, role-projected hibernating WebSockets, small admin session authentication, a pure scoring engine, anonymous vote identity, the transactional audience vote path, and judge-token lifecycle. Media playback and final public interfaces remain later work.
+The application is one deliberately narrow React SPA, Worker API, SQLite Durable Object, and R2 binding. It includes centralized show-control commands, role-projected hibernating WebSockets, server-backed operator and projector sessions, configurable scoring, anonymous vote identity, transactional vote and judge paths, media playback, public results, setup/readiness workflows, and all four production surfaces.
 
 ## Runtime boundaries and authority
 
 ```text
 admin / projector / vote / judge browsers
                   |
-       HTTPS + WebSocket (planned)
+            HTTPS + WebSocket
                   |
        Cloudflare Worker boundary
       auth, validation, asset/API routing
@@ -56,9 +56,11 @@ Judge URLs contain a random 256-bit token, while SQLite stores only its SHA-256 
 ## Media channels and operator feedback
 
 The visual and backing-audio transports are separate state, and every media
-command says which channel it touches. `PLAY_CUE` drives only the channels its
-cue actually carries, so a visual cue never silences a backing track and an
-audio cue never clears the screen. `STOP_MEDIA` ends the visual channel alone;
+command says which channel it touches. A cue carries an ordered, validated
+operation list; visual and backing-audio actions are applied independently, so
+a visual cue never silences a backing track and an audio transport cue never
+clears the screen. PREPARE preloads media; GO executes load/play, pause, resume,
+stop, replay and seek operations. `STOP_MEDIA` ends the visual channel alone;
 `STOP_ALL_MEDIA` is the panic control that ends both, clears both active cues
 and returns the projector to its display-mode graphics. `REPLAY_MEDIA` restarts
 the current backing track from the beginning and leaves vision untouched, which
@@ -166,7 +168,34 @@ reconnect storm or a vote burst costs a handful of messages, not one per event.
 real coordinator: 100, 500 and 1000 HTTP voters with replay and aggregate
 checks, close-mid-burst and act-change races, 100 and 500 phones with fan-out
 and reconnect storms, repeated operator clicks, query plans on the vote path,
-per-vote transaction cost and role payload sizes.
+per-vote transaction cost, role payload sizes, and the three-hour reaction
+traffic model (54 million local taps collapse to 10,800 sampled packets).
+
+## Setup, act preparation and reactions
+
+The SETUP view is the show's preparation headquarters. Operators configure the
+event title, short name, tagline, curated semantic theme, cached Google font,
+reaction availability, judge count and audience/judge allocation. Appearance
+previews locally before saving and propagates through role projections. Scoring
+changes are protected once any vote, judge score or final result exists; the
+explicit `RESET SCORING` path deletes only scoring facts, not acts or media.
+Judge credentials and projector pairing codes are one-time displays.
+
+The ACTS & CUES view owns running-order CRUD, public copy, operator-only notes,
+public images, media uploads with progress and extracted metadata, reference-
+safe deletion, previews, sequential image cue creation, and cue reordering.
+Large media bodies stream to R2 and never enter React state. Public act images
+use a narrow endpoint that serves only images referenced by an act; other media
+continues to require an admin or paired-projector session.
+
+Audience reactions are local-first. Every tap animates immediately on that
+phone, while only a rotating cohort of five server-selected reporter slots may
+send one capped histogram per five-second interval. The coordinator validates
+the slot, interval, feature state and emergency state before relaying a compact
+signal to admin/projector only. Projector rendering is capped at 48 transient
+nodes, groups excess units into clusters, respects reduced motion, and is
+suppressed for emergency and explicit black output. Clearing is an authenticated
+ephemeral operator command; reactions never enter authoritative scoring state.
 
 ## Deployment
 
@@ -188,10 +217,10 @@ Ephemeral state may include live socket objects/attachments, coalescing timers, 
 1. A browser requests a static asset or an `/api/*` endpoint. Cloudflare serves matching assets and runs the Worker first for API paths.
 2. The Worker authenticates and validates the request, then addresses the one stable coordinator ID (`primary`).
 3. The coordinator serializes state transitions and persists required facts in SQLite before acknowledging success.
-4. The coordinator returns a role-appropriate response and, once realtime work is added, emits compact revisioned WebSocket updates. Reconnecting clients receive a fresh role-specific projection.
+4. The coordinator returns a role-appropriate response and emits compact revisioned WebSocket updates. Reconnecting clients receive a fresh role-specific projection.
 5. Media metadata travels through the coordinator; large media bodies travel to or from R2 without entering React state or SQLite.
 
-At present, `GET /api/health` exercises this path through the Worker and coordinator and verifies that SQLite is available. All other API paths return 404.
+`GET /api/health` exercises this path through the Worker and coordinator and verifies that SQLite is available; all application API paths are explicitly routed and unknown paths return 404.
 
 ## Repository structure
 
@@ -217,7 +246,7 @@ Wrangler generates `worker-configuration.d.ts` from `wrangler.jsonc`; binding an
 - Audience voting, judge voting, and display state remain independent.
 - Judge submissions and audience votes are insert-once facts protected by database constraints.
 - A final score does not exist until all required inputs exist and is never clamped or client-authored.
-- Realtime messages will carry monotonically increasing revisions; reconnect snapshots supersede stale deltas.
+- Realtime messages carry monotonically increasing revisions; reconnect snapshots supersede stale deltas.
 - Visual and backing-audio transports remain independent; projector command success requires acknowledgement.
 - The projector receives cue media keys but never operator labels or backstage notes; those are stripped in the server projection.
 - Audience phones receive the public display mode, never cue, media or result state that has not been revealed.

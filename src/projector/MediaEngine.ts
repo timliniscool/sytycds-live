@@ -282,6 +282,7 @@ export class ProjectorMediaEngine {
             this.playbackExecutionId = command.executionId;
             this.restartChannelsOf(cue);
             await this.apply(runtime, cues);
+            this.applyCueTransportOperation(cue);
             this.ack(command.executionId, true, this.startedDetail());
             return;
           case "restart":
@@ -374,6 +375,18 @@ export class ProjectorMediaEngine {
       this.frame.element instanceof HTMLVideoElement
     ) {
       this.frame.element.currentTime = 0;
+    }
+  }
+
+  /** Apply the transient part of a cue that cannot be reconstructed from state. */
+  private applyCueTransportOperation(cue: ProjectorCue | null): void {
+    if (!cue) return;
+    for (const operation of cue.operations) {
+      if (operation.kind !== "audio") continue;
+      if (operation.action === "REPLAY" && this.audioAssetId)
+        this.audio.currentTime = 0;
+      if (operation.action === "SEEK" && this.audioAssetId)
+        this.audio.currentTime = (operation.positionMs ?? 0) / 1_000;
     }
   }
 

@@ -58,8 +58,10 @@ npx wrangler r2 bucket create sytycds-media
 ```
 
 The name must match `bucket_name` in `wrangler.jsonc`. Nothing else about R2
-needs configuring; the Worker writes and reads objects through the binding and
-media is only ever served through `/api/media/*`.
+needs configuring; the Worker writes and reads objects through the binding.
+Operator/projector media uses authenticated `/api/media/*` routes. The narrow
+`/api/public/media/:assetId` route serves only a non-deleted image currently
+selected as an act's public image.
 
 ## 4. Set the secrets (once, or whenever you rotate them)
 
@@ -137,11 +139,17 @@ which is the current Wrangler shape and needs no migration block.
    and password.
 2. The console reports that no show exists and shows **Create the show**.
    Enter the title and optional tagline and press **CREATE SHOW**.
-3. In **SETUP & PREFLIGHT**, configure between one and eight judges (four by
-   default), issue their links (**JUDGE LINKS**), and copy or scan them now;
-   credentials are shown once. Set the intermission and
-   emergency text.
-4. Add acts and cues, upload media, and run **RUN PREFLIGHT**. Fix anything
+3. In **SETUP & PREFLIGHT**, save the title, short name, tagline, curated
+   theme, and font. Configure one to eight judges and the audience allocation,
+   then copy or scan any newly issued judge links; credentials are shown once.
+   Scoring configuration locks as soon as votes, scores, or final results
+   exist. Its explicit reset permanently removes that scoring data.
+4. Generate an eight-digit projector code, pair `/projector`, and confirm the
+   live status. Reissuing the code invalidates the unused previous code.
+5. In **ACTS & CUES**, add the running order, upload media, choose public act
+   images, and build the ordered cue stacks. Browser-extracted duration and
+   dimensions appear in the media library; referenced files cannot be deleted.
+6. Set intermission and emergency text, then run **RUN PREFLIGHT**. Fix anything
    marked FAILURE. Warnings are advisory.
 
 ## 8. Later deployments
@@ -197,14 +205,22 @@ live` and the media cache count, then `D` again. Reload the projector and
 6. **Judge.** Open one judge link on a phone, open judge scoring in the
    console, submit `8.5`; the phone shows LOCKED and the console matrix shows
    the score. A second submission is refused.
-7. **Media.** Play an image cue; the projector shows it and the console reads
-   _Projector acknowledged STARTED_. Reload the projector; the image returns.
+7. **Media.** Play a cue containing an image and backing audio; the projector
+   shows both and the console reads _Projector acknowledged STARTED_. Advance
+   to a visual-only cue and confirm the audio continues. Exercise pause,
+   resume, replay, seek, black, and stop all. Reload the projector and confirm
+   authoritative media state recovers.
 8. **Reveal.** With every required active judge score and, when audience weight
    is non-zero, at least one vote, FINALISE then REVEAL on SCOREBOARD; the
    projector counts up the final score and the phone shows it. HIDE removes it
    from both.
 9. **Preflight.** In SETUP & PREFLIGHT, **RUN PREFLIGHT** reads READY or READY
    WITH WARNINGS.
+10. **Safety and reactions.** With media playing, enter HOLD and restore it;
+    then trigger both emergency presentations and verify audio pauses. Tap each
+    audience reaction repeatedly, confirm local animation remains immediate,
+    disable reactions in setup, and verify projector reactions stop. Use
+    **CLEAR LIVE REACTIONS** before doors.
 
 If any step fails, check `npx wrangler tail` in a second terminal while
 repeating it; the Worker logs each refused request and uncaught error.
@@ -228,4 +244,10 @@ npm run dev
 Vite runs the Worker in the local Workers runtime with a local Durable Object
 and a local R2 bucket. `.dev.vars` is read when the server starts; restart it
 after editing. Open `http://localhost:5173/admin`, create the show, and use
-the console exactly as in production.
+the console exactly as in production. `test/show-lifecycle.test.ts` also runs a
+fresh isolated Durable Object from zero acts through final reveal, including
+HOLD, emergency, black, resume, and stop-all recovery checks.
+
+For a disposable dress-rehearsal database and R2 store, use `npm run
+dev:fresh`. Nothing from that process is retained after it stops. This mode
+still reads `.dev.vars` for the local admin credential.

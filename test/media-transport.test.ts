@@ -226,4 +226,85 @@ describe("media transport semantics", () => {
       expect(serialised).not.toContain("BACKSTAGE");
     });
   });
+
+  it("executes cue-stack audio and visual actions without crossing channels", async () => {
+    await withShow("media-operation-stack", (storage) => {
+      const insert = (
+        id: string,
+        position: number,
+        operations: readonly Record<string, unknown>[],
+        audioSource: string | null = null,
+        visualSentinel = "TITLE_CARD",
+      ) =>
+        storage.sql.exec(
+          `INSERT INTO cues (
+            id, show_id, act_id, position, visual_kind, visual_source_key,
+            visual_title, audio_kind, audio_source_key, duration_ms,
+            created_at, updated_at, operator_label, operations_json, internal_note
+          ) VALUES (?, ?, 'act-1', ?, ?, NULL, NULL, ?, ?, NULL, ?, ?, ?, ?, '')`,
+          id,
+          PRIMARY_SHOW_ID,
+          position,
+          visualSentinel,
+          audioSource ? "AUDIO" : null,
+          audioSource,
+          now,
+          now,
+          id,
+          JSON.stringify(operations),
+        );
+      insert(
+        "cue-load",
+        2,
+        [{ kind: "audio", action: "LOAD", assetId: "asset-track" }],
+        "asset-track",
+      );
+      insert("cue-resume", 3, [{ kind: "audio", action: "RESUME" }]);
+      insert("cue-pause", 4, [{ kind: "audio", action: "PAUSE" }]);
+      insert("cue-seek", 5, [
+        { kind: "audio", action: "SEEK", positionMs: 12_500 },
+      ]);
+      insert("cue-black-operation", 6, [
+        {
+          kind: "visual",
+          visual: { kind: "BLACK", sourceKey: null, title: null },
+        },
+      ]);
+      insert("cue-clear-operation", 7, [
+        {
+          kind: "visual",
+          visual: { kind: "CLEAR", sourceKey: null, title: null },
+        },
+      ]);
+
+      command(storage, "PLAY_CUE", { cueId: "cue-visual" });
+      command(storage, "PLAY_CUE", { cueId: "cue-load" });
+      expect(runtime(storage)).toMatchObject({
+        active_visual_cue_id: "cue-visual",
+        active_audio_cue_id: "cue-load",
+        audio_transport: "PLAYING",
+      });
+      command(storage, "PLAY_CUE", { cueId: "cue-resume" });
+      expect(runtime(storage).audio_transport).toBe("PLAYING");
+      command(storage, "PLAY_CUE", { cueId: "cue-pause" });
+      expect(runtime(storage).audio_transport).toBe("PAUSED");
+      command(storage, "PLAY_CUE", { cueId: "cue-seek" });
+      expect(runtime(storage)).toMatchObject({
+        active_visual_cue_id: "cue-visual",
+        active_audio_cue_id: "cue-load",
+        audio_transport: "PLAYING",
+      });
+      command(storage, "PLAY_CUE", { cueId: "cue-black-operation" });
+      expect(runtime(storage)).toMatchObject({
+        black_screen: 1,
+        active_audio_cue_id: "cue-load",
+      });
+      command(storage, "PLAY_CUE", { cueId: "cue-clear-operation" });
+      expect(runtime(storage)).toMatchObject({
+        black_screen: 0,
+        active_visual_cue_id: null,
+        active_audio_cue_id: "cue-load",
+      });
+    });
+  });
 });

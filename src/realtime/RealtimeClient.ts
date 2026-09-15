@@ -22,6 +22,7 @@ import {
   type ServerMessage,
   type ReactionSamplingMessage,
   type ReactionSignalMessage,
+  type ReactionClearMessage,
 } from "../../shared/protocol";
 
 /**
@@ -54,6 +55,7 @@ export interface RealtimeState {
   lastPreflightReport: ProjectorPreflightReportMessage | null;
   reactionSampling: ReactionSamplingMessage | null;
   lastReactionSignal: ReactionSignalMessage | null;
+  lastReactionClear: ReactionClearMessage | null;
   audienceConnections: number;
   judgeConnections: ReadonlySet<string>;
   lastError: string | null;
@@ -103,6 +105,7 @@ const INITIAL_STATE: RealtimeState = {
   lastPreflightReport: null,
   reactionSampling: null,
   lastReactionSignal: null,
+  lastReactionClear: null,
   audienceConnections: 0,
   judgeConnections: new Set(),
   lastError: null,
@@ -582,6 +585,7 @@ export class RealtimeClient {
     let lastPreflightReport = this.state.lastPreflightReport;
     let reactionSampling = this.state.reactionSampling;
     let lastReactionSignal = this.state.lastReactionSignal;
+    let lastReactionClear = this.state.lastReactionClear;
     let audienceConnections = this.state.audienceConnections;
     let judgeConnections = this.state.judgeConnections;
 
@@ -687,6 +691,9 @@ export class RealtimeClient {
       case "reaction_signal":
         lastReactionSignal = message;
         break;
+      case "reaction_clear":
+        lastReactionClear = message;
+        break;
     }
 
     this.publish({
@@ -712,6 +719,7 @@ export class RealtimeClient {
       lastPreflightReport,
       reactionSampling,
       lastReactionSignal,
+      lastReactionClear,
       audienceConnections,
       judgeConnections,
       lastError: message.type === "protocol_error" ? message.detail : null,

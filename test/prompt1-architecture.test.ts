@@ -13,11 +13,16 @@ import {
 } from "../shared/reactions";
 import { calculateFinalScore } from "../shared/scoring";
 import { ReactionReporter } from "../src/vote/reaction-reporter";
-import { createAdminSession } from "../worker/admin-auth";
+import {
+  createAdminSession,
+  destroyAdminSession,
+  readAdminSession,
+} from "../worker/admin-auth";
 import {
   generateProjectorPairingCode,
   pairProjector,
   readProjectorSessionHash,
+  revokeProjectors,
 } from "../worker/projector-pairing";
 import {
   applyScoringConfiguration,
@@ -27,6 +32,7 @@ import { PRIMARY_SHOW_ID } from "../worker/show-state";
 import { upsertShow } from "../worker/show-config";
 import { validateReactionSummary } from "../worker/reactions";
 import { cueValidationState } from "../worker/cues";
+import { updateMediaMetadata } from "../worker/media-assets";
 
 async function withStorage(
   name: string,
@@ -162,6 +168,67 @@ describe("credential architecture", () => {
     });
   });
 
+  it("rejects a bad password, expires sessions, and logs out server-side", async () => {
+    await withStorage("admin-session-lifecycle-p2", async (storage) => {
+      upsertShow(storage, PRIMARY_SHOW_ID, { title: "Show", tagline: "" });
+      const request = (password: string, cookie?: string) =>
+        new Request("https://show.test/api/admin/login", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://show.test",
+            ...(cookie ? { Cookie: cookie } : {}),
+          },
+          body: JSON.stringify({ username: "operator", password }),
+        });
+      expect(
+        await createAdminSession(
+          storage,
+          request("wrong password"),
+          { username: "operator", password: "correct password" },
+          PRIMARY_SHOW_ID,
+        ),
+      ).toMatchObject({ ok: false, status: 401 });
+      const login = await createAdminSession(
+        storage,
+        request("correct password"),
+        { username: "operator", password: "correct password" },
+        PRIMARY_SHOW_ID,
+      );
+      expect(login.ok).toBe(true);
+      const cookie = login.setCookie?.split(";", 1)[0] ?? "";
+      const sessionRequest = new Request(
+        "https://show.test/api/admin/session",
+        {
+          headers: { Cookie: cookie },
+        },
+      );
+      expect(
+        await readAdminSession(storage.sql, sessionRequest),
+      ).not.toBeNull();
+      const logoutCookie = await destroyAdminSession(storage, sessionRequest);
+      expect(logoutCookie).toContain("Max-Age=0");
+      expect(await readAdminSession(storage.sql, sessionRequest)).toBeNull();
+
+      const relogin = await createAdminSession(
+        storage,
+        request("correct password"),
+        { username: "operator", password: "correct password" },
+        PRIMARY_SHOW_ID,
+      );
+      const reloginCookie = relogin.setCookie?.split(";", 1)[0] ?? "";
+      storage.sql.exec("UPDATE admin_sessions SET expires_at = 0");
+      expect(
+        await readAdminSession(
+          storage.sql,
+          new Request("https://show.test", {
+            headers: { Cookie: reloginCookie },
+          }),
+        ),
+      ).toBeNull();
+    });
+  });
+
   it("uses an expiring one-time projector code then a long-lived opaque cookie", async () => {
     await withStorage("projector-pair-p1", async (storage) => {
       upsertShow(storage, PRIMARY_SHOW_ID, { title: "Show", tagline: "" });
@@ -196,6 +263,65 @@ describe("credential architecture", () => {
           new Request("https://show.test", { headers: { Cookie: cookie } }),
         ),
       ).not.toBeNull();
+    });
+  });
+
+  it("rejects wrong, expired, reused, and revoked projector credentials", async () => {
+    await withStorage("projector-credential-lifecycle-p2", async (storage) => {
+      upsertShow(storage, PRIMARY_SHOW_ID, { title: "Show", tagline: "" });
+      const request = new Request("https://show.test/api/projector/pair", {
+        method: "POST",
+      });
+      const issued = await generateProjectorPairingCode(
+        storage,
+        PRIMARY_SHOW_ID,
+      );
+      const wrong = issued.code === "00000000" ? "11111111" : "00000000";
+      expect(
+        await pairProjector(storage, request, PRIMARY_SHOW_ID, wrong),
+      ).toMatchObject({ ok: false, status: 401 });
+      const paired = await pairProjector(
+        storage,
+        request,
+        PRIMARY_SHOW_ID,
+        issued.code,
+      );
+      expect(paired.ok).toBe(true);
+      expect(
+        await pairProjector(storage, request, PRIMARY_SHOW_ID, issued.code),
+      ).toMatchObject({ ok: false, status: 401 });
+      if (!paired.ok) return;
+      const cookie = paired.setCookie.split(";", 1)[0]!;
+      const sessionRequest = new Request("https://show.test", {
+        headers: { Cookie: cookie },
+      });
+      expect(
+        await readProjectorSessionHash(storage.sql, sessionRequest),
+      ).not.toBeNull();
+      // The local Durable Object test store can survive watch/retry runs, so an
+      // earlier unrevoked session may also be retired here.
+      expect(revokeProjectors(storage, PRIMARY_SHOW_ID)).toBeGreaterThanOrEqual(
+        1,
+      );
+      expect(
+        await readProjectorSessionHash(storage.sql, sessionRequest),
+      ).toBeNull();
+
+      const expiring = await generateProjectorPairingCode(
+        storage,
+        PRIMARY_SHOW_ID,
+      );
+      storage.sql.exec(
+        "UPDATE projector_pairing_codes SET expires_at = 0 WHERE show_id = ?",
+        PRIMARY_SHOW_ID,
+      );
+      expect(
+        await pairProjector(storage, request, PRIMARY_SHOW_ID, expiring.code),
+      ).toMatchObject({
+        ok: false,
+        status: 401,
+        error: "Pairing code expired",
+      });
     });
   });
 });
@@ -241,31 +367,76 @@ describe("cue media integrity", () => {
       ).toBe("VALID");
     });
   });
+
+  it("persists bounded browser-extracted media metadata", async () => {
+    await withStorage("media-metadata-p2", (storage) => {
+      upsertShow(storage, PRIMARY_SHOW_ID, { title: "Show", tagline: "" });
+      storage.sql.exec(
+        `INSERT INTO media_assets
+          (id, show_id, object_key, original_filename, mime_type, size_bytes,
+           version_identifier, duration_ms, width, height, uploaded_at, deleted_at)
+         VALUES ('asset-video', ?, 'private/video', 'video.mp4', 'video/mp4', 10,
+           'v1', NULL, NULL, NULL, ?, NULL)`,
+        PRIMARY_SHOW_ID,
+        new Date().toISOString(),
+      );
+      expect(
+        updateMediaMetadata(storage, PRIMARY_SHOW_ID, "asset-video", {
+          durationMs: 92_500,
+          width: 1920,
+          height: 1080,
+        }),
+      ).toBe(true);
+      expect(
+        storage.sql
+          .exec<{
+            duration_ms: number;
+            width: number;
+            height: number;
+          }>(
+            "SELECT duration_ms, width, height FROM media_assets WHERE id = 'asset-video'",
+          )
+          .one(),
+      ).toEqual({ duration_ms: 92_500, width: 1920, height: 1080 });
+      expect(
+        updateMediaMetadata(storage, PRIMARY_SHOW_ID, "asset-video", {
+          durationMs: -1,
+          width: 1920,
+          height: 1080,
+        }),
+      ).toBe(false);
+    });
+  });
 });
 
 describe("hard-budget reactions", () => {
   it("keeps taps local and limits 1000 continuous clients to one packet per second", () => {
-    const now = REACTION_EPOCH_MS * 100;
-    let packets = 0;
-    for (let slot = 0; slot < 1_000; slot += 1) {
+    const start = REACTION_EPOCH_MS * 100;
+    const reporters = Array.from({ length: 1_000 }, () => {
       const reporter = new ReactionReporter();
       for (let tap = 0; tap < 50; tap += 1) reporter.tap("applause");
-      const packet = reporter.flush(now, {
-        slot,
-        serverOffsetMs: 0,
-        epochMs: REACTION_EPOCH_MS,
-        intervalMs: REACTION_INTERVAL_MS,
-        eligibleSlots: 5,
-      });
-      if (packet) {
-        packets += 1;
-        expect(packet.histogram.reduce((sum, count) => sum + count, 0)).toBe(
-          REACTION_MAX_UNITS,
-        );
-      }
-    }
-    expect(packets).toBe(5);
-    expect(packets / (REACTION_INTERVAL_MS / 1_000)).toBe(1);
+      return reporter;
+    });
+    const packetsPerSecond = Array.from(
+      { length: REACTION_INTERVAL_MS / 1_000 },
+      (_, second) =>
+        reporters.reduce((packets, reporter, slot) => {
+          const packet = reporter.flush(start + second * 1_000, {
+            slot,
+            serverOffsetMs: 0,
+            epochMs: REACTION_EPOCH_MS,
+            intervalMs: REACTION_INTERVAL_MS,
+            eligibleSlots: 5,
+          });
+          if (packet) {
+            expect(
+              packet.histogram.reduce((sum, count) => sum + count, 0),
+            ).toBe(REACTION_MAX_UNITS);
+          }
+          return packets + (packet ? 1 : 0);
+        }, 0),
+    );
+    expect(packetsPerSecond).toEqual([1, 1, 1, 1, 1]);
   });
 
   it("rotates cohorts and rejects invalid, duplicate, disabled and emergency packets", () => {
@@ -315,5 +486,20 @@ describe("hard-budget reactions", () => {
     const messages = reactionTrafficEstimate(1_000, 3 * 60 * 60);
     expect(messages).toBe(10_800);
     expect(Math.ceil(messages / 20)).toBe(540);
+  });
+
+  it("accepts an idempotent operator reaction-clear command", () => {
+    expect(
+      parseClientMessage(
+        JSON.stringify({
+          type: "clear_reactions",
+          protocolVersion: PROTOCOL_VERSION,
+          commandId: "clear-123",
+        }),
+      ),
+    ).toMatchObject({
+      ok: true,
+      message: { type: "clear_reactions", commandId: "clear-123" },
+    });
   });
 });

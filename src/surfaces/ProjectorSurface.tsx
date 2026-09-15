@@ -26,7 +26,8 @@ import {
   useRealtimeSelector,
 } from "../realtime/RealtimeClient";
 import { PLATFORM_ATTRIBUTION, PLATFORM_NAME } from "../../shared/platform";
-import { useShowTheme } from "../theme";
+import { useShowDocumentTitle, useShowTheme } from "../theme";
+import { ReactionLane } from "../reactions/ReactionLane";
 
 const INITIAL_MEDIA: ProjectorMediaStatus = {
   visual: "IDLE",
@@ -79,7 +80,16 @@ export default function ProjectorSurface() {
   const connection = useRealtimeSelector(client, (state) => state.connection);
   const revision = useRealtimeSelector(client, (state) => state.revision);
   const aggregates = useRealtimeSelector(client, (state) => state.aggregates);
+  const reactionSignal = useRealtimeSelector(
+    client,
+    (state) => state.lastReactionSignal,
+  );
+  const reactionClear = useRealtimeSelector(
+    client,
+    (state) => state.lastReactionClear,
+  );
   useShowTheme(projection?.show.themeId, projection?.show.fontFamily, true);
+  useShowDocumentTitle(projection?.show.title, "Projector");
 
   useEffect(() => {
     void fetch("/api/projector/session", { credentials: "same-origin" })
@@ -114,6 +124,7 @@ export default function ProjectorSurface() {
   }
 
   useEffect(() => {
+    if (pairing !== "paired") return;
     const engine = new ProjectorMediaEngine({
       onStatus: setMedia,
       onAcknowledgement: (executionId, succeeded, detail) =>
@@ -140,7 +151,7 @@ export default function ProjectorSurface() {
       engine.dispose();
       engineRef.current = null;
     };
-  }, [client]);
+  }, [client, pairing]);
 
   // The media service worker answers /api/media/* from CacheStorage so a
   // prepared file survives a Wi-Fi drop; the page fills that cache from the
@@ -280,11 +291,23 @@ export default function ProjectorSurface() {
               pattern="[0-9 ]{8,9}"
               maxLength={9}
               value={pairingCode}
-              onChange={(event) =>
-                setPairingCode(event.target.value.replace(/[^0-9 ]/gu, ""))
-              }
+              onChange={(event) => {
+                const digits = event.target.value
+                  .replace(/\D/gu, "")
+                  .slice(0, 8);
+                setPairingCode(
+                  digits.length > 4
+                    ? `${digits.slice(0, 4)} ${digits.slice(4)}`
+                    : digits,
+                );
+              }}
             />
-            <button type="submit">Pair display</button>
+            <button
+              type="submit"
+              disabled={pairingCode.replace(/\s/gu, "").length !== 8}
+            >
+              PAIR DISPLAY
+            </button>
             {pairingError && <p role="alert">{pairingError}</p>}
           </form>
         )}
@@ -313,6 +336,19 @@ export default function ProjectorSurface() {
         <TitleCardGraphic title={scene.layer.title} />
       )}
       {scene.layer.kind === "BLACK" && <div className="projector-black" />}
+      {projection?.show.reactionsEnabled &&
+        projection.show.displayMode !== "EMERGENCY" &&
+        !projection.runtime.blackScreen && (
+          <ReactionLane
+            eventKey={
+              reactionSignal
+                ? `${reactionSignal.revision}:${JSON.stringify(reactionSignal.histogram)}`
+                : null
+            }
+            histogram={reactionSignal?.histogram ?? null}
+            clearKey={reactionClear?.commandId ?? null}
+          />
+        )}
       {!media.armed && (
         <>
           <button

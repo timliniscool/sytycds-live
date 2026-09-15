@@ -1,7 +1,7 @@
 import {
   REACTION_IDS,
   capReactionHistogram,
-  reporterEligible,
+  reporterFlushDue,
   type ReactionHistogram,
   type ReactionId,
 } from "../../shared/reactions";
@@ -33,7 +33,13 @@ export class ReactionReporter {
     const interval = Math.floor(serverNow / config.intervalMs);
     if (
       interval === this.lastInterval ||
-      !reporterEligible(config.slot, epoch, config.eligibleSlots)
+      !reporterFlushDue(
+        config.slot,
+        epoch,
+        serverNow,
+        config.intervalMs,
+        config.eligibleSlots,
+      )
     )
       return null;
     const histogram = capReactionHistogram(this.counts);

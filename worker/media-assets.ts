@@ -3,6 +3,7 @@ import {
   type MediaAsset,
   type MediaManifestEntry,
 } from "../shared/domain";
+import { isRecord } from "../shared/trust";
 
 const MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set([
@@ -227,6 +228,45 @@ export function listMediaAssets(
     .map((row) => rowToAsset(row, row.referenced === 1));
 }
 
+export function updateMediaMetadata(
+  storage: DurableObjectStorage,
+  showIdentifier: string,
+  assetId: string,
+  value: unknown,
+): boolean {
+  if (!isRecord(value)) return false;
+  const optionalInteger = (candidate: unknown, maximum: number) =>
+    candidate === null ||
+    (typeof candidate === "number" &&
+      Number.isSafeInteger(candidate) &&
+      candidate >= 0 &&
+      candidate <= maximum);
+  if (
+    !optionalInteger(value.durationMs, 24 * 60 * 60 * 1_000) ||
+    !optionalInteger(value.width, 32_768) ||
+    !optionalInteger(value.height, 32_768)
+  )
+    return false;
+  return storage.transactionSync(() => {
+    const updated = storage.sql.exec(
+      `UPDATE media_assets SET duration_ms = ?, width = ?, height = ?
+       WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
+      value.durationMs,
+      value.width,
+      value.height,
+      showIdentifier,
+      assetId,
+    );
+    if (updated.rowsWritten !== 1) return false;
+    storage.sql.exec(
+      "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
+      new Date().toISOString(),
+      showIdentifier,
+    );
+    return true;
+  });
+}
+
 export async function deleteMediaAsset(
   storage: DurableObjectStorage,
   bucket: R2Bucket,
@@ -397,6 +437,7 @@ export async function serveMediaAsset(
   showIdentifier: string,
   assetId: string,
   request: Request,
+  publiclyCacheable = false,
 ): Promise<Response> {
   const asset = sql
     .exec<AssetRow>(
@@ -413,6 +454,21 @@ export async function serveMediaAsset(
       status: 416,
       headers: { "Content-Range": `bytes */${asset.size_bytes}` },
     });
+  const cacheable =
+    publiclyCacheable && request.method === "GET" && range === undefined;
+  const cacheKey = new Request(request.url, { method: "GET" });
+  let edgeCache: Cache | null = null;
+  if (cacheable) {
+    try {
+      edgeCache =
+        (caches as CacheStorage & { default?: Cache }).default ??
+        (await caches.open("public-act-images"));
+      const cached = await edgeCache.match(cacheKey);
+      if (cached) return cached;
+    } catch {
+      // R2 remains available if a local runtime has no CacheStorage.
+    }
+  }
   const object = await bucket.get(
     asset.object_key,
     range ? { range } : undefined,
@@ -422,7 +478,9 @@ export async function serveMediaAsset(
   const headers = new Headers({
     "Content-Type": asset.mime_type,
     "Accept-Ranges": "bytes",
-    "Cache-Control": "private, max-age=31536000, immutable",
+    "Cache-Control": publiclyCacheable
+      ? "public, max-age=86400, immutable"
+      : "private, max-age=31536000, immutable",
     ETag: `"${asset.version_identifier}"`,
   });
   if (object.range) {
@@ -437,8 +495,19 @@ export async function serveMediaAsset(
     );
     headers.set("Content-Length", String(length));
   } else headers.set("Content-Length", String(asset.size_bytes));
-  return new Response(request.method === "HEAD" ? null : object.body, {
-    status: object.range ? 206 : 200,
-    headers,
-  });
+  const response = new Response(
+    request.method === "HEAD" ? null : object.body,
+    {
+      status: object.range ? 206 : 200,
+      headers,
+    },
+  );
+  if (cacheable) {
+    try {
+      await edgeCache?.put(cacheKey, response.clone());
+    } catch {
+      // A cache failure must never turn a public act image into an error.
+    }
+  }
+  return response;
 }

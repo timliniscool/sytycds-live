@@ -35,6 +35,7 @@ async function json<Value>(
  */
 export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
   const [judges, setJudges] = useState<JudgeSummary[] | null>(null);
+  const [names, setNames] = useState<Record<string, string>>({});
   const [labels, setLabels] = useState([
     "Judge 1",
     "Judge 2",
@@ -47,7 +48,16 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
 
   async function refresh(): Promise<void> {
     const result = await json<{ judges: JudgeSummary[] }>("/api/admin/judges");
-    setJudges(result?.judges ?? []);
+    const current = result?.judges ?? [];
+    setJudges(current);
+    setNames((previous) =>
+      Object.fromEntries(
+        current.map((judge) => [
+          judge.id,
+          previous[judge.id] ?? judge.displayName,
+        ]),
+      ),
+    );
   }
 
   useEffect(() => {
@@ -105,6 +115,25 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
     setBusy(false);
     setIssued((current) =>
       current.filter((entry) => entry.judgeId !== judge.id),
+    );
+    await refresh();
+  }
+
+  async function rename(judge: JudgeSummary): Promise<void> {
+    const displayName = names[judge.id]?.replace(/\s+/gu, " ").trim();
+    if (!displayName || displayName === judge.displayName) return;
+    setBusy(true);
+    const result = await json<{ renamed: boolean }>(
+      `/api/admin/judges/${encodeURIComponent(judge.id)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName }),
+      },
+    );
+    setBusy(false);
+    setNotice(
+      result?.renamed ? "Judge name updated." : "Judge name was not updated.",
     );
     await refresh();
   }
@@ -182,7 +211,21 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
             return (
               <li key={judge.id} className="judge-links__row">
                 <div className="judge-links__identity">
-                  <b>{judge.displayName}</b>
+                  <label>
+                    <span className="sr-only">Judge {judge.slot} name</span>
+                    <input
+                      type="text"
+                      value={names[judge.id] ?? judge.displayName}
+                      maxLength={120}
+                      disabled={busy}
+                      onChange={(event) =>
+                        setNames((current) => ({
+                          ...current,
+                          [judge.id]: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
                   <small>
                     Judge {judge.slot} ·{" "}
                     {judge.active ? "link active" : "REVOKED"} ·{" "}
@@ -190,6 +233,17 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
                   </small>
                 </div>
                 <div className="judge-links__actions">
+                  <button
+                    type="button"
+                    disabled={
+                      busy ||
+                      !names[judge.id]?.trim() ||
+                      names[judge.id]?.trim() === judge.displayName
+                    }
+                    onClick={() => void rename(judge)}
+                  >
+                    SAVE NAME
+                  </button>
                   <button
                     type="button"
                     disabled={busy}

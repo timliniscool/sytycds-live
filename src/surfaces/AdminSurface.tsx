@@ -1,4 +1,11 @@
-import { useEffect, useRef, useState, type FormEvent } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  type FormEvent,
+} from "react";
 
 import {
   commandId,
@@ -12,11 +19,7 @@ import type {
 } from "../../shared/admin-command";
 import { EmergencyPanel } from "../admin/EmergencyPanel";
 import { HistoryPanel } from "../admin/HistoryPanel";
-import { JudgeLinks } from "../admin/JudgeLinks";
 import { MediaConsole } from "../admin/MediaConsole";
-import { PreflightPanel } from "../admin/PreflightPanel";
-import { PublicTextPanel } from "../admin/PublicTextPanel";
-import { ProjectorPairingPanel } from "../admin/ProjectorPairingPanel";
 import { ResultsPanel } from "../admin/ResultsPanel";
 import { ShowIdentityPanel } from "../admin/ShowIdentityPanel";
 import {
@@ -25,18 +28,58 @@ import {
   useRealtimeSelector,
 } from "../realtime/RealtimeClient";
 import { PLATFORM_ATTRIBUTION, PLATFORM_NAME } from "../../shared/platform";
-import { useShowTheme } from "../theme";
+import { useShowDocumentTitle, useShowTheme } from "../theme";
 
-type AuthenticationState = "checking" | "signed-out" | "signed-in" | "failed";
-type ConsoleView = "show" | "results" | "setup" | "history";
+// Keep pre-show configuration code out of the critical live-control bundle.
+// These workspaces load on first use and remain cached by the browser.
+const ActEditor = lazy(async () => {
+  const module = await import("../admin/ActEditor");
+  return { default: module.ActEditor };
+});
+const SetupWorkspace = lazy(async () => {
+  const module = await import("../admin/SetupWorkspace");
+  return { default: module.SetupWorkspace };
+});
+
+type AuthenticationState =
+  "checking" | "submitting" | "signed-out" | "signed-in" | "failed";
+type ConsoleView = "show" | "acts" | "results" | "setup" | "history";
+
+interface PublicConfig {
+  title: string;
+  themeId: string;
+  fontFamily: string;
+}
+
+function publicConfig(value: unknown): PublicConfig | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.title === "string" &&
+    typeof candidate.themeId === "string" &&
+    typeof candidate.fontFamily === "string"
+    ? {
+        title: candidate.title,
+        themeId: candidate.themeId,
+        fontFamily: candidate.fontFamily,
+      }
+    : null;
+}
 
 export default function AdminSurface() {
   const [authentication, setAuthentication] =
     useState<AuthenticationState>("checking");
   const [username, setUsername] = useState("admin");
   const [password, setPassword] = useState("");
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [branding, setBranding] = useState<PublicConfig | null>(null);
+  useShowTheme(branding?.themeId, branding?.fontFamily);
+  useShowDocumentTitle(branding?.title, "Show control");
 
   useEffect(() => {
+    void fetch("/api/public/config")
+      .then((response) => (response.ok ? response.json() : null))
+      .then((result: unknown) => setBranding(publicConfig(result)))
+      .catch(() => undefined);
     void fetch("/api/admin/session", { credentials: "same-origin" })
       .then(async (response) =>
         response.ok
@@ -51,14 +94,32 @@ export default function AdminSurface() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const response = await fetch("/api/admin/login", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    });
-    setPassword("");
-    setAuthentication(response.ok ? "signed-in" : "signed-out");
+    setAuthentication("submitting");
+    setLoginError(null);
+    try {
+      const response = await fetch("/api/admin/login", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username, password }),
+      });
+      setPassword("");
+      if (response.ok) {
+        setAuthentication("signed-in");
+        return;
+      }
+      setAuthentication("signed-out");
+      setLoginError(
+        response.status === 429
+          ? "Too many attempts. Wait a moment before trying again."
+          : "Username or password was not accepted.",
+      );
+    } catch {
+      setAuthentication("failed");
+      setLoginError(
+        "The show server could not be reached. Check the network and retry.",
+      );
+    }
   }
 
   if (authentication !== "signed-in") {
@@ -67,9 +128,10 @@ export default function AdminSurface() {
         className="surface surface--admin"
         aria-labelledby="admin-login-title"
       >
-        <header>
-          <p>{PLATFORM_NAME} / show control</p>
+        <header className="admin-login__head">
+          <p>{PLATFORM_NAME} / secured operator access</p>
           <h1 id="admin-login-title">Operator sign-in</h1>
+          <span>{branding?.title ?? "Live event control"}</span>
         </header>
         {authentication === "checking" ? (
           <p>Checking operator session…</p>
@@ -93,10 +155,12 @@ export default function AdminSurface() {
               onChange={(event) => setPassword(event.target.value)}
               required
             />
-            <button type="submit">Sign in</button>
-            {authentication === "failed" && (
-              <p>Unable to verify this session.</p>
-            )}
+            <button type="submit" disabled={authentication === "submitting"}>
+              {authentication === "submitting"
+                ? "Signing in…"
+                : "Sign in to show control"}
+            </button>
+            {loginError && <p role="alert">{loginError}</p>}
           </form>
         )}
         <footer>{PLATFORM_ATTRIBUTION}</footer>
@@ -118,6 +182,7 @@ const MODES: readonly DisplayMode[] = [
 ];
 const VIEWS: readonly { view: ConsoleView; label: string }[] = [
   { view: "show", label: "SHOW" },
+  { view: "acts", label: "ACTS & CUES" },
   { view: "results", label: "RESULTS" },
   { view: "setup", label: "SETUP & PREFLIGHT" },
   { view: "history", label: "HISTORY" },
@@ -151,6 +216,7 @@ function Console() {
     state.projection?.role === "admin" ? state.projection : null,
   );
   useShowTheme(projection?.show.themeId, projection?.show.fontFamily);
+  useShowDocumentTitle(projection?.show.title, "Show control");
   const connection = useRealtimeSelector(client, (state) => state.connection);
   const lastError = useRealtimeSelector(client, (state) => state.lastError);
   const showUnavailable = useRealtimeSelector(
@@ -330,6 +396,23 @@ function Console() {
           </strong>
         )}
         {notice && <output>{notice}</output>}
+        <small className="admin-status__attribution">
+          {PLATFORM_ATTRIBUTION}
+        </small>
+        <button
+          type="button"
+          className="admin-status__logout"
+          onClick={() => {
+            void fetch("/api/admin/logout", {
+              method: "POST",
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json" },
+              body: "{}",
+            }).finally(() => window.location.reload());
+          }}
+        >
+          SIGN OUT
+        </button>
       </header>
       <section className="running-order" aria-labelledby="running-order-title">
         <div className="region-title">
@@ -407,27 +490,26 @@ function Console() {
             revision={revision === null ? null : Number(revision)}
           />
         )}
-        {view === "setup" && (
-          <>
-            <PreflightPanel client={client} />
-            <ProjectorPairingPanel />
-            <ShowIdentityPanel
-              current={{
-                title: projection.show.title,
-                tagline: projection.show.tagline,
-                shortName: projection.show.shortName,
-                themeId: projection.show.themeId,
-                fontFamily: projection.show.fontFamily,
-                reactionsEnabled: projection.show.reactionsEnabled,
-              }}
+        {view === "acts" && (
+          <Suspense
+            fallback={<p className="admin-loading">Loading act editor…</p>}
+          >
+            <ActEditor
+              acts={projection.acts}
+              activeActId={projection.show.activeActId}
+              onSelectLive={select}
             />
-            <PublicTextPanel
-              intermissionMessage={projection.show.intermissionMessage}
-              emergencyMessage={projection.show.emergencyMessage}
+          </Suspense>
+        )}
+        {view === "setup" && (
+          <Suspense fallback={<p className="admin-loading">Loading setup…</p>}>
+            <SetupWorkspace
+              projection={projection}
+              client={client}
+              judgeConnections={judgeConnections}
               send={send}
             />
-            <JudgeLinks judgeConnections={judgeConnections} />
-          </>
+          </Suspense>
         )}
         {view === "show" && (
           <>
@@ -631,16 +713,20 @@ function Console() {
               <div className="region-title">
                 <p>LIVE SCORING</p>
                 <h2 id="score-title">
-                  {result?.kind === "incomplete"
-                    ? "INCOMPLETE"
-                    : result?.kind === "finalised"
-                      ? "FINALISED"
-                      : "PROVISIONAL"}
+                  {!active
+                    ? "NO ACT"
+                    : result?.kind === "incomplete"
+                      ? "INCOMPLETE"
+                      : result?.kind === "finalised"
+                        ? "FINALISED"
+                        : "PROVISIONAL"}
                 </h2>
                 <span>
-                  {result?.kind === "incomplete"
-                    ? `${result.missingJudgeSlots.length} judge score(s) and${result.audienceMissing ? " audience votes" : ""} remaining`
-                    : active?.actName}
+                  {!active
+                    ? "Select an act to begin scoring."
+                    : result?.kind === "incomplete"
+                      ? `${result.missingJudgeSlots.length} judge score(s) and${result.audienceMissing ? " audience votes" : ""} remaining`
+                      : active?.actName}
                 </span>
               </div>
               <div className="score-metrics">
@@ -650,7 +736,9 @@ function Console() {
                   <em>{aggregate?.voteCount ?? 0} votes</em>
                 </span>
                 <span>
-                  <small>Audience 50%</small>
+                  <small>
+                    Audience {Math.round(projection.show.audienceWeight * 100)}%
+                  </small>
                   <b>{audienceContribution?.toFixed(3) ?? "—"}</b>
                 </span>
                 <span>
@@ -658,9 +746,14 @@ function Console() {
                   <b>{judgeMean?.toFixed(3) ?? "—"}</b>
                 </span>
                 <span>
-                  <small>Judges 50%</small>
+                  <small>
+                    Judges{" "}
+                    {Math.round((1 - projection.show.audienceWeight) * 100)}%
+                  </small>
                   <b>{judgeContribution?.toFixed(3) ?? "—"}</b>
-                  <em>{submittedScores.length}/4 locked</em>
+                  <em>
+                    {submittedScores.length}/{projection.judges.length} locked
+                  </em>
                 </span>
                 <span>
                   <small>Final result</small>

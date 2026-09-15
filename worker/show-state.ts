@@ -330,9 +330,13 @@ function toCue(
   row: CueRow,
 ): PersistedCue {
   let operations: CueOperation[] = [];
+  let hasExplicitOperations = false;
   try {
     const candidate: unknown = JSON.parse(row.operations_json);
-    if (Array.isArray(candidate)) operations = candidate as CueOperation[];
+    if (Array.isArray(candidate)) {
+      operations = candidate as CueOperation[];
+      hasExplicitOperations = candidate.length > 0;
+    }
   } catch {
     // A legacy cue is represented from its old non-executable columns below.
   }
@@ -371,7 +375,8 @@ function toCue(
     showId: showId(showIdentifier),
     actId: actId(row.act_id),
     position: row.position,
-    visual: visualOperation?.visual ?? legacyVisual,
+    visual:
+      visualOperation?.visual ?? (hasExplicitOperations ? null : legacyVisual),
     audio: row.audio_kind
       ? {
           kind: row.audio_kind as AudioCueKind,
@@ -1064,20 +1069,76 @@ function executeTransition(
           changes: [],
         };
       }
-      // A cue only drives the channels it actually carries. Playing a visual
-      // cue must leave a backing track running, and an audio-only cue must not
-      // wipe what is on screen.
+      const persistedCue = toCue(sql, show.id, cue);
+      const visualOperation = persistedCue.operations.find(
+        (operation): operation is Extract<CueOperation, { kind: "visual" }> =>
+          operation.kind === "visual",
+      );
+      const audioOperations = persistedCue.operations.filter(
+        (operation): operation is Extract<CueOperation, { kind: "audio" }> =>
+          operation.kind === "audio",
+      );
+
+      // Operations are applied in order to independent visual and backing
+      // audio channels. A visual-only cue never interrupts the track, while
+      // audio transport cues never clear the current frame.
+      let activeVisualCueId = runtime.active_visual_cue_id;
+      let visualTransport = runtime.visual_transport;
+      let blackScreen = runtime.black_screen;
+      if (visualOperation) {
+        if (visualOperation.visual.kind === "CLEAR") {
+          activeVisualCueId = null;
+          visualTransport = "STOPPED";
+          blackScreen = 0;
+        } else if (visualOperation.visual.kind === "BLACK") {
+          activeVisualCueId = cue.id;
+          visualTransport = "PLAYING";
+          blackScreen = 1;
+        } else {
+          activeVisualCueId = cue.id;
+          visualTransport = "PLAYING";
+          blackScreen = 0;
+        }
+      }
+
+      let activeAudioCueId = runtime.active_audio_cue_id;
+      let audioTransport = runtime.audio_transport;
+      for (const operation of audioOperations) {
+        switch (operation.action) {
+          case "LOAD":
+            activeAudioCueId = cue.id;
+            // PREPARE_CUE performs the load-only step. GO/PLAY_CUE starts it.
+            audioTransport = "PLAYING";
+            break;
+          case "PLAY":
+            if (operation.assetId) activeAudioCueId = cue.id;
+            if (activeAudioCueId) audioTransport = "PLAYING";
+            break;
+          case "PAUSE":
+            if (activeAudioCueId) audioTransport = "PAUSED";
+            break;
+          case "RESUME":
+          case "REPLAY":
+          case "SEEK":
+            if (activeAudioCueId) audioTransport = "PLAYING";
+            break;
+          case "STOP":
+            activeAudioCueId = null;
+            audioTransport = "STOPPED";
+            break;
+        }
+      }
       runtimeUpdate(
         sql,
         show.id,
         `prepared_cue_id = ?, active_visual_cue_id = ?, active_audio_cue_id = ?,
-         visual_transport = ?, audio_transport = ?, black_screen = ?`,
+        visual_transport = ?, audio_transport = ?, black_screen = ?`,
         cue.id,
-        cue.visual_kind ? cue.id : runtime.active_visual_cue_id,
-        cue.audio_kind ? cue.id : runtime.active_audio_cue_id,
-        cue.visual_kind ? "PLAYING" : runtime.visual_transport,
-        cue.audio_kind ? "PLAYING" : runtime.audio_transport,
-        cue.visual_kind ? 0 : runtime.black_screen,
+        activeVisualCueId,
+        activeAudioCueId,
+        visualTransport,
+        audioTransport,
+        blackScreen,
       );
       return { accepted: true, changes: ["media"] };
     }
@@ -1334,8 +1395,8 @@ function loadCues(
 }
 
 /**
- * Removes operator labels, backstage notes and the operation list before a cue
- * reaches the hall. The projector drives media from `visual` and `audio` only.
+ * Removes operator labels and backstage notes before a cue reaches the hall.
+ * The safe operation list is required for transient SEEK and REPLAY actions.
  */
 function toProjectorCue(cue: PersistedCue): ProjectorCue {
   return {
@@ -1346,6 +1407,7 @@ function toProjectorCue(cue: PersistedCue): ProjectorCue {
     visual: cue.visual,
     audio: cue.audio,
     durationMs: cue.durationMs,
+    operations: cue.operations,
   };
 }
 
@@ -1513,6 +1575,7 @@ export function projectShowState(
         shortName: persisted.shortName,
         themeId: persisted.themeId,
         fontFamily: persisted.fontFamily,
+        reactionsEnabled: persisted.reactionsEnabled,
         intermissionMessage: persisted.intermissionMessage,
         emergencyMessage: persisted.emergencyMessage,
         displayMode: persisted.displayMode,

@@ -46,6 +46,29 @@ export function reporterEligible(
   return distance < width;
 }
 
+/**
+ * Spreads the small eligible cohort across its reporting interval. Reporters
+ * derive this from server-adjusted time, so no per-client timer state or
+ * scheduling message is needed.
+ */
+export function reporterFlushDue(
+  slot: number,
+  epoch: number,
+  serverNow: number,
+  intervalMs: number,
+  target = REACTION_TARGET_REPORTERS,
+): boolean {
+  if (!reporterEligible(slot, epoch, target) || intervalMs < 1_000)
+    return false;
+  const phases = Math.max(1, Math.floor(intervalMs / 1_000));
+  const start =
+    (((epoch * 97) % REACTION_SLOT_COUNT) + REACTION_SLOT_COUNT) %
+    REACTION_SLOT_COUNT;
+  const cohortPosition =
+    (slot - start + REACTION_SLOT_COUNT) % REACTION_SLOT_COUNT;
+  return Math.floor(serverNow / 1_000) % phases === cohortPosition % phases;
+}
+
 export function capReactionHistogram(
   histogram: readonly number[],
 ): ReactionHistogram | null {

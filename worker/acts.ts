@@ -192,6 +192,30 @@ export function deleteAct(
     if (used) return "completed";
     const timestamp = new Date().toISOString();
     storage.sql.exec(
+      `DELETE FROM cue_asset_references
+       WHERE show_id = ? AND cue_id IN (
+         SELECT id FROM cues WHERE show_id = ? AND act_id = ?
+       )`,
+      showIdentifier,
+      showIdentifier,
+      requestedId,
+    );
+    storage.sql.exec(
+      "DELETE FROM cues WHERE show_id = ? AND act_id = ?",
+      showIdentifier,
+      requestedId,
+    );
+    storage.sql.exec(
+      "DELETE FROM show_judge_permissions WHERE show_id = ? AND act_id = ?",
+      showIdentifier,
+      requestedId,
+    );
+    storage.sql.exec(
+      "DELETE FROM judge_permissions WHERE show_id = ? AND act_id = ?",
+      showIdentifier,
+      requestedId,
+    );
+    storage.sql.exec(
       "DELETE FROM acts WHERE show_id = ? AND id = ?",
       showIdentifier,
       requestedId,

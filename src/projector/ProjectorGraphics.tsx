@@ -77,19 +77,28 @@ export function LobbyGraphic({
 export function ActCardGraphic({ act }: { act: PublicAct }) {
   return (
     <section className="stage act-card" key={act.id}>
-      <p className="stage__kicker">
-        Act {String(act.order + 1).padStart(2, "0")}
-      </p>
-      <h1 className="act-card__performer">{act.performerName}</h1>
-      <p className="act-card__name">{act.actName}</p>
-      <p className="act-card__meta">
-        <span>{act.schoolYear}</span>
-        <i aria-hidden="true" />
-        <span>{act.actType}</span>
-      </p>
-      {act.publicDescription && (
-        <p className="act-card__description">{act.publicDescription}</p>
+      {act.publicImageAssetId && (
+        <img
+          className="act-card__image"
+          src={`/api/public/media/${encodeURIComponent(act.publicImageAssetId)}`}
+          alt=""
+        />
       )}
+      <div className="act-card__copy">
+        <p className="stage__kicker">
+          Act {String(act.order + 1).padStart(2, "0")}
+        </p>
+        <h1 className="act-card__performer">{act.performerName}</h1>
+        <p className="act-card__name">{act.actName}</p>
+        <p className="act-card__meta">
+          <span>{act.schoolYear}</span>
+          <i aria-hidden="true" />
+          <span>{act.actType}</span>
+        </p>
+        {act.publicDescription && (
+          <p className="act-card__description">{act.publicDescription}</p>
+        )}
+      </div>
     </section>
   );
 }

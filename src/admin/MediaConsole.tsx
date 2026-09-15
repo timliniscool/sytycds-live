@@ -198,8 +198,15 @@ export function MediaConsole({
                 <span className="cue-row__label">
                   <b>{cue.operatorLabel || "Untitled cue"}</b>
                   <small>
-                    {cue.visual ? cue.visual.kind : "no visual"}
-                    {cue.audio ? ` · ${cue.audio.kind}` : ""}
+                    {cue.operations
+                      .map((operation) =>
+                        operation.kind === "visual"
+                          ? operation.visual.kind
+                          : operation.kind === "audio"
+                            ? `AUDIO ${operation.action}`
+                            : `WAIT ${clock(operation.durationMs)}`,
+                      )
+                      .join(" · ") || "legacy cue"}
                     {cue.durationMs !== null
                       ? ` · ${clock(cue.durationMs)}`
                       : ""}

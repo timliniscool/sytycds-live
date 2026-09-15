@@ -110,10 +110,7 @@ export interface PersistedCue {
  * labels and backstage notes are removed by the server projection, never hidden
  * by the display client.
  */
-export type ProjectorCue = Omit<
-  PersistedCue,
-  "operatorLabel" | "internalNote" | "operations"
->;
+export type ProjectorCue = Omit<PersistedCue, "operatorLabel" | "internalNote">;
 
 export type CueOperation =
   | { kind: "visual"; visual: VisualCue }
@@ -360,6 +357,7 @@ export interface ProjectorShowProjection {
     | "shortName"
     | "themeId"
     | "fontFamily"
+    | "reactionsEnabled"
     | "intermissionMessage"
     | "emergencyMessage"
     | "displayMode"

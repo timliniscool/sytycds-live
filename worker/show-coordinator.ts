@@ -75,6 +75,7 @@ import {
   serveMediaAsset,
   replaceMediaAsset,
   uploadMediaAsset,
+  updateMediaMetadata,
 } from "./media-assets";
 import { listAuditEvents, recordAuditEvent } from "./audit";
 import { preflightAssetRequests, runServerPreflight } from "./preflight";
@@ -205,6 +206,37 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (request.method === "GET" && url.pathname === "/api/ws") {
       return this.upgradeWebSocket(request);
     }
+    if (url.pathname === "/api/public/config" && request.method === "GET") {
+      const projection = this.project({ kind: "audience" });
+      return Response.json(
+        projection?.role === "audience"
+          ? {
+              title: projection.show.title,
+              shortName: projection.show.shortName,
+              themeId: projection.show.themeId,
+              fontFamily: projection.show.fontFamily,
+            }
+          : null,
+      );
+    }
+    const publicImageMatch =
+      /^\/api\/public\/media\/(asset-[A-Za-z0-9-]{1,128})$/u.exec(url.pathname);
+    if (publicImageMatch && request.method === "GET") {
+      const assetId = publicImageMatch[1] ?? "";
+      const visible = this.ctx.storage.sql
+        .exec<{ present: number }>(
+          `SELECT 1 AS present FROM acts a JOIN media_assets m
+             ON m.show_id = a.show_id AND m.id = a.public_image_asset_id
+           WHERE a.show_id = ? AND m.id = ? AND m.deleted_at IS NULL
+             AND m.mime_type LIKE 'image/%' LIMIT 1`,
+          PRIMARY_SHOW_ID,
+          assetId,
+        )
+        .toArray()[0];
+      return visible
+        ? this.handleServeMedia(request, assetId, true)
+        : Response.json({ error: "Not found" }, { status: 404 });
+    }
     if (url.pathname === "/api/admin/login" && request.method === "POST") {
       return this.handleAdminLogin(request);
     }
@@ -330,6 +362,12 @@ export class ShowCoordinator extends DurableObject<Env> {
       return this.handleListMedia(request);
     if (url.pathname === "/api/admin/media" && request.method === "POST")
       return this.handleUploadMedia(request, url);
+    const mediaMetadataMatch =
+      /^\/api\/admin\/media\/([A-Za-z0-9_-]{1,128})\/metadata$/u.exec(
+        url.pathname,
+      );
+    if (mediaMetadataMatch && request.method === "PATCH")
+      return this.handleMediaMetadata(request, mediaMetadataMatch[1] ?? "");
     const mediaMatch =
       /^\/api\/(?:admin\/)?media\/([A-Za-z0-9_-]{1,128})$/u.exec(url.pathname);
     if (mediaMatch && request.method === "GET")
@@ -1137,6 +1175,23 @@ export class ShowCoordinator extends DurableObject<Env> {
         );
   }
 
+  private async handleMediaMetadata(
+    request: Request,
+    assetId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const updated = updateMediaMetadata(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      assetId,
+      await this.adminBody(request),
+    );
+    return updated
+      ? Response.json({ updated: true })
+      : Response.json({ error: "Invalid metadata or asset" }, { status: 400 });
+  }
+
   private async handleReplaceMedia(
     request: Request,
     url: URL,
@@ -1163,19 +1218,23 @@ export class ShowCoordinator extends DurableObject<Env> {
   private async handleServeMedia(
     request: Request,
     assetId: string,
+    publicImage = false,
   ): Promise<Response> {
-    const admin = await this.authenticatedAdmin(request, false);
-    const projector = hasSameOrigin(request)
-      ? await readProjectorSessionHash(this.ctx.storage.sql, request)
-      : null;
-    if (!admin && !projector)
-      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    if (!publicImage) {
+      const admin = await this.authenticatedAdmin(request, false);
+      const projector = hasSameOrigin(request)
+        ? await readProjectorSessionHash(this.ctx.storage.sql, request)
+        : null;
+      if (!admin && !projector)
+        return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
     return serveMediaAsset(
       this.ctx.storage.sql,
       this.env.MEDIA,
       PRIMARY_SHOW_ID,
       assetId,
       request,
+      publicImage,
     );
   }
 
@@ -1431,6 +1490,24 @@ export class ShowCoordinator extends DurableObject<Env> {
           this.broadcastSnapshots("projector");
         }
       }
+      return;
+    }
+
+    if (parsed.message.type === "clear_reactions") {
+      if (attachment.role.kind !== "admin") {
+        this.sendProtocolError(
+          ws,
+          "unauthorised",
+          "Only an operator may clear reactions",
+        );
+        return;
+      }
+      this.broadcastProjector({
+        type: "reaction_clear",
+        protocolVersion: PROTOCOL_VERSION,
+        revision: this.currentRevision(),
+        commandId: parsed.message.commandId,
+      });
       return;
     }
 

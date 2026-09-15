@@ -187,10 +187,18 @@ function legacyColumns(operations: readonly CueOperation[]): {
   );
   const load = operations.find(
     (operation): operation is Extract<CueOperation, { kind: "audio" }> =>
-      operation.kind === "audio" && operation.action === "LOAD",
+      operation.kind === "audio" &&
+      (operation.action === "LOAD" || operation.action === "PLAY") &&
+      Boolean(operation.assetId),
   );
   return {
-    visualKind: visual?.visual.kind ?? null,
+    // The original table required one legacy channel column. Operation-only
+    // transport cues use a harmless TITLE_CARD sentinel there; execution reads
+    // the validated operation list and therefore leaves the visual unchanged.
+    visualKind:
+      visual?.visual.kind === "CLEAR"
+        ? "TITLE_CARD"
+        : (visual?.visual.kind ?? (load ? null : "TITLE_CARD")),
     visualSource: visual?.visual.sourceKey ?? null,
     visualTitle: visual?.visual.title ?? null,
     audioKind: load ? "AUDIO" : null,
