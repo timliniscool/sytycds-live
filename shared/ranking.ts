@@ -3,6 +3,7 @@ import type {
   PublicAct,
   PublicResults,
   RankingEntry,
+  RankingExclusionReason,
   ResultsStage,
 } from "./domain";
 
@@ -11,13 +12,28 @@ export interface RankingInput {
   act: PublicAct;
   /** Only a finalised score ranks. Provisional live values never enter here. */
   finalScore: number | null;
+  /** Why this act has no frozen score yet, for the operator's missing list. */
+  reason?: RankingExclusionReason;
+  missingJudgeSlots?: readonly number[];
 }
 
 /**
- * Competition ("1224") ranking over frozen final scores. Equality is exact on
- * the stored value: two acts that finalised to the same number are a tie and
- * are never separated by an invented rule. Running order only fixes the
- * display sequence inside a tie group, so the output is deterministic.
+ * The single documented equality policy for ranking. Frozen final scores are
+ * IEEE-754 doubles produced by one formula version, so equality is exact on the
+ * stored value: two acts rank together only when their stored numbers are the
+ * same number. Rounded display strings are never compared, so 8.004 and 8.0044
+ * are two ranks even though both read "8.00" on the projector.
+ */
+export function sameFinalScore(left: number, right: number): boolean {
+  return left === right;
+}
+
+/**
+ * Dense ("1223") ranking over frozen final scores: equal scores share a rank
+ * and the next distinct score takes the very next rank number. Five acts tied
+ * at the top are all rank 1 and the next distinct score is rank 2. Running
+ * order only fixes the display sequence inside a tie group, so the output is
+ * deterministic.
  */
 export function rankActs(inputs: readonly RankingInput[]): AdminRanking {
   const eligible = inputs.filter(
@@ -30,20 +46,21 @@ export function rankActs(inputs: readonly RankingInput[]): AdminRanking {
   );
 
   const ranked: RankingEntry[] = [];
+  let rank = 0;
   eligible.forEach((input, index) => {
     const previous = eligible[index - 1];
-    const rank =
-      previous && previous.finalScore === input.finalScore
-        ? (ranked[index - 1]?.rank ?? index + 1)
-        : index + 1;
     const next = eligible[index + 1];
-    const tied =
-      (previous !== undefined && previous.finalScore === input.finalScore) ||
-      (next !== undefined && next.finalScore === input.finalScore);
+    const sameAsPrevious =
+      previous !== undefined &&
+      sameFinalScore(previous.finalScore, input.finalScore);
+    if (!sameAsPrevious) rank += 1;
     ranked.push({
       actId: input.act.id,
       rank,
-      tied,
+      tied:
+        sameAsPrevious ||
+        (next !== undefined &&
+          sameFinalScore(next.finalScore, input.finalScore)),
       finalScore: input.finalScore,
       performerName: input.act.performerName,
       actName: input.act.actName,
@@ -56,8 +73,12 @@ export function rankActs(inputs: readonly RankingInput[]): AdminRanking {
     ranked,
     incomplete: inputs
       .filter((input) => !input.act.withdrawn && input.finalScore === null)
-      .map((input) => input.act)
-      .sort((left, right) => left.order - right.order),
+      .sort((left, right) => left.act.order - right.act.order)
+      .map((input) => ({
+        act: input.act,
+        reason: input.reason ?? "NOT_FINALISED",
+        missingJudgeSlots: input.missingJudgeSlots ?? [],
+      })),
     withdrawn: inputs
       .filter((input) => input.act.withdrawn)
       .map((input) => input.act)
@@ -71,6 +92,12 @@ export function rankGroups(ranked: readonly RankingEntry[]): number[] {
     (left, right) => left - right,
   );
 }
+
+/**
+ * The podium is the top three *rank numbers*, not the top three acts, so two
+ * joint firsts leave one second and one third on the podium.
+ */
+export const PODIUM_RANKS = 3;
 
 /**
  * The server-side projection boundary for rankings. Everything the public may
@@ -105,7 +132,7 @@ export function publicResultsFor(
     case "TOP_THREE":
       return {
         stage,
-        entries: ranked.filter((entry) => entry.rank <= 3),
+        entries: ranked.filter((entry) => entry.rank <= PODIUM_RANKS),
         pendingGroups: 0,
         totalGroups: groups.length,
       };

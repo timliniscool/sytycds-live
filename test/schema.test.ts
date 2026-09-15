@@ -35,6 +35,54 @@ describe("coordinator SQLite schema", () => {
     });
   });
 
+  it("repairs a database whose migration history is recorded but incomplete", async () => {
+    const stub = env.SHOW_COORDINATOR.get(
+      env.SHOW_COORDINATOR.idFromName("schema-drift"),
+    );
+    await stub.fetch("https://show.internal/health");
+
+    await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      // Reproduce a coordinator that ran an intermediate migration 9: the
+      // version is recorded, but the projector session table has no expiry and
+      // the font tables were never created. Left alone, every projector
+      // session lookup throws and pairing a display fails with a 500.
+      sql.exec("DROP TABLE projector_sessions");
+      sql.exec(`CREATE TABLE projector_sessions (
+        token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+        show_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        revoked_at TEXT
+      ) STRICT`);
+      sql.exec("DROP TABLE font_assets");
+      sql.exec("DROP TABLE selected_font_css");
+      sql.exec("DELETE FROM schema_migrations WHERE version >= 13");
+
+      initialiseSchema(state.storage);
+
+      expect(
+        sql
+          .exec<{ name: string }>(
+            "SELECT name FROM pragma_table_info('projector_sessions')",
+          )
+          .toArray()
+          .some(({ name }) => name === "expires_at"),
+      ).toBe(true);
+      for (const table of ["font_assets", "selected_font_css"]) {
+        expect(
+          sql
+            .exec<{ name: string }>(
+              "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+              table,
+            )
+            .toArray(),
+        ).toHaveLength(1);
+      }
+      expect(readSchemaVersion(sql)).toBe(LATEST_SCHEMA_VERSION);
+    });
+  });
+
   it("detects applied migrations and can initialise repeatedly", async () => {
     const stub = env.SHOW_COORDINATOR.get(
       env.SHOW_COORDINATOR.idFromName("schema-repeat"),

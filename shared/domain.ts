@@ -91,11 +91,19 @@ export interface AudioCue {
   sourceKey: string;
 }
 
+/**
+ * `SIMPLE` cues are derived from an act's presentation settings and are
+ * regenerated whenever those change; `MANUAL` cues are the operator's own and
+ * are never touched by the derivation.
+ */
+export type CueOrigin = "MANUAL" | "SIMPLE";
+
 export interface PersistedCue {
   id: CueId;
   showId: ShowId;
   actId: ActId;
   position: number;
+  origin: CueOrigin;
   visual: VisualCue | null;
   audio: AudioCue | null;
   durationMs: number | null;
@@ -143,14 +151,44 @@ export interface PublicAct {
   schoolYear: string;
   actName: string;
   actType: string;
+  /**
+   * Empty on audience phones unless the act opts in. The server omits the
+   * content rather than sending it for a client to hide.
+   */
   publicDescription: string;
   publicImageAssetId?: string | null;
   /** A withdrawn act keeps its history but leaves the running order and rankings. */
   withdrawn: boolean;
 }
 
-export interface AdminAct extends PublicAct {
+/** Whether the act's optional copy and artwork reach audience phones at all. */
+export interface ActAudienceVisibility {
+  showDescriptionToAudience: boolean;
+  showImageToAudience: boolean;
+}
+
+/** The automatic performance screen, or a custom visual that replaces it. */
+export type PerformanceMode = "DEFAULT" | "CUSTOM";
+/** Backing audio starts on the operator's GO, or with the performance itself. */
+export type BackingAudioStart = "MANUAL" | "PERFORMANCE";
+
+/**
+ * How an act presents itself on stage, in the terms an operator thinks in. The
+ * cue engine underneath is derived from this, not replaced by it.
+ */
+export interface ActPresentation {
+  performanceMode: PerformanceMode;
+  /** The image or video shown instead of the automatic screen. */
+  performanceAssetId: string | null;
+  /** `contain` by default: the whole frame, never stretched or cropped. */
+  performanceFit: ImageFit;
+  backingAudioAssetId: string | null;
+  backingAudioStart: BackingAudioStart;
+}
+
+export interface AdminAct extends PublicAct, ActAudienceVisibility {
   internalNotes: string;
+  presentation: ActPresentation;
   cues: readonly PersistedCue[];
 }
 
@@ -330,10 +368,29 @@ export interface PublicResults {
   totalGroups: number;
 }
 
+/** Why an act is absent from the ranking, in the operator's own terms. */
+export type RankingExclusionReason =
+  /** Scoring is complete but nobody has pressed FINALISE yet. */
+  | "NOT_FINALISED"
+  /** The audience block carries weight and no audience result exists. */
+  | "AUDIENCE_RESULT_INCOMPLETE"
+  /** At least one configured judge has not submitted. */
+  | "JUDGE_SCORE_MISSING"
+  /** Judges carry weight but the show has no judge panel configured. */
+  | "JUDGES_NOT_CONFIGURED";
+
+/** An act the ranking cannot include, and the reason the operator can act on. */
+export interface UnrankedAct {
+  act: PublicAct;
+  reason: RankingExclusionReason;
+  /** Slot numbers still owing a score; empty unless the reason names judges. */
+  missingJudgeSlots: readonly number[];
+}
+
 /** The operator's complete ranking picture, including acts that cannot rank. */
 export interface AdminRanking {
   ranked: readonly RankingEntry[];
-  incomplete: readonly PublicAct[];
+  incomplete: readonly UnrankedAct[];
   withdrawn: readonly PublicAct[];
 }
 

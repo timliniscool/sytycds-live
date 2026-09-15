@@ -1,30 +1,42 @@
 import { describe, expect, it } from "vitest";
 
-import { CURATED_THEMES, THEME_IDS } from "../shared/themes";
+import {
+  AA_BODY_TEXT,
+  AA_LARGE_TEXT,
+  contrastRatio,
+  parseHexColour,
+} from "../shared/contrast";
+import {
+  CONTRAST_REQUIREMENTS,
+  CURATED_THEMES,
+  THEME_IDS,
+  type ThemePalette,
+} from "../shared/themes";
 
-function channel(value: number): number {
-  const normalised = value / 255;
-  return normalised <= 0.04045
-    ? normalised / 12.92
-    : ((normalised + 0.055) / 1.055) ** 2.4;
-}
-
-function luminance(hex: string): number {
-  const rgb = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/iu.exec(hex);
-  if (!rgb) throw new Error(`Invalid theme colour ${hex}`);
-  return (
-    channel(Number.parseInt(rgb[1]!, 16)) * 0.2126 +
-    channel(Number.parseInt(rgb[2]!, 16)) * 0.7152 +
-    channel(Number.parseInt(rgb[3]!, 16)) * 0.0722
-  );
-}
-
-function contrast(first: string, second: string): number {
-  const [bright, dark] = [luminance(first), luminance(second)].sort(
-    (left, right) => right - left,
-  );
-  return (bright! + 0.05) / (dark! + 0.05);
-}
+const PALETTE_TOKENS: readonly (keyof ThemePalette)[] = [
+  "background",
+  "surface",
+  "elevated",
+  "text",
+  "muted",
+  "accent",
+  "onAccent",
+  "accentHover",
+  "accentActive",
+  "accentSoft",
+  "border",
+  "focus",
+  "hover",
+  "active",
+  "success",
+  "onSuccess",
+  "warning",
+  "onWarning",
+  "danger",
+  "onDanger",
+  "disabled",
+  "onDisabled",
+];
 
 describe("curated themes", () => {
   it("defines every advertised theme exactly once", () => {
@@ -34,20 +46,49 @@ describe("curated themes", () => {
     );
   });
 
+  it("keeps the curated themes the show was designed around", () => {
+    const byId = new Map(CURATED_THEMES.map((theme) => [theme.id, theme.name]));
+    expect(byId.get("gold-white")).toBe("Gold & White");
+    expect(byId.get("navy-bismarck")).toBe("Navy Bismarck");
+  });
+
   it.each(CURATED_THEMES)(
-    "keeps $name text readable on primary surfaces",
+    "$name defines every semantic token for web and projector",
     (theme) => {
       for (const palette of [theme.web, theme.projector]) {
-        expect(
-          contrast(palette.text, palette.background),
-        ).toBeGreaterThanOrEqual(4.5);
-        expect(contrast(palette.text, palette.surface)).toBeGreaterThanOrEqual(
-          4.5,
-        );
-        expect(
-          contrast(palette.text, palette.strongSurface),
-        ).toBeGreaterThanOrEqual(4.5);
+        for (const token of PALETTE_TOKENS) {
+          expect(() => parseHexColour(palette[token])).not.toThrow();
+        }
       }
+    },
+  );
+});
+
+describe("theme contrast", () => {
+  const cases = CURATED_THEMES.flatMap((theme) =>
+    (["web", "projector"] as const).flatMap((surface) =>
+      CONTRAST_REQUIREMENTS.map((requirement) => ({
+        theme: theme.name,
+        surface,
+        requirement,
+        palette: theme[surface],
+      })),
+    ),
+  );
+
+  it.each(cases)(
+    "$theme ($surface): $requirement.label",
+    ({ requirement, palette }) => {
+      const minimum =
+        requirement.minimum === "body" ? AA_BODY_TEXT : AA_LARGE_TEXT;
+      const ratio = contrastRatio(
+        palette[requirement.foreground],
+        palette[requirement.background],
+      );
+      expect(
+        Number(ratio.toFixed(2)),
+        `${palette[requirement.foreground]} on ${palette[requirement.background]}`,
+      ).toBeGreaterThanOrEqual(minimum);
     },
   );
 });

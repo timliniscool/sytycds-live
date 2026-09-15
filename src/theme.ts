@@ -10,23 +10,32 @@ export function applyShowTheme(
   const palette = projector ? theme.projector : theme.web;
   const root = document.documentElement;
   root.dataset.theme = theme.id;
+  // Every semantic token reaches CSS. A component that needs a colour uses the
+  // token for its role; it never hard-codes one, and never assumes what sits
+  // on top of another (an accent button's label is `--theme-on-accent`).
   const properties = {
     "--theme-background": palette.background,
     "--theme-surface": palette.surface,
-    "--theme-surface-strong": palette.strongSurface,
+    "--theme-elevated": palette.elevated,
     "--theme-text": palette.text,
     "--theme-muted": palette.muted,
     "--theme-accent": palette.accent,
-    "--theme-accent-strong": palette.accentStrong,
+    "--theme-on-accent": palette.onAccent,
+    "--theme-accent-hover": palette.accentHover,
+    "--theme-accent-active": palette.accentActive,
     "--theme-accent-soft": palette.accentSoft,
     "--theme-border": palette.border,
     "--theme-focus": palette.focus,
     "--theme-hover": palette.hover,
     "--theme-active": palette.active,
     "--theme-success": palette.success,
+    "--theme-on-success": palette.onSuccess,
     "--theme-warning": palette.warning,
+    "--theme-on-warning": palette.onWarning,
     "--theme-danger": palette.danger,
-    "--theme-on-accent": palette.onAccent,
+    "--theme-on-danger": palette.onDanger,
+    "--theme-disabled": palette.disabled,
+    "--theme-on-disabled": palette.onDisabled,
   } as const;
   for (const [name, value] of Object.entries(properties))
     root.style.setProperty(name, value);

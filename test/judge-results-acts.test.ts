@@ -137,6 +137,15 @@ describe("judge submission, results, and act ordering", () => {
           actType: "Dance",
           publicDescription: "",
           internalNotes: "",
+          showDescriptionToAudience: false,
+          showImageToAudience: false,
+          presentation: {
+            performanceMode: "DEFAULT",
+            performanceAssetId: null,
+            performanceFit: "contain",
+            backingAudioAssetId: null,
+            backingAudioStart: "MANUAL",
+          },
         })?.order,
       ).toBe(2);
     });

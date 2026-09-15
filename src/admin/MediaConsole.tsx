@@ -151,7 +151,9 @@ export function MediaConsole({
       )}
       {telemetry && !telemetry.armed && (
         <p className="media-console__warn">
-          Projector audio is not armed. Press ARM SHOW on the projector.
+          PROJECTOR CONNECTED · AUDIO NOT ARMED — go to the projector machine
+          and press ENABLE AUDIO &amp; ENTER SHOW on its screen. Only a click in
+          that browser can unlock sound.
         </p>
       )}
       {telemetry?.held && (

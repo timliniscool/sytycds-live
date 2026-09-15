@@ -32,6 +32,7 @@ const imageCue: ProjectorCue = {
   showId: showId("primary"),
   actId: act.id,
   position: 0,
+  origin: "MANUAL",
   visual: { kind: "IMAGE", sourceKey: "asset-1", title: null },
   audio: null,
   durationMs: null,
@@ -85,11 +86,25 @@ function projection(
 }
 
 describe("projector scene derivation", () => {
-  it("shows the media layer over an empty stage during a performance", () => {
+  it("lets a custom performance visual replace the automatic screen", () => {
     const scene = deriveScene(projection(), "LIVE", "http://localhost:5173");
-    expect(scene.base.kind).toBe("STAGE");
+    expect(scene.base).toEqual({
+      kind: "PERFORMANCE",
+      act,
+      automatic: false,
+    });
     expect(scene.layer).toEqual({ kind: "MEDIA" });
     expect(scene.mediaVisible).toBe(true);
+  });
+
+  it("draws every act its own performance screen with no cue authored", () => {
+    const scene = deriveScene(
+      projection({}, { activeVisualCueId: null, visualTransport: "STOPPED" }),
+      "LIVE",
+      "http://localhost:5173",
+    );
+    expect(scene.base).toEqual({ kind: "PERFORMANCE", act, automatic: true });
+    expect(scene.layer).toEqual({ kind: "NONE" });
   });
 
   it("renders a title card from the visual channel without a media frame", () => {
@@ -101,10 +116,69 @@ describe("projector scene derivation", () => {
     expect(scene.layer).toEqual({ kind: "TITLE_CARD", title: "Finale" });
   });
 
-  it("black screen wins over any active visual", () => {
-    expect(
-      deriveScene(projection({}, { blackScreen: true }), "LIVE", "x").layer,
-    ).toEqual({ kind: "BLACK" });
+  it.each([
+    "LOBBY",
+    "ACT_CARD",
+    "PERFORMANCE",
+    "SCOREBOARD",
+    "INTERMISSION",
+    "HOLD",
+    "FINAL_RESULTS",
+  ] as const)("blackout overrides the %s presentation entirely", (mode) => {
+    const scene = deriveScene(
+      projection({ displayMode: mode }, { blackScreen: true }),
+      "LIVE",
+      "x",
+    );
+    expect(scene.base).toEqual({ kind: "BLACKOUT" });
+    expect(scene.layer).toEqual({ kind: "NONE" });
+    expect(scene.mediaVisible).toBe(false);
+  });
+
+  it("keeps final results and a live visual behind blackout until it is lifted", () => {
+    const black = deriveScene(
+      projection({ displayMode: "FINAL_RESULTS" }, { blackScreen: true }),
+      "LIVE",
+      "x",
+    );
+    expect(black.base.kind).toBe("BLACKOUT");
+    const lifted = deriveScene(
+      projection({ displayMode: "FINAL_RESULTS" }, { blackScreen: false }),
+      "LIVE",
+      "x",
+    );
+    expect(lifted.base.kind).toBe("FINAL_RESULTS");
+  });
+
+  it("gives emergency a higher priority than blackout", () => {
+    const scene = deriveScene(
+      projection({ displayMode: "EMERGENCY" }, { blackScreen: true }),
+      "LIVE",
+      "x",
+    );
+    expect(scene.base).toEqual({
+      kind: "EMERGENCY",
+      presentation: "BLACK",
+      message: "",
+    });
+  });
+
+  it("never reports a BLACK visual layer once the operator lifts blackout", () => {
+    const blackCue = {
+      ...imageCue,
+      id: cueId("cue-black"),
+      visual: { kind: "BLACK" as const, sourceKey: null, title: null },
+    };
+    const scene = deriveScene(
+      {
+        ...projection({}, { activeVisualCueId: blackCue.id }),
+        activeCues: [blackCue],
+      },
+      "LIVE",
+      "x",
+    );
+    expect(scene.base).toMatchObject({ kind: "PERFORMANCE", automatic: true });
+    expect(scene.layer).toEqual({ kind: "NONE" });
   });
 
   it("hides the visual layer under overrides and score graphics", () => {

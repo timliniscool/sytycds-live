@@ -49,7 +49,10 @@ describe("zero-act show lifecycle", () => {
         storage,
         PRIMARY_SHOW_ID,
         {
-          judgeCount: 4,
+          judgeNames: Array.from(
+            { length: 4 },
+            (_, index) => `Judge ${index + 1}`,
+          ),
           audienceWeight: 0.5,
           reset: false,
           confirm: null,
@@ -127,6 +130,15 @@ describe("zero-act show lifecycle", () => {
         publicDescription: "A live movement piece.",
         internalNotes: "Stand by stage left at LX 12.",
         publicImageAssetId: poster.id,
+        showDescriptionToAudience: false,
+        showImageToAudience: false,
+        presentation: {
+          performanceMode: "DEFAULT",
+          performanceAssetId: null,
+          performanceFit: "contain",
+          backingAudioAssetId: null,
+          backingAudioStart: "MANUAL",
+        },
       });
       const secondAct = createAct(storage, PRIMARY_SHOW_ID, {
         performerName: "Stage Band",
@@ -135,6 +147,15 @@ describe("zero-act show lifecycle", () => {
         actType: "Music",
         publicDescription: "The closing number.",
         internalNotes: "Confirm all microphones before standby.",
+        showDescriptionToAudience: false,
+        showImageToAudience: false,
+        presentation: {
+          performanceMode: "DEFAULT",
+          performanceAssetId: null,
+          performanceFit: "contain",
+          backingAudioAssetId: null,
+          backingAudioStart: "MANUAL",
+        },
       });
       expect(act).not.toBeNull();
       expect(secondAct).not.toBeNull();
@@ -284,8 +305,14 @@ describe("zero-act show lifecycle", () => {
         activeAudioCueId: null,
         visualTransport: "STOPPED",
         audioTransport: "STOPPED",
-        blackScreen: false,
+        // STOP ALL stops transports; the blackout override stays until lifted.
+        blackScreen: true,
       });
+      command("BLACK_SCREEN");
+      live = projectShowState(storage, PRIMARY_SHOW_ID, { kind: "projector" });
+      expect(live?.role === "projector" && live.runtime.blackScreen).toBe(
+        false,
+      );
 
       command("OPEN_AUDIENCE_VOTING");
       expect(

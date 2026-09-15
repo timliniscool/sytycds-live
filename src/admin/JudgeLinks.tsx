@@ -35,54 +35,17 @@ async function json<Value>(
  */
 export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
   const [judges, setJudges] = useState<JudgeSummary[] | null>(null);
-  const [names, setNames] = useState<Record<string, string>>({});
-  const [labels, setLabels] = useState([
-    "Judge 1",
-    "Judge 2",
-    "Judge 3",
-    "Judge 4",
-  ]);
   const [issued, setIssued] = useState<IssuedLink[]>([]);
   const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
 
   async function refresh(): Promise<void> {
     const result = await json<{ judges: JudgeSummary[] }>("/api/admin/judges");
-    const current = result?.judges ?? [];
-    setJudges(current);
-    setNames((previous) =>
-      Object.fromEntries(
-        current.map((judge) => [
-          judge.id,
-          previous[judge.id] ?? judge.displayName,
-        ]),
-      ),
-    );
+    setJudges(result?.judges ?? []);
   }
 
   useEffect(() => {
     void refresh();
   }, []);
-
-  async function create(): Promise<void> {
-    setBusy(true);
-    setNotice(null);
-    const result = await json<{ judges: IssuedLink[] }>(
-      "/api/admin/judges/initialize",
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ labels: labels.map((label) => label.trim()) }),
-      },
-    );
-    setBusy(false);
-    if (!result) {
-      setNotice("Between one and eight non-empty judge names are required.");
-      return;
-    }
-    setIssued(result.judges);
-    await refresh();
-  }
 
   async function rotate(judge: JudgeSummary): Promise<void> {
     if (
@@ -119,89 +82,24 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
     await refresh();
   }
 
-  async function rename(judge: JudgeSummary): Promise<void> {
-    const displayName = names[judge.id]?.replace(/\s+/gu, " ").trim();
-    if (!displayName || displayName === judge.displayName) return;
-    setBusy(true);
-    const result = await json<{ renamed: boolean }>(
-      `/api/admin/judges/${encodeURIComponent(judge.id)}`,
-      {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ displayName }),
-      },
-    );
-    setBusy(false);
-    setNotice(
-      result?.renamed ? "Judge name updated." : "Judge name was not updated.",
-    );
-    await refresh();
-  }
-
   return (
     <section className="judge-links" aria-labelledby="judge-links-title">
       <div className="region-title">
         <p>JUDGE LINKS</p>
         <h2 id="judge-links-title">Private adjudicator access</h2>
         <span>
-          Links appear once. Copy or scan them now; rotate to issue a fresh one.
+          The panel itself is configured in <b>02 / SCORING</b>. Links appear
+          once. Copy or scan them now; rotate to issue a fresh one.
         </span>
       </div>
 
       {judges === null && <p className="judge-links__empty">Loading…</p>}
 
       {judges?.length === 0 && (
-        <form
-          className="judge-links__create"
-          onSubmit={(event) => {
-            event.preventDefault();
-            void create();
-          }}
-        >
-          <label>
-            Number of judges
-            <input
-              type="number"
-              min={1}
-              max={8}
-              value={labels.length}
-              onChange={(event) => {
-                const count = Math.min(
-                  8,
-                  Math.max(1, Number(event.target.value) || 1),
-                );
-                setLabels((current) =>
-                  Array.from(
-                    { length: count },
-                    (_, index) => current[index] ?? `Judge ${index + 1}`,
-                  ),
-                );
-              }}
-            />
-          </label>
-          {labels.map((label, index) => (
-            <label key={index}>
-              Judge {index + 1}
-              <input
-                type="text"
-                value={label}
-                maxLength={120}
-                required
-                onChange={(event) =>
-                  setLabels((current) =>
-                    current.map((entry, position) =>
-                      position === index ? event.target.value : entry,
-                    ),
-                  )
-                }
-              />
-            </label>
-          ))}
-          <button type="submit" disabled={busy}>
-            ISSUE {labels.length} JUDGE LINK{labels.length === 1 ? "" : "S"}
-          </button>
-          {notice && <p className="judge-links__notice">{notice}</p>}
-        </form>
+        <p className="judge-links__empty">
+          No judges yet. Set the panel in <b>02 / SCORING</b> above; every judge
+          configured there gets a private link here.
+        </p>
       )}
 
       {judges && judges.length > 0 && (
@@ -211,21 +109,7 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
             return (
               <li key={judge.id} className="judge-links__row">
                 <div className="judge-links__identity">
-                  <label>
-                    <span className="sr-only">Judge {judge.slot} name</span>
-                    <input
-                      type="text"
-                      value={names[judge.id] ?? judge.displayName}
-                      maxLength={120}
-                      disabled={busy}
-                      onChange={(event) =>
-                        setNames((current) => ({
-                          ...current,
-                          [judge.id]: event.target.value,
-                        }))
-                      }
-                    />
-                  </label>
+                  <b>{judge.displayName}</b>
                   <small>
                     Judge {judge.slot} ·{" "}
                     {judge.active ? "link active" : "REVOKED"} ·{" "}
@@ -233,17 +117,6 @@ export function JudgeLinks({ judgeConnections }: JudgeLinksProps) {
                   </small>
                 </div>
                 <div className="judge-links__actions">
-                  <button
-                    type="button"
-                    disabled={
-                      busy ||
-                      !names[judge.id]?.trim() ||
-                      names[judge.id]?.trim() === judge.displayName
-                    }
-                    onClick={() => void rename(judge)}
-                  >
-                    SAVE NAME
-                  </button>
                   <button
                     type="button"
                     disabled={busy}

@@ -7,6 +7,30 @@ export interface SchemaMigration {
   version: number;
   name: string;
   statements: readonly string[];
+  /**
+   * Runs inside the migration's transaction, after its statements. Only for
+   * work that has to inspect the database it is repairing; ordinary schema
+   * changes belong in `statements`, which stay declarative and reviewable.
+   */
+  reconcile?: (sql: SqlStorage) => void;
+}
+
+function tableExists(sql: SqlStorage, table: string): boolean {
+  return (
+    sql
+      .exec<{ name: string }>(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        table,
+      )
+      .toArray().length > 0
+  );
+}
+
+function columnExists(sql: SqlStorage, table: string, column: string): boolean {
+  return sql
+    .exec<{ name: string }>(`SELECT name FROM pragma_table_info('${table}')`)
+    .toArray()
+    .some((row) => row.name === column);
 }
 
 const INITIAL_SCHEMA: SchemaMigration = {
@@ -511,6 +535,110 @@ const ADMIN_CREDENTIAL_RECOVERY_SCHEMA: SchemaMigration = {
   ],
 };
 
+/**
+ * The act presentation model. Every act now has a Performance presentation
+ * without anybody authoring a cue for it: `performance_mode` chooses between
+ * the automatic screen and a custom visual, and backing audio is an act-level
+ * file rather than a hand-built media command. Cues gain an `origin` so the
+ * cues derived from these settings can be regenerated without ever touching a
+ * cue the operator wrote by hand.
+ *
+ * `finalised_results_v2` also gains the act identity as it stood at
+ * finalisation. A ranking is a historical record: renaming a performer
+ * afterwards must not rewrite a published result, and it must never be able to
+ * change the mathematics.
+ */
+const ACT_PRESENTATION_AND_RESULT_IDENTITY_SCHEMA: SchemaMigration = {
+  version: 12,
+  name: "act_presentation_backing_audio_and_frozen_result_identity",
+  statements: [
+    `ALTER TABLE acts ADD COLUMN show_description_to_audience INTEGER NOT NULL
+      DEFAULT 0 CHECK (show_description_to_audience IN (0, 1))`,
+    `ALTER TABLE acts ADD COLUMN show_image_to_audience INTEGER NOT NULL
+      DEFAULT 0 CHECK (show_image_to_audience IN (0, 1))`,
+    `ALTER TABLE acts ADD COLUMN performance_mode TEXT NOT NULL DEFAULT 'DEFAULT'
+      CHECK (performance_mode IN ('DEFAULT', 'CUSTOM'))`,
+    "ALTER TABLE acts ADD COLUMN performance_asset_id TEXT",
+    `ALTER TABLE acts ADD COLUMN performance_fit TEXT NOT NULL DEFAULT 'contain'
+      CHECK (performance_fit IN ('contain', 'cover'))`,
+    "ALTER TABLE acts ADD COLUMN backing_audio_asset_id TEXT",
+    `ALTER TABLE acts ADD COLUMN backing_audio_start TEXT NOT NULL DEFAULT 'MANUAL'
+      CHECK (backing_audio_start IN ('MANUAL', 'PERFORMANCE'))`,
+    `ALTER TABLE cues ADD COLUMN origin TEXT NOT NULL DEFAULT 'MANUAL'
+      CHECK (origin IN ('MANUAL', 'SIMPLE'))`,
+    "ALTER TABLE finalised_results_v2 ADD COLUMN performer_name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE finalised_results_v2 ADD COLUMN act_name TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE finalised_results_v2 ADD COLUMN school_year TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE finalised_results_v2 ADD COLUMN act_type TEXT NOT NULL DEFAULT ''",
+    `ALTER TABLE finalised_results_v2 ADD COLUMN rank_policy TEXT NOT NULL
+      DEFAULT 'DENSE_EXACT' CHECK (rank_policy IN ('DENSE_EXACT'))`,
+    // Results finalised before this migration take the identity the act has
+    // now; it is the only identity that was ever recorded for them.
+    `UPDATE finalised_results_v2 SET
+       performer_name = COALESCE((SELECT a.performer_name FROM acts a
+         WHERE a.show_id = finalised_results_v2.show_id AND a.id = finalised_results_v2.act_id), ''),
+       act_name = COALESCE((SELECT a.act_name FROM acts a
+         WHERE a.show_id = finalised_results_v2.show_id AND a.id = finalised_results_v2.act_id), ''),
+       school_year = COALESCE((SELECT a.school_year FROM acts a
+         WHERE a.show_id = finalised_results_v2.show_id AND a.id = finalised_results_v2.act_id), ''),
+       act_type = COALESCE((SELECT a.act_type FROM acts a
+         WHERE a.show_id = finalised_results_v2.show_id AND a.id = finalised_results_v2.act_id), '')`,
+  ],
+};
+
+/**
+ * Repairs a database whose earlier migrations were recorded but not fully
+ * applied — the shape left behind by a deployment that ran an intermediate
+ * version of migration 9 while it was still being written.
+ *
+ * A migration's version number records that it *ran*, not what it contained, so
+ * editing a shipped migration silently fixes fresh installations and leaves
+ * every existing one broken. The symptoms are severe and quiet: a
+ * `projector_sessions` table without `expires_at` makes every projector
+ * session lookup throw, so pairing a display fails with a 500 rather than a
+ * message, and missing font tables make saving the show's appearance fail.
+ *
+ * This step therefore asserts the shape the running code requires rather than
+ * trusting the history, and is a no-op on a database that was built correctly.
+ */
+const CONFIGURATION_SCHEMA_RECONCILIATION: SchemaMigration = {
+  version: 13,
+  name: "reconcile_partially_applied_configuration_schema",
+  statements: [],
+  reconcile(sql) {
+    if (!columnExists(sql, "projector_sessions", "expires_at")) {
+      // Existing rows get 0, which reads as already expired: a display session
+      // of unknown age is re-paired once rather than trusted indefinitely.
+      sql.exec(
+        "ALTER TABLE projector_sessions ADD COLUMN expires_at INTEGER NOT NULL DEFAULT 0",
+      );
+    }
+    if (!tableExists(sql, "font_assets")) {
+      sql.exec(`CREATE TABLE font_assets (
+        id TEXT PRIMARY KEY NOT NULL,
+        family TEXT NOT NULL,
+        object_key TEXT NOT NULL UNIQUE,
+        mime_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes > 0),
+        created_at TEXT NOT NULL
+      ) STRICT`);
+    }
+    if (!tableExists(sql, "selected_font_css")) {
+      sql.exec(`CREATE TABLE selected_font_css (
+        family TEXT PRIMARY KEY NOT NULL,
+        css_text TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      ) STRICT`);
+    }
+    if (!tableExists(sql, "admin_credential_recoveries")) {
+      sql.exec(`CREATE TABLE admin_credential_recoveries (
+        token_hash BLOB PRIMARY KEY NOT NULL CHECK (length(token_hash) = 32),
+        used_at TEXT NOT NULL
+      ) STRICT`);
+    }
+  },
+};
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -523,6 +651,8 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   CONFIGURATION_AND_DYNAMIC_JUDGES_SCHEMA,
   ACT_PUBLIC_IMAGE_SCHEMA,
   ADMIN_CREDENTIAL_RECOVERY_SCHEMA,
+  ACT_PRESENTATION_AND_RESULT_IDENTITY_SCHEMA,
+  CONFIGURATION_SCHEMA_RECONCILIATION,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 
@@ -576,6 +706,7 @@ export function initialiseSchema(storage: DurableObjectStorage): void {
       for (const statement of migration.statements) {
         storage.sql.exec(statement);
       }
+      migration.reconcile?.(storage.sql);
       storage.sql.exec(
         "INSERT INTO schema_migrations (version, name, applied_at) VALUES (?, ?, ?)",
         migration.version,

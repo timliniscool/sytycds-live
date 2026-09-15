@@ -23,8 +23,6 @@ export function ShowIdentityPanel({ current }: ShowIdentityPanelProps) {
   const [tagline, setTagline] = useState(current?.tagline ?? "");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [resetPhrase, setResetPhrase] = useState("");
-  const [resetOpen, setResetOpen] = useState(false);
 
   useEffect(() => {
     setTitle(current?.title ?? DEFAULT_EVENT_NAME);
@@ -61,26 +59,6 @@ export function ShowIdentityPanel({ current }: ShowIdentityPanelProps) {
       error?: string;
     } | null;
     setNotice(body?.error ?? `Save failed (HTTP ${response.status}).`);
-  }
-
-  async function reset(): Promise<void> {
-    setBusy(true);
-    setNotice(null);
-    const response = await fetch("/api/admin/show/reset", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ confirm: resetPhrase }),
-    });
-    setBusy(false);
-    setResetPhrase("");
-    setResetOpen(false);
-    if (!response.ok) {
-      const body = (await response.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      setNotice(body?.error ?? `Reset failed (HTTP ${response.status}).`);
-    }
   }
 
   return (
@@ -122,49 +100,93 @@ export function ShowIdentityPanel({ current }: ShowIdentityPanelProps) {
         </button>
         {notice && <output>{notice}</output>}
       </form>
-      {current && (
-        <div className="show-identity__reset">
-          <p>DANGER</p>
-          {!resetOpen ? (
-            <button type="button" onClick={() => setResetOpen(true)}>
-              START COMPLETELY FRESH…
+    </section>
+  );
+}
+
+/**
+ * Starting a deployment completely fresh. It lives beside the rest of setup so
+ * it is reachable after the show exists — which is the only time anyone needs
+ * it — and is guarded by a typed phrase because there is no undo.
+ */
+export function ShowResetPanel() {
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [resetPhrase, setResetPhrase] = useState("");
+  const [resetOpen, setResetOpen] = useState(false);
+
+  async function reset(): Promise<void> {
+    setBusy(true);
+    setNotice(null);
+    const response = await fetch("/api/admin/show/reset", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: resetPhrase }),
+    });
+    setBusy(false);
+    setResetPhrase("");
+    setResetOpen(false);
+    if (!response.ok) {
+      const body = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      setNotice(body?.error ?? `Reset failed (HTTP ${response.status}).`);
+    }
+  }
+
+  return (
+    <section className="show-identity" aria-labelledby="show-reset-title">
+      <div className="region-title">
+        <p>DANGER</p>
+        <h2 id="show-reset-title">Start completely fresh</h2>
+        <span>
+          Everything about this show, erased. Use it between events, never
+          during one.
+        </span>
+      </div>
+      <div className="show-identity__reset">
+        <p>DANGER</p>
+        {!resetOpen ? (
+          <button type="button" onClick={() => setResetOpen(true)}>
+            START COMPLETELY FRESH…
+          </button>
+        ) : (
+          <>
+            <span>
+              Erases the show, every act, cue, media file, judge link, vote,
+              score and the history. There is no undo. Type <b>RESET SHOW</b> to
+              confirm.
+            </span>
+            <input
+              type="text"
+              aria-label="Type RESET SHOW to confirm"
+              autoComplete="off"
+              value={resetPhrase}
+              onChange={(event) => setResetPhrase(event.target.value)}
+            />
+            <button
+              type="button"
+              className="show-identity__reset-fire"
+              disabled={busy || resetPhrase !== "RESET SHOW"}
+              onClick={() => void reset()}
+            >
+              ERASE EVERYTHING
             </button>
-          ) : (
-            <>
-              <span>
-                Erases the show, every act, cue, media file, judge link, vote,
-                score and the history. There is no undo. Type <b>RESET SHOW</b>{" "}
-                to confirm.
-              </span>
-              <input
-                type="text"
-                aria-label="Type RESET SHOW to confirm"
-                autoComplete="off"
-                value={resetPhrase}
-                onChange={(event) => setResetPhrase(event.target.value)}
-              />
-              <button
-                type="button"
-                className="show-identity__reset-fire"
-                disabled={busy || resetPhrase !== "RESET SHOW"}
-                onClick={() => void reset()}
-              >
-                ERASE EVERYTHING
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => {
-                  setResetOpen(false);
-                  setResetPhrase("");
-                }}
-              >
-                CANCEL
-              </button>
-            </>
-          )}
-        </div>
-      )}
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setResetOpen(false);
+                setResetPhrase("");
+              }}
+            >
+              CANCEL
+            </button>
+          </>
+        )}
+        {notice && <output>{notice}</output>}
+      </div>
     </section>
   );
 }

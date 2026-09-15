@@ -10,6 +10,7 @@ import {
   AUDIENCE_SCORES,
   connectionNotice,
   deriveVoteView,
+  discardUnlockedSelection,
   rejectionMessage,
   type VoteRejection,
   type VoteSubmission,
@@ -149,8 +150,21 @@ export default function VoteSurface() {
     if (votingOpen) setSawVotingOpen(true);
   }, [votingOpen]);
 
+  // Voting closed underneath this phone. Anything chosen but not locked in is
+  // discarded here, so no pending selection can survive to be sent later, and
+  // the confirmation sheet closes with it.
+  useEffect(() => {
+    if (votingOpen) return;
+    setSubmission(discardUnlockedSelection);
+  }, [votingOpen]);
+
   async function submit(score: AudienceScore): Promise<void> {
-    if (!actId) return;
+    // The server is authoritative, but a phone that already knows voting has
+    // closed should not send at all.
+    if (!actId || !votingOpen) {
+      setSubmission({ kind: "idle" });
+      return;
+    }
     setSubmission({ kind: "submitting", score });
     try {
       const response = await fetch("/api/vote", {
@@ -369,7 +383,7 @@ export default function VoteSurface() {
         </>
       )}
 
-      {submission.kind === "confirming" && (
+      {submission.kind === "confirming" && view.kind === "VOTING" && (
         <div className="vote__confirm" role="dialog" aria-modal="true">
           <div className="vote__confirm-card">
             <p className="vote__confirm-title">

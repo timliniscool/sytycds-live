@@ -48,13 +48,7 @@ import {
   reactionSlot,
 } from "../shared/reactions";
 import { validateReactionSummary } from "./reactions";
-import {
-  createJudges,
-  listJudges,
-  revokeJudge,
-  renameJudge,
-  rotateJudgeToken,
-} from "./judge-lifecycle";
+import { listJudges, revokeJudge, rotateJudgeToken } from "./judge-lifecycle";
 import { submitJudgeScore } from "./judge-submissions";
 import {
   createAct,
@@ -312,12 +306,6 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (url.pathname === "/api/admin/judges" && request.method === "GET") {
       return this.handleListJudges(request);
     }
-    if (
-      url.pathname === "/api/admin/judges/initialize" &&
-      request.method === "POST"
-    ) {
-      return this.handleCreateJudges(request);
-    }
     const judgeActionMatch =
       /^\/api\/admin\/judges\/([A-Za-z0-9_-]{1,128})\/(rotate|revoke)$/u.exec(
         url.pathname,
@@ -328,10 +316,6 @@ export class ShowCoordinator extends DurableObject<Env> {
         ? this.handleRotateJudge(request, judgeId)
         : this.handleRevokeJudge(request, judgeId);
     }
-    const judgeEditMatch =
-      /^\/api\/admin\/judges\/([A-Za-z0-9_-]{1,128})$/u.exec(url.pathname);
-    if (judgeEditMatch && request.method === "PATCH")
-      return this.handleRenameJudge(request, judgeEditMatch[1] ?? "");
     if (url.pathname === "/api/vote/status" && request.method === "GET") {
       return this.handleVoteStatus(request, url);
     }
@@ -689,20 +673,26 @@ export class ShowCoordinator extends DurableObject<Env> {
         { status: 400 },
       );
     }
+    // A typeface that cannot be cached must not take the rest of the show's
+    // appearance down with it. The theme, title and tagline are saved either
+    // way; only the font falls back to what is already stored.
+    let fontFallback: string | null = null;
     if (input.fontFamily !== "system-ui") {
       const cached = await cacheSelectedFont(
         this.ctx.storage,
         this.env.MEDIA,
         input.fontFamily,
       ).catch(() => false);
-      if (!cached)
-        return Response.json(
-          {
-            error:
-              "The selected font could not be cached; the current show font was kept",
-          },
-          { status: 503 },
-        );
+      if (!cached) {
+        fontFallback = input.fontFamily;
+        input.fontFamily =
+          this.ctx.storage.sql
+            .exec<{ font_family: string }>(
+              "SELECT font_family FROM shows WHERE id = ?",
+              PRIMARY_SHOW_ID,
+            )
+            .toArray()[0]?.font_family ?? "system-ui";
+      }
     }
     const result = upsertShow(this.ctx.storage, PRIMARY_SHOW_ID, input);
     recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
@@ -716,7 +706,18 @@ export class ShowCoordinator extends DurableObject<Env> {
     this.broadcastSnapshots("projector");
     this.broadcastSnapshots("audience");
     this.broadcastSnapshots("judge");
-    return Response.json(result, { status: result.created ? 201 : 200 });
+    return Response.json(
+      {
+        ...result,
+        fontFamily: input.fontFamily,
+        ...(fontFallback
+          ? {
+              fontWarning: `${fontFallback} could not be downloaded, so the show kept ${input.fontFamily}. Everything else was saved.`,
+            }
+          : {}),
+      },
+      { status: result.created ? 201 : 200 },
+    );
   }
 
   /** Wipes everything; guarded by session, same origin and a typed phrase. */
@@ -749,12 +750,10 @@ export class ShowCoordinator extends DurableObject<Env> {
   ): Promise<Response> {
     if (!(await this.authenticatedAdmin(request, true)))
       return Response.json({ error: "Unauthorised" }, { status: 401 });
-    const input = parseScoringConfiguration(await this.adminBody(request));
-    if (!input)
-      return Response.json(
-        { error: "Invalid scoring configuration" },
-        { status: 400 },
-      );
+    const parsed = parseScoringConfiguration(await this.adminBody(request));
+    if (!parsed.ok)
+      return Response.json({ error: parsed.reason }, { status: 400 });
+    const input = parsed.input;
     const result = await applyScoringConfiguration(
       this.ctx.storage,
       PRIMARY_SHOW_ID,
@@ -820,47 +819,6 @@ export class ShowCoordinator extends DurableObject<Env> {
     });
   }
 
-  private async handleCreateJudges(request: Request): Promise<Response> {
-    if (!(await this.authenticatedAdmin(request, true))) {
-      return Response.json({ error: "Unauthorised" }, { status: 401 });
-    }
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
-      return Response.json({ error: "Bad request" }, { status: 400 });
-    }
-    const labels =
-      isRecord(body) &&
-      Array.isArray(body.labels) &&
-      body.labels.every((label) => typeof label === "string")
-        ? body.labels
-        : null;
-    if (!labels) {
-      return Response.json({ error: "Bad request" }, { status: 400 });
-    }
-    const issued = await createJudges(
-      this.ctx.storage,
-      PRIMARY_SHOW_ID,
-      labels,
-    );
-    if (!issued) {
-      return Response.json(
-        { error: "Unable to create judges" },
-        { status: 409 },
-      );
-    }
-    const origin = new URL(request.url).origin;
-    return Response.json({
-      judges: issued.map((judge) => ({
-        judgeId: judge.judgeId,
-        slot: judge.slot,
-        displayName: judge.displayName,
-        link: `${origin}/judge/${judge.token}`,
-      })),
-    });
-  }
-
   private async handleRotateJudge(
     request: Request,
     requestedJudgeId: string,
@@ -898,33 +856,6 @@ export class ShowCoordinator extends DurableObject<Env> {
       );
     }
     return Response.json({ judgeId: requestedJudgeId, active: false });
-  }
-
-  private async handleRenameJudge(
-    request: Request,
-    requestedJudgeId: string,
-  ): Promise<Response> {
-    if (!(await this.authenticatedAdmin(request, true)))
-      return Response.json({ error: "Unauthorised" }, { status: 401 });
-    const body = await this.adminBody(request);
-    if (
-      !isRecord(body) ||
-      typeof body.displayName !== "string" ||
-      !renameJudge(
-        this.ctx.storage,
-        PRIMARY_SHOW_ID,
-        requestedJudgeId,
-        body.displayName,
-      )
-    ) {
-      return Response.json(
-        { error: "Invalid judge name or ID" },
-        { status: 400 },
-      );
-    }
-    this.broadcastSnapshots("admin");
-    this.broadcastSnapshots("projector");
-    return Response.json({ renamed: true });
   }
 
   /**
@@ -1705,8 +1636,15 @@ export class ShowCoordinator extends DurableObject<Env> {
       this.broadcastSnapshots("judge");
     }
 
+    const projector = this.project({ kind: "projector" });
+
     if (changes.includes("act")) {
-      const message: ServerMessage = {
+      // The audience act is a *narrower* act: optional description and artwork
+      // are stripped for phones. Broadcasting one patch to everybody would put
+      // that narrower act on the projector too, so each role is sent its own.
+      const patchFor = (
+        activeAct: typeof audience.activeAct,
+      ): ServerMessage => ({
         type: "state_patch",
         protocolVersion: PROTOCOL_VERSION,
         revision,
@@ -1714,17 +1652,18 @@ export class ShowCoordinator extends DurableObject<Env> {
           {
             kind: "active_act",
             activeActId: audience.show.activeActId,
-            activeAct: audience.activeAct,
+            activeAct,
           },
         ],
-      };
-      this.broadcastAdmin(message);
-      this.broadcastProjector(message);
-      this.broadcastAudience(message);
-      this.broadcastJudges(message);
+      });
+      const stageAct =
+        projector?.role === "projector" ? projector.activeAct : null;
+      this.broadcastAdmin(patchFor(stageAct));
+      this.broadcastProjector(patchFor(stageAct));
+      this.broadcastAudience(patchFor(audience.activeAct));
+      this.broadcastJudges(patchFor(stageAct));
     }
 
-    const projector = this.project({ kind: "projector" });
     if (projector && projector.role === "projector") {
       if (changes.includes("display")) {
         const message: ServerMessage = {

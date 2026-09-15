@@ -124,11 +124,29 @@ export function finaliseResult(
       return { ok: false, reason: "Result inputs changed while finalising" };
     }
     const timestamp = new Date().toISOString();
+    // The snapshot is the whole result: its inputs, the weighting and formula
+    // version that produced it, the act identity as it stood, and the ranking
+    // policy it was ranked under. Nothing about it is recomputed later, so a
+    // reweighting or a rename cannot rewrite a published history.
+    const identity = sql
+      .exec<{
+        performer_name: string;
+        act_name: string;
+        school_year: string;
+        act_type: string;
+      }>(
+        "SELECT performer_name, act_name, school_year, act_type FROM acts WHERE show_id = ? AND id = ?",
+        showIdentifier,
+        actIdentifier,
+      )
+      .toArray()[0];
+    if (!identity) return { ok: false, reason: "The act no longer exists" };
     sql.exec(
       `INSERT INTO finalised_results_v2 (
         show_id, act_id, audience_mean, judge_scores_json, audience_weight,
-        judge_weight, active_judge_ids_json, formula_version, final_score, finalised_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?)`,
+        judge_weight, active_judge_ids_json, formula_version, final_score, finalised_at,
+        performer_name, act_name, school_year, act_type, rank_policy
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, 'DENSE_EXACT')`,
       showIdentifier,
       actIdentifier,
       audienceMean,
@@ -138,6 +156,10 @@ export function finaliseResult(
       JSON.stringify(judgeIds),
       existing.value,
       timestamp,
+      identity.performer_name,
+      identity.act_name,
+      identity.school_year,
+      identity.act_type,
     );
     sql.exec(
       `INSERT INTO result_snapshots (

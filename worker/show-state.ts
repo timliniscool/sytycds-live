@@ -12,6 +12,7 @@ import {
   type AdminShowProjection,
   type AdminJudgeState,
   type AudienceAggregate,
+  type ActPresentation,
   type AudienceShowProjection,
   type ClientProjection,
   type ConnectionRole,
@@ -40,6 +41,7 @@ import { cueValidationState } from "./cues";
 import { listReferencedAssets } from "./media-assets";
 import { audienceJoinUrl } from "./public-origin";
 import { loadPublicResults, loadRanking } from "./rankings";
+import { simpleCueForAct } from "./simple-flow";
 import {
   finaliseResult,
   operationalResult,
@@ -111,10 +113,20 @@ interface ActRow extends Record<string, SqlStorageValue> {
   internal_notes: string;
   withdrawn_at: string | null;
   public_image_asset_id: string | null;
+  show_description_to_audience: number;
+  show_image_to_audience: number;
+  performance_mode: string;
+  performance_asset_id: string | null;
+  performance_fit: string;
+  backing_audio_asset_id: string | null;
+  backing_audio_start: string;
 }
 
 const ACT_COLUMNS = `id, order_index, performer_name, school_year, act_name, act_type,
-                public_description, internal_notes, withdrawn_at, public_image_asset_id`;
+                public_description, internal_notes, withdrawn_at, public_image_asset_id,
+                show_description_to_audience, show_image_to_audience, performance_mode,
+                performance_asset_id, performance_fit, backing_audio_asset_id,
+                backing_audio_start`;
 
 interface JudgeSubmissionRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -131,6 +143,7 @@ interface CueRow extends Record<string, SqlStorageValue> {
   id: string;
   act_id: string;
   position: number;
+  origin: string;
   visual_kind: string | null;
   visual_source_key: string | null;
   visual_title: string | null;
@@ -324,6 +337,36 @@ function toPublicAct(row: ActRow): PublicAct {
   };
 }
 
+/**
+ * The audience slice of an act. Optional copy and artwork are opt-in per act
+ * and are *removed here*, on the server, rather than sent and hidden: a phone
+ * that never receives the description cannot leak it, and a hall of phones
+ * never downloads artwork the act did not publish.
+ */
+function toAudienceAct(row: ActRow): PublicAct {
+  const act = toPublicAct(row);
+  return {
+    ...act,
+    publicDescription:
+      row.show_description_to_audience === 1 ? act.publicDescription : "",
+    publicImageAssetId:
+      row.show_image_to_audience === 1
+        ? (act.publicImageAssetId ?? null)
+        : null,
+  };
+}
+
+function toActPresentation(row: ActRow): ActPresentation {
+  return {
+    performanceMode: row.performance_mode === "CUSTOM" ? "CUSTOM" : "DEFAULT",
+    performanceAssetId: row.performance_asset_id,
+    performanceFit: row.performance_fit === "cover" ? "cover" : "contain",
+    backingAudioAssetId: row.backing_audio_asset_id,
+    backingAudioStart:
+      row.backing_audio_start === "PERFORMANCE" ? "PERFORMANCE" : "MANUAL",
+  };
+}
+
 function toCue(
   sql: SqlStorage,
   showIdentifier: string,
@@ -375,6 +418,7 @@ function toCue(
     showId: showId(showIdentifier),
     actId: actId(row.act_id),
     position: row.position,
+    origin: row.origin === "SIMPLE" ? "SIMPLE" : "MANUAL",
     visual:
       visualOperation?.visual ?? (hasExplicitOperations ? null : legacyVisual),
     audio: row.audio_kind
@@ -429,7 +473,7 @@ function cueForCurrentAct(
   return (
     sql
       .exec<CueRow>(
-        `SELECT id, act_id, position, visual_kind, visual_source_key, visual_title,
+        `SELECT id, act_id, position, origin, visual_kind, visual_source_key, visual_title,
                 audio_kind, audio_source_key, duration_ms, operator_label, operations_json, internal_note
          FROM cues WHERE show_id = ? AND act_id = ? AND id = ?`,
         show.id,
@@ -814,7 +858,35 @@ function executeTransition(
         command.mode,
         show.id,
       );
-      return { accepted: true, changes: ["display"] };
+      // Simple Show Flow: an act configured with a custom performance visual
+      // puts it up as the performance begins, and a backing track set to start
+      // with the performance starts here too. An act that asked for GO waits
+      // for GO. Nothing here touches the blackout override.
+      const performance =
+        command.mode === "PERFORMANCE" && activeActId
+          ? simpleCueForAct(sql, show.id, activeActId)
+          : null;
+      if (
+        !performance ||
+        (!performance.hasVisual && !performance.autoStartAudio)
+      )
+        return { accepted: true, changes: ["display"] };
+      runtimeUpdate(
+        sql,
+        show.id,
+        `prepared_cue_id = ?, active_visual_cue_id = ?, active_audio_cue_id = ?,
+         visual_transport = ?, audio_transport = ?`,
+        performance.id,
+        performance.hasVisual ? performance.id : runtime.active_visual_cue_id,
+        performance.hasAudio && performance.autoStartAudio
+          ? performance.id
+          : runtime.active_audio_cue_id,
+        performance.hasVisual ? "PLAYING" : runtime.visual_transport,
+        performance.hasAudio && performance.autoStartAudio
+          ? "PLAYING"
+          : runtime.audio_transport,
+      );
+      return { accepted: true, changes: ["display", "media"] };
     }
     case "ACTIVATE_EMERGENCY":
       return {
@@ -1084,12 +1156,14 @@ function executeTransition(
       // audio transport cues never clear the current frame.
       let activeVisualCueId = runtime.active_visual_cue_id;
       let visualTransport = runtime.visual_transport;
+      // Blackout is an output override, not part of the visual channel. Playing
+      // a cue never lifts it: only the operator's own BLACK control does, so a
+      // blacked-out hall cannot be uncovered by the next GO.
       let blackScreen = runtime.black_screen;
       if (visualOperation) {
         if (visualOperation.visual.kind === "CLEAR") {
           activeVisualCueId = null;
           visualTransport = "STOPPED";
-          blackScreen = 0;
         } else if (visualOperation.visual.kind === "BLACK") {
           activeVisualCueId = cue.id;
           visualTransport = "PLAYING";
@@ -1097,7 +1171,6 @@ function executeTransition(
         } else {
           activeVisualCueId = cue.id;
           visualTransport = "PLAYING";
-          blackScreen = 0;
         }
       }
 
@@ -1180,11 +1253,13 @@ function executeTransition(
     // STOP ALL is the panic control: every transport ends and the projector
     // returns to its display-mode graphics. It is always available.
     case "STOP_ALL_MEDIA":
+      // Stops every transport. It deliberately leaves the blackout override
+      // exactly as the operator set it.
       runtimeUpdate(
         sql,
         show.id,
         `active_visual_cue_id = NULL, active_audio_cue_id = NULL,
-         visual_transport = 'STOPPED', audio_transport = 'STOPPED', black_screen = 0`,
+         visual_transport = 'STOPPED', audio_transport = 'STOPPED'`,
       );
       return { accepted: true, changes: ["media"] };
     // REPLAY is the emergency backing-audio action: one press restarts the
@@ -1210,7 +1285,7 @@ function executeTransition(
       runtimeUpdate(
         sql,
         show.id,
-        "visual_transport = ?, audio_transport = ?, black_screen = 0",
+        "visual_transport = ?, audio_transport = ?",
         runtime.active_visual_cue_id ? "PLAYING" : runtime.visual_transport,
         runtime.active_audio_cue_id ? "PLAYING" : runtime.audio_transport,
       );
@@ -1384,7 +1459,7 @@ function loadCues(
 ): PersistedCue[] {
   return sql
     .exec<CueRow>(
-      `SELECT id, act_id, position, visual_kind, visual_source_key, visual_title,
+      `SELECT id, act_id, position, origin, visual_kind, visual_source_key, visual_title,
               audio_kind, audio_source_key, duration_ms, operator_label, operations_json, internal_note
        FROM cues WHERE show_id = ? AND act_id = ? ORDER BY position`,
       showIdentifier,
@@ -1404,6 +1479,7 @@ function toProjectorCue(cue: PersistedCue): ProjectorCue {
     showId: cue.showId,
     actId: cue.actId,
     position: cue.position,
+    origin: cue.origin,
     visual: cue.visual,
     audio: cue.audio,
     durationMs: cue.durationMs,
@@ -1549,7 +1625,7 @@ export function projectShowState(
         audienceVoteState: persisted.audienceVoteState,
         revision: persisted.revision,
       },
-      activeAct: publicActive,
+      activeAct: active ? toAudienceAct(active) : null,
       revealedResult: revealedFinalScore(
         storage.sql,
         show.id,
@@ -1699,6 +1775,9 @@ export function projectShowState(
     .map((row) => ({
       ...toPublicAct(row),
       internalNotes: row.internal_notes,
+      showDescriptionToAudience: row.show_description_to_audience === 1,
+      showImageToAudience: row.show_image_to_audience === 1,
+      presentation: toActPresentation(row),
       cues: loadCues(storage.sql, show.id, row.id),
     }));
   const aggregates: AudienceAggregate[] = storage.sql

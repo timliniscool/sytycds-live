@@ -160,7 +160,9 @@ describe("media transport semantics", () => {
       expect(stopped.active_audio_cue_id).toBeNull();
       expect(stopped.visual_transport).toBe("STOPPED");
       expect(stopped.audio_transport).toBe("STOPPED");
-      expect(stopped.black_screen).toBe(0);
+      // STOP ALL is a transport control. Blackout is an output override and
+      // outlives it: only the operator's BLACK control lifts the blackout.
+      expect(stopped.black_screen).toBe(1);
     });
   });
 
@@ -301,10 +303,13 @@ describe("media transport semantics", () => {
       });
       command(storage, "PLAY_CUE", { cueId: "cue-clear-operation" });
       expect(runtime(storage)).toMatchObject({
-        black_screen: 0,
+        // Clearing the visual channel does not uncover a blacked-out hall.
+        black_screen: 1,
         active_visual_cue_id: null,
         active_audio_cue_id: "cue-load",
       });
+      command(storage, "BLACK_SCREEN");
+      expect(runtime(storage).black_screen).toBe(0);
     });
   });
 });

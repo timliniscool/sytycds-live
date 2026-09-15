@@ -7,7 +7,12 @@
   --admin-accent: var(--theme-accent, #e5c15b);
   --admin-live: var(--theme-success, #4ee0a0);
   --admin-warning: var(--theme-warning, #f4a34f);
-  --admin-danger: var(--theme-danger, #f05d5e);
+  --admin-danger: var(--theme-danger, #ff8b8b);
+  /* What a fill carries is a token too: nothing assumes white on a colour. */
+  --admin-on-accent: var(--theme-on-accent, #04121c);
+  --admin-on-live: var(--theme-on-success, #04120b);
+  --admin-on-warning: var(--theme-on-warning, #1c1003);
+  --admin-on-danger: var(--theme-on-danger, #2a0407);
   --admin-space-1: 0.35rem;
   --admin-space-2: 0.65rem;
   --admin-space-3: 1rem;
@@ -150,7 +155,7 @@ input:focus-visible {
 .admin-status__alarm {
   margin-left: auto;
   padding: 0.16rem 0.4rem;
-  color: #fff;
+  color: var(--admin-on-danger);
   background: var(--admin-danger);
   font-weight: 900;
 }
@@ -181,7 +186,7 @@ input:focus-visible {
   color: var(--admin-dim);
 }
 .connection--incompatible {
-  color: #fff;
+  color: var(--admin-on-danger);
   border-color: var(--admin-danger);
   background: var(--admin-danger);
 }
@@ -290,15 +295,15 @@ input:focus-visible {
 .display-controls button.is-active {
   border-color: var(--admin-accent);
   background: var(--admin-accent);
-  color: #1b1405;
+  color: var(--admin-on-accent);
 }
 .display-controls__black {
   border-color: var(--admin-danger) !important;
-  color: #ffdada;
+  color: var(--admin-danger);
 }
 .display-controls__black.is-active {
   background: var(--admin-danger) !important;
-  color: #fff !important;
+  color: var(--admin-on-danger) !important;
 }
 .voting-workspace {
   padding: var(--admin-space-3);
@@ -462,7 +467,7 @@ input:focus-visible {
 .media-console__alarm {
   margin: 0;
   padding: 0.55rem 1rem;
-  color: #fff;
+  color: var(--admin-on-danger);
   background: var(--admin-danger);
   font-size: 0.78rem;
   font-weight: 900;
@@ -471,7 +476,7 @@ input:focus-visible {
 .media-console__warn {
   margin: 0;
   padding: 0.5rem 1rem;
-  color: #1a1305;
+  color: var(--admin-on-warning);
   background: var(--admin-warning);
   font-size: 0.76rem;
   font-weight: 800;
@@ -593,15 +598,16 @@ input:focus-visible {
   min-height: 76px !important;
   display: grid;
   gap: 0.15rem;
-  border: 2px solid #7be0b0 !important;
-  background: #1d5c43 !important;
-  color: #eafff5 !important;
+  border: 2px solid var(--admin-live) !important;
+  background: var(--admin-live) !important;
+  color: var(--admin-on-live) !important;
   font-size: 1.9rem;
   font-weight: 900;
   letter-spacing: 0.16em;
 }
 .media-go__button:hover:not(:disabled) {
-  background: #247756 !important;
+  background: var(--admin-live) !important;
+  filter: brightness(1.08);
 }
 .media-go__button small {
   overflow: hidden;
@@ -631,21 +637,21 @@ input:focus-visible {
 }
 .media-emergency p {
   grid-column: 1 / -1;
-  color: #d59aa0 !important;
+  color: var(--admin-danger) !important;
 }
 .media-emergency__replay {
   border-color: var(--admin-accent) !important;
-  background: #2a2312 !important;
-  color: #ffe9a8 !important;
+  background: var(--admin-accent) !important;
+  color: var(--admin-on-accent) !important;
 }
 .media-emergency__stop {
-  border-color: #7d4145 !important;
-  color: #ffd7d7 !important;
+  border-color: var(--admin-danger) !important;
+  color: var(--admin-danger) !important;
 }
 .media-emergency__stop-all {
   border-color: var(--admin-danger) !important;
-  background: #3a1518 !important;
-  color: #ffe2e2 !important;
+  background: var(--admin-danger) !important;
+  color: var(--admin-on-danger) !important;
   font-weight: 900;
 }
 
@@ -664,9 +670,13 @@ input:focus-visible {
   display: grid;
   place-items: center;
 }
-/* Black letterbox appears only once a frame is attached, so nothing flashes. */
+/*
+ * The letterbox appears only once a frame is attached, so nothing flashes.
+ * A custom visual keeps its own aspect ratio (object-fit: contain above) and
+ * the bars around it are the show's own ground, not an arbitrary black.
+ */
 .projector-media--framed {
-  background: #000;
+  background: var(--theme-background);
 }
 /* The frame stays attached but invisible while a mode's own graphics are the
    commanded output; audio in a video element is unaffected. */
@@ -688,11 +698,16 @@ input:focus-visible {
 .projector-media__video::-webkit-media-controls-enclosure {
   display: none !important;
 }
+/*
+ * The blackout override. Fixed, above every other projector layer, pure black
+ * and nothing else: no footer, no logo, no pointer, no text.
+ */
 .projector-black {
-  position: absolute;
+  position: fixed;
   inset: 0;
-  z-index: 2;
+  z-index: 5;
   background: #000;
+  cursor: none;
 }
 .projector-link {
   position: fixed;
@@ -728,11 +743,81 @@ input:focus-visible {
   z-index: 3;
   right: 1rem;
   bottom: 1rem;
-  border: 2px solid var(--admin-accent);
-  background: #17140a;
-  color: #fff0b8;
+  border: 2px solid var(--theme-warning);
+  background: var(--theme-warning);
+  color: var(--theme-on-warning);
   padding: 1rem;
   font-weight: 900;
+}
+
+/*
+ * The audio gate covers the output because the gesture it needs can only be
+ * made here, on the projector machine. It is deliberately impossible to miss.
+ */
+.projector-gate {
+  position: fixed;
+  z-index: 6;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--theme-background);
+}
+.projector-gate__card {
+  display: grid;
+  gap: 1rem;
+  justify-items: center;
+  max-width: 44rem;
+  padding: clamp(1.5rem, 4vw, 3rem);
+  border: 1px solid var(--theme-border);
+  background: var(--theme-surface);
+  text-align: center;
+}
+.projector-gate__kicker {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.85rem;
+  font-weight: 800;
+  letter-spacing: 0.24em;
+}
+.projector-gate__title {
+  margin: 0;
+  color: var(--theme-text);
+  font-size: clamp(1.8rem, 4vw, 3rem);
+  line-height: 1.1;
+}
+.projector-gate__detail {
+  margin: 0;
+  max-width: 34rem;
+  color: var(--theme-muted);
+  font-size: clamp(1rem, 1.6vw, 1.25rem);
+}
+.projector-gate__enter {
+  min-height: 4.5rem;
+  padding: 0 clamp(1.5rem, 4vw, 3rem);
+  border: 0;
+  background: var(--theme-accent);
+  color: var(--theme-on-accent);
+  font-size: clamp(1.1rem, 2vw, 1.6rem);
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+.projector-gate__enter:hover {
+  background: var(--theme-accent-hover);
+}
+.projector-gate__enter:active {
+  background: var(--theme-accent-active);
+}
+.projector-gate__skip {
+  border: 1px solid var(--theme-border);
+  background: transparent;
+  color: var(--theme-muted);
+  padding: 0.6rem 1.2rem;
+  font-size: 0.9rem;
+}
+.projector-gate__error {
+  margin: 0;
+  color: var(--theme-danger);
+  font-weight: 700;
 }
 .projector-arm__help,
 .projector-status {
@@ -891,6 +976,71 @@ input:focus-visible {
   line-height: 1.35;
 }
 
+/*
+ * The automatic Performance screen. Centred, balanced and legible from the back
+ * of a hall, and deliberately not enormous: the act name is the largest thing
+ * on it, but one long word still fits on one screen at 1280x720.
+ */
+.performance {
+  align-content: center;
+  justify-items: center;
+  text-align: center;
+}
+.performance__image {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0.22;
+}
+.performance__copy {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: calc(var(--unit) * 1.4);
+  max-width: 82%;
+}
+.performance__act {
+  margin: 0;
+  max-width: 18ch;
+  color: var(--theme-text);
+  font-size: calc(var(--unit) * 6.4);
+  font-weight: 850;
+  letter-spacing: -0.03em;
+  line-height: 0.96;
+  overflow-wrap: break-word;
+}
+.performance__performer {
+  margin: 0;
+  max-width: 24ch;
+  color: var(--theme-accent);
+  font-size: calc(var(--unit) * 3.6);
+  font-weight: 700;
+  line-height: 1.1;
+  overflow-wrap: break-word;
+}
+.performance__meta {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--unit) * 1.4);
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: calc(var(--unit) * 1.9);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.performance__meta i {
+  width: calc(var(--unit) * 0.6);
+  height: calc(var(--unit) * 0.6);
+  border-radius: 50%;
+  background: currentcolor;
+}
+
 .holding {
   align-content: center;
   justify-items: center;
@@ -976,9 +1126,9 @@ input:focus-visible {
   grid-column: span 2;
 }
 .vote__score--on {
-  border-color: #3ddc97;
-  background: #3ddc97;
-  color: #06120d;
+  border-color: var(--theme-accent);
+  background: var(--theme-accent);
+  color: var(--theme-on-accent);
 }
 .vote__action {
   display: grid;
@@ -988,8 +1138,8 @@ input:focus-visible {
   min-height: 58px;
   border: 0;
   border-radius: 12px;
-  background: #3ddc97;
-  color: #06120d;
+  background: var(--theme-accent);
+  color: var(--theme-on-accent);
   font-size: 1.05rem;
   font-weight: 850;
   letter-spacing: 0.04em;
@@ -1503,7 +1653,7 @@ input:focus-visible {
 .vote__lock:disabled,
 .judge__submit:disabled {
   color: var(--theme-muted);
-  background: var(--theme-surface-strong);
+  background: var(--theme-elevated);
 }
 
 .surface--admin {
@@ -2748,23 +2898,34 @@ input:focus-visible {
   color: #fff !important;
   font-weight: 900;
 }
+/*
+ * The default theme (Navy Bismarck, web palette) so the first paint is already
+ * a real theme. `applyShowTheme` overwrites every one of these from the show's
+ * authoritative configuration; the values are kept in step with shared/themes.ts.
+ */
 :root {
   --theme-background: #071a2b;
   --theme-surface: #0d2436;
-  --theme-surface-strong: #123047;
+  --theme-elevated: #123047;
   --theme-text: #f3f7f9;
-  --theme-muted: #a3b6be;
-  --theme-accent: #497183;
-  --theme-accent-strong: #6f98a9;
+  --theme-muted: #adc0c9;
+  --theme-accent: #8bb5c5;
+  --theme-on-accent: #04121c;
+  --theme-accent-hover: #a9cfdb;
+  --theme-accent-active: #6f98a9;
   --theme-accent-soft: #173b50;
-  --theme-border: #234354;
-  --theme-focus: #8bb5c5;
+  --theme-border: #5b8296;
+  --theme-focus: #a9cfdb;
   --theme-hover: #16374c;
   --theme-active: #214c62;
   --theme-success: #4ee0a0;
+  --theme-on-success: #04120b;
   --theme-warning: #f4a34f;
-  --theme-danger: #f05d5e;
-  --theme-on-accent: #071a2b;
+  --theme-on-warning: #1c1003;
+  --theme-danger: #ff8b8b;
+  --theme-on-danger: #2a0407;
+  --theme-disabled: #153043;
+  --theme-on-disabled: #a3b6be;
   --theme-font: system-ui, sans-serif;
 }
 
@@ -2825,7 +2986,7 @@ body {
   position: relative;
   padding: 1.4rem 1rem 1.2rem;
   border-bottom: 1px solid var(--theme-border);
-  background: var(--theme-surface-strong);
+  background: var(--theme-elevated);
 }
 .setup-hq__hero::before,
 .act-editor__head::before {
@@ -2982,7 +3143,7 @@ body {
   border: 1px solid var(--theme-border);
   border-left: 5px solid var(--theme-accent);
   color: var(--theme-text);
-  background: var(--theme-surface-strong);
+  background: var(--theme-elevated);
 }
 .brand-preview small {
   color: var(--theme-accent);
@@ -3294,7 +3455,7 @@ body {
 .cue-form {
   background: color-mix(
     in srgb,
-    var(--theme-surface-strong) 55%,
+    var(--theme-elevated) 55%,
     var(--theme-surface)
   );
 }
@@ -3319,7 +3480,7 @@ body {
   padding: 0.65rem 1rem;
   border-top: 1px solid var(--theme-warning);
   color: var(--theme-text);
-  background: var(--theme-surface-strong);
+  background: var(--theme-elevated);
 }
 
 /* ============================= live reactions ============================= */
@@ -3425,4 +3586,190 @@ body {
     animation-duration: 450ms;
     animation-timing-function: linear;
   }
+}
+
+/* Setup: judge panel, unsaved-appearance notice and act presentation. */
+.setup-dirty {
+  grid-column: 1 / -1;
+  padding: 0.45rem 0.7rem;
+  border-left: 3px solid var(--theme-warning);
+  background: color-mix(in srgb, var(--theme-warning) 12%, transparent);
+  color: var(--theme-text);
+  font-size: 0.8rem;
+  font-weight: 700;
+}
+.judge-config {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+  padding: 0.9rem;
+  border: 1px solid var(--theme-border);
+}
+.judge-config legend {
+  padding: 0 0.4rem;
+  color: var(--theme-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.judge-config__count {
+  max-width: 12rem;
+}
+.judge-config__hint {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.8rem;
+}
+.judge-config__names {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+}
+.judge-config__error {
+  margin: 0;
+  color: var(--theme-danger);
+  font-weight: 700;
+}
+
+/* Act editor: audience opt-ins, the performance section and its drop zones. */
+.audience-fields,
+.performance-fields {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.9rem;
+  border: 1px solid var(--theme-border);
+}
+.audience-fields legend,
+.performance-fields legend {
+  padding: 0 0.4rem;
+  color: var(--theme-muted);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.audience-fields > p,
+.performance-fields > p {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.8rem;
+  line-height: 1.4;
+}
+.drop-zone {
+  display: grid;
+  gap: 0.5rem;
+}
+.drop-zone__label {
+  margin: 0;
+  color: var(--theme-text);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+.drop-zone__target {
+  display: grid;
+  place-items: center;
+  min-height: 5.5rem;
+  padding: 1rem;
+  border: 2px dashed var(--theme-border);
+  background: var(--theme-elevated);
+  color: var(--theme-muted);
+  text-align: center;
+  cursor: pointer;
+}
+.drop-zone__target.is-dragging {
+  border-color: var(--theme-accent);
+  background: var(--theme-accent-soft);
+  color: var(--theme-text);
+}
+.drop-zone__target input {
+  display: none;
+}
+.drop-zone__pick {
+  display: grid;
+  gap: 0.25rem;
+  color: var(--theme-muted);
+  font-size: 0.78rem;
+}
+.drop-zone__selected {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0.7rem;
+  border: 1px solid var(--theme-border);
+  background: var(--theme-surface);
+}
+.drop-zone__selected small {
+  color: var(--theme-muted);
+}
+.drop-zone__selected img,
+.drop-zone__selected video {
+  max-width: 100%;
+  max-height: 10rem;
+  object-fit: contain;
+}
+.drop-zone__selected audio {
+  width: 100%;
+}
+.drop-zone__state {
+  justify-self: start;
+  padding: 0.1rem 0.4rem;
+  background: var(--theme-warning);
+  color: var(--theme-on-warning);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.drop-zone__state--ready {
+  background: var(--theme-success);
+  color: var(--theme-on-success);
+}
+.advanced-cues {
+  border-top: 1px solid var(--theme-border);
+}
+.advanced-cues > summary {
+  display: grid;
+  gap: 0.15rem;
+  padding: 0.8rem 0;
+  color: var(--theme-text);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.advanced-cues > summary small {
+  color: var(--theme-muted);
+  font-weight: 500;
+  letter-spacing: 0;
+}
+.cue-list__derived {
+  margin-left: 0.4rem;
+  padding: 0.05rem 0.3rem;
+  background: var(--theme-accent-soft);
+  color: var(--theme-text);
+  font-size: 0.6rem;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+}
+.cue-form__derived {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.78rem;
+}
+
+/* Standing projector readiness in the console status bar. */
+.projector-readout {
+  padding: 0.16rem 0.45rem;
+  border: 1px solid var(--admin-warning);
+  color: var(--admin-warning);
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  white-space: nowrap;
+}
+.projector-readout.is-ready {
+  border-color: var(--admin-live);
+  color: var(--admin-live);
 }

@@ -281,14 +281,17 @@ export function editCue(
 ): boolean {
   return storage.transactionSync(() => {
     const cue = storage.sql
-      .exec<{ act_id: string }>(
-        "SELECT act_id FROM cues WHERE show_id = ? AND id = ?",
+      .exec<{ act_id: string; origin: string }>(
+        "SELECT act_id, origin FROM cues WHERE show_id = ? AND id = ?",
         showIdentifier,
         requestedId,
       )
       .toArray()[0];
+    // A derived cue belongs to the act's Performance settings. Editing it here
+    // would be silently undone the next time the act is saved.
     if (
       !cue ||
+      cue.origin === "SIMPLE" ||
       cueValidationState(storage.sql, showIdentifier, input.operations) !==
         "VALID"
     )
@@ -373,13 +376,13 @@ export function deleteCue(
 ): boolean {
   return storage.transactionSync(() => {
     const cue = storage.sql
-      .exec<{ act_id: string; position: number }>(
-        "SELECT act_id, position FROM cues WHERE show_id = ? AND id = ?",
+      .exec<{ act_id: string; position: number; origin: string }>(
+        "SELECT act_id, position, origin FROM cues WHERE show_id = ? AND id = ?",
         showIdentifier,
         requestedId,
       )
       .toArray()[0];
-    if (!cue) return false;
+    if (!cue || cue.origin === "SIMPLE") return false;
     const timestamp = new Date().toISOString();
     storage.sql.exec(
       "DELETE FROM cue_asset_references WHERE show_id = ? AND cue_id = ?",
@@ -414,18 +417,22 @@ export function replaceCueOrder(
   ids: readonly string[],
 ): boolean {
   return storage.transactionSync(() => {
-    const existing = storage.sql
-      .exec<{ id: string }>(
-        "SELECT id FROM cues WHERE show_id = ? AND act_id = ? ORDER BY position",
+    const rows = storage.sql
+      .exec<{ id: string; origin: string }>(
+        "SELECT id, origin FROM cues WHERE show_id = ? AND act_id = ? ORDER BY position",
         showIdentifier,
         actIdentifier,
       )
-      .toArray()
-      .map((row) => row.id);
+      .toArray();
+    const existing = rows.map((row) => row.id);
+    const derived = rows.find((row) => row.origin === "SIMPLE");
     if (
       existing.length !== ids.length ||
       new Set(ids).size !== ids.length ||
-      ids.some((id) => !existing.includes(id))
+      ids.some((id) => !existing.includes(id)) ||
+      // The derived PERFORMANCE cue is always the act's first cue, so GO always
+      // means "start this performance".
+      (derived !== undefined && ids[0] !== derived.id)
     )
       return false;
     const timestamp = new Date().toISOString();

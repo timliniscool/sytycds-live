@@ -72,8 +72,6 @@ export default function AdminSurface() {
   const [password, setPassword] = useState("");
   const [loginError, setLoginError] = useState<string | null>(null);
   const [branding, setBranding] = useState<PublicConfig | null>(null);
-  useShowTheme(branding?.themeId, branding?.fontFamily);
-  useShowDocumentTitle(branding?.title, "Show control");
 
   useEffect(() => {
     void fetch("/api/public/config")
@@ -124,51 +122,92 @@ export default function AdminSurface() {
 
   if (authentication !== "signed-in") {
     return (
-      <main
-        className="surface surface--admin"
-        aria-labelledby="admin-login-title"
-      >
-        <header className="admin-login__head">
-          <p>{PLATFORM_NAME} / secured operator access</p>
-          <h1 id="admin-login-title">Operator sign-in</h1>
-          <span>{branding?.title ?? "Live event control"}</span>
-        </header>
-        {authentication === "checking" ? (
-          <p>Checking operator session…</p>
-        ) : (
-          <form onSubmit={submit}>
-            <label htmlFor="admin-username">Username</label>
-            <input
-              id="admin-username"
-              type="text"
-              autoComplete="username"
-              value={username}
-              onChange={(event) => setUsername(event.target.value)}
-              required
-            />
-            <label htmlFor="admin-password">Password</label>
-            <input
-              id="admin-password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-            <button type="submit" disabled={authentication === "submitting"}>
-              {authentication === "submitting"
-                ? "Signing in…"
-                : "Sign in to show control"}
-            </button>
-            {loginError && <p role="alert">{loginError}</p>}
-          </form>
-        )}
-        <footer>{PLATFORM_ATTRIBUTION}</footer>
-      </main>
+      <OperatorSignIn
+        authentication={authentication}
+        branding={branding}
+        loginError={loginError}
+        username={username}
+        password={password}
+        onUsername={setUsername}
+        onPassword={setPassword}
+        onSubmit={submit}
+      />
     );
   }
 
   return <Console />;
+}
+
+/**
+ * The sign-in screen owns the theme while there is no operator session, and
+ * the console owns it afterwards. Exactly one component writes the theme at any
+ * moment, so an unrefreshed cached branding value can never overwrite the
+ * authoritative one the coordinator just sent.
+ */
+function OperatorSignIn({
+  authentication,
+  branding,
+  loginError,
+  username,
+  password,
+  onUsername,
+  onPassword,
+  onSubmit,
+}: {
+  authentication: AuthenticationState;
+  branding: PublicConfig | null;
+  loginError: string | null;
+  username: string;
+  password: string;
+  onUsername: (value: string) => void;
+  onPassword: (value: string) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  useShowTheme(branding?.themeId, branding?.fontFamily);
+  useShowDocumentTitle(branding?.title, "Show control");
+  return (
+    <main
+      className="surface surface--admin"
+      aria-labelledby="admin-login-title"
+    >
+      <header className="admin-login__head">
+        <p>{PLATFORM_NAME} / secured operator access</p>
+        <h1 id="admin-login-title">Operator sign-in</h1>
+        <span>{branding?.title ?? "Live event control"}</span>
+      </header>
+      {authentication === "checking" ? (
+        <p>Checking operator session…</p>
+      ) : (
+        <form onSubmit={onSubmit}>
+          <label htmlFor="admin-username">Username</label>
+          <input
+            id="admin-username"
+            type="text"
+            autoComplete="username"
+            value={username}
+            onChange={(event) => onUsername(event.target.value)}
+            required
+          />
+          <label htmlFor="admin-password">Password</label>
+          <input
+            id="admin-password"
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => onPassword(event.target.value)}
+            required
+          />
+          <button type="submit" disabled={authentication === "submitting"}>
+            {authentication === "submitting"
+              ? "Signing in…"
+              : "Sign in to show control"}
+          </button>
+          {loginError && <p role="alert">{loginError}</p>}
+        </form>
+      )}
+      <footer>{PLATFORM_ATTRIBUTION}</footer>
+    </main>
+  );
 }
 
 /** HOLD and EMERGENCY are overrides and live in their own panel. */
@@ -242,6 +281,10 @@ function Console() {
   const projectorAcknowledgement = useRealtimeSelector(
     client,
     (state) => state.lastProjectorAcknowledgement,
+  );
+  const projectorTelemetry = useRealtimeSelector(
+    client,
+    (state) => state.projectorTelemetry,
   );
   useEffect(() => {
     client.connect();
@@ -387,6 +430,17 @@ function Console() {
             </button>
           ))}
         </nav>
+        {/* Standing readiness, not something the operator has to run a test
+            to discover. Audio can only be armed on the projector itself. */}
+        <strong
+          className={`projector-readout${projectorTelemetry?.armed ? " is-ready" : ""}`}
+        >
+          PROJECTOR {projectorTelemetry ? "CONNECTED" : "NO SIGNAL"} · AUDIO{" "}
+          {projectorTelemetry?.armed ? "ARMED" : "NOT ARMED"}
+        </strong>
+        {projection.runtime.blackScreen && (
+          <strong className="admin-status__alarm">SCREEN BLACKED OUT</strong>
+        )}
         {projection.show.displayMode === "EMERGENCY" && (
           <strong className="admin-status__alarm">EMERGENCY ON SCREEN</strong>
         )}

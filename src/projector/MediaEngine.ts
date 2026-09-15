@@ -52,7 +52,21 @@ interface StagedAudio {
 
 const LOAD_TIMEOUT_MS = 20_000;
 const MAX_REMEMBERED_EXECUTIONS = 64;
-const ARM_REQUIRED = "ARM SHOW / ENABLE AUDIO is required";
+export const ARM_REQUIRED = "ENABLE AUDIO & ENTER SHOW has not been pressed";
+
+/** One sample of silence: enough for a real play() without a sound in the hall. */
+const SILENT_WAV =
+  "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+
+type AudioContextConstructor = new () => AudioContext;
+
+function audioContextConstructor(): AudioContextConstructor | null {
+  const scope = globalThis as {
+    AudioContext?: AudioContextConstructor;
+    webkitAudioContext?: AudioContextConstructor;
+  };
+  return scope.AudioContext ?? scope.webkitAudioContext ?? null;
+}
 
 function isMediaVisual(
   visual: VisualCue | null,
@@ -144,7 +158,13 @@ function loadVideo(source: string): Promise<HTMLVideoElement> {
  */
 export class ProjectorMediaEngine {
   private host: HTMLElement | null = null;
-  private audio: HTMLAudioElement = new Audio();
+  /**
+   * One element for the whole page session. Browsers grant playback permission
+   * per element, so replacing it on every cue would silently re-lock the show's
+   * backing audio after arming; only its `src` ever changes.
+   */
+  private readonly audio: HTMLAudioElement = new Audio();
+  private audioContext: AudioContext | null = null;
   private audioAssetId: string | null = null;
   private frame: Frame | null = null;
   private stagedVisual: StagedVisual | null = null;
@@ -173,7 +193,7 @@ export class ProjectorMediaEngine {
   private held = false;
 
   constructor(private readonly options: MediaEngineOptions) {
-    this.adoptAudio(this.audio);
+    this.bindAudio();
   }
 
   attach(host: HTMLElement): void {
@@ -182,33 +202,116 @@ export class ProjectorMediaEngine {
       host.append(this.frame.element);
   }
 
-  /** A muted, user-initiated play unlocks the media pipeline without sound. */
+  /**
+   * Must be called from a real click *in this browser*. A click on the
+   * operator's machine is not a user gesture here, so nothing the admin console
+   * does can arm the hall; only the projector itself can.
+   *
+   * Two things are actually unlocked, and `armed` is set only if both succeed:
+   * the Web Audio context (which starts suspended until a gesture resumes it)
+   * and the very element that will carry the show's backing audio (on iOS the
+   * permission is granted per element, so unlocking a throwaway probe proves
+   * nothing). The test plays unmuted at zero volume: muted playback is exempt
+   * from the autoplay policy and would therefore always "succeed".
+   */
   async arm(): Promise<boolean> {
-    try {
-      const probe = new Audio();
-      probe.muted = true;
-      // A silent one-sample WAV keeps the gesture inside this document.
-      probe.src =
-        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
-      await probe.play();
-      probe.pause();
-      this.armed = true;
-      this.error = null;
-      this.emit();
-      if (this.lastTarget) {
-        const { runtime, cues } = this.lastTarget;
-        void this.reconcile(runtime, cues);
-      }
-      return true;
-    } catch {
-      this.error = "Browser did not enable audio";
+    const context = await this.resumeAudioContext();
+    const element = await this.unlockAudioElement();
+    if (!context.ok || !element.ok) {
+      this.armed = false;
+      this.error = context.ok
+        ? element.detail
+        : element.ok
+          ? context.detail
+          : `${context.detail}; ${element.detail}`;
       this.emit();
       return false;
+    }
+    this.armed = true;
+    if (this.error === ARM_REQUIRED) this.error = null;
+    this.emit();
+    if (this.lastTarget) {
+      const { runtime, cues } = this.lastTarget;
+      void this.reconcile(runtime, cues);
+    }
+    return true;
+  }
+
+  isArmed(): boolean {
+    return this.armed;
+  }
+
+  private async resumeAudioContext(): Promise<{
+    ok: boolean;
+    detail: string;
+  }> {
+    const Constructor = audioContextConstructor();
+    // A browser with no Web Audio can still play media elements; the element
+    // test below is then the whole of the proof.
+    if (!Constructor) return { ok: true, detail: "no Web Audio" };
+    try {
+      this.audioContext ??= new Constructor();
+      if (this.audioContext.state !== "running")
+        await this.audioContext.resume();
+      return this.audioContext.state === "running"
+        ? { ok: true, detail: "audio context running" }
+        : {
+            ok: false,
+            detail: `audio context is ${this.audioContext.state}`,
+          };
+    } catch (error: unknown) {
+      return {
+        ok: false,
+        detail:
+          error instanceof Error
+            ? error.message
+            : "audio context could not start",
+      };
+    }
+  }
+
+  private async unlockAudioElement(): Promise<{
+    ok: boolean;
+    detail: string;
+  }> {
+    const element = this.audio;
+    // Already audible: the pipeline is demonstrably unlocked and must not be
+    // interrupted to prove it again.
+    if (!element.paused && !element.ended)
+      return { ok: true, detail: "already playing" };
+    const loadedSource = this.audioAssetId !== null;
+    const restoreTime = element.currentTime;
+    const restoreVolume = element.volume;
+    element.muted = false;
+    element.volume = 0;
+    try {
+      if (!loadedSource) element.src = SILENT_WAV;
+      await element.play();
+      element.pause();
+      if (loadedSource) {
+        element.currentTime = restoreTime;
+      } else {
+        element.removeAttribute("src");
+        element.load();
+      }
+      return { ok: true, detail: "media element unlocked" };
+    } catch (error: unknown) {
+      return {
+        ok: false,
+        detail:
+          error instanceof Error
+            ? error.message
+            : "browser refused to enable audio",
+      };
+    } finally {
+      element.volume = restoreVolume;
     }
   }
 
   dispose(): void {
     this.disposed = true;
+    void this.audioContext?.close().catch(() => undefined);
+    this.audioContext = null;
     this.releaseAudio();
     this.clearFrame();
     this.stagedVisual = null;
@@ -588,18 +691,19 @@ export class ProjectorMediaEngine {
     this.visual = "IDLE";
   }
 
+  /**
+   * Points the one unlocked element at a new asset. Staging warmed the browser
+   * cache, so this is a cache read rather than a second download.
+   */
   private loadAudio(assetId: string): void {
     this.releaseAudio();
     if (this.stagedAudio?.assetId === assetId) {
-      this.audio = this.stagedAudio.element;
+      this.stagedAudio.element.removeAttribute("src");
       this.stagedAudio = null;
-    } else {
-      this.audio = new Audio();
-      this.audio.preload = "auto";
-      this.audio.src = assetUrl(assetId);
-      this.audio.load();
     }
-    this.adoptAudio(this.audio);
+    this.audio.preload = "auto";
+    this.audio.src = assetUrl(assetId);
+    this.audio.load();
     this.audioAssetId = assetId;
     this.audioState = "LOADED";
   }
@@ -607,8 +711,6 @@ export class ProjectorMediaEngine {
   private unloadAudio(): void {
     if (!this.audioAssetId) return;
     this.releaseAudio();
-    this.audio = new Audio();
-    this.adoptAudio(this.audio);
     this.audioAssetId = null;
     this.audioState = "IDLE";
   }
@@ -619,24 +721,23 @@ export class ProjectorMediaEngine {
     this.audio.load();
   }
 
-  private adoptAudio(audio: HTMLAudioElement): void {
-    const current = () => this.audio === audio;
+  /** Bound once, because the element lives as long as the page does. */
+  private bindAudio(): void {
+    const audio = this.audio;
     audio.addEventListener("playing", () => {
-      if (current()) this.setAudio("PLAYING");
+      if (this.audioAssetId) this.setAudio("PLAYING");
     });
     audio.addEventListener("pause", () => {
-      if (current() && this.audioAssetId)
-        this.setAudio(audio.ended ? "ENDED" : "PAUSED");
+      if (this.audioAssetId) this.setAudio(audio.ended ? "ENDED" : "PAUSED");
     });
     audio.addEventListener("ended", () => {
-      if (current()) {
-        this.setAudio("ENDED");
-        if (this.playbackExecutionId)
-          this.ack(this.playbackExecutionId, true, "ENDED");
-      }
+      if (!this.audioAssetId) return;
+      this.setAudio("ENDED");
+      if (this.playbackExecutionId)
+        this.ack(this.playbackExecutionId, true, "ENDED");
     });
     audio.addEventListener("error", () => {
-      if (current() && this.audioAssetId) this.fail("audio media error");
+      if (this.audioAssetId) this.fail("audio media error");
     });
   }
 

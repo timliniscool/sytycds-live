@@ -103,6 +103,24 @@ export function deriveVoteView(inputs: VoteInputs): VoteView {
   return sawVotingOpen ? { kind: "CLOSED", act } : { kind: "ACT", act };
 }
 
+/**
+ * Closing audience voting must never submit anything. Selecting a score is a
+ * purely local choice; only LOCK IN, confirmed, may start a submission. So when
+ * the operator closes voting, a selected-but-not-locked score is discarded and
+ * the phone moves to "voting closed" with nothing sent.
+ *
+ * A submission already in flight is deliberately left alone: the server has it
+ * and is the only thing that decides whether it counted, so this phone waits
+ * for that answer rather than inventing one.
+ */
+export function discardUnlockedSelection(
+  submission: VoteSubmission,
+): VoteSubmission {
+  return submission.kind === "selected" || submission.kind === "confirming"
+    ? { kind: "idle" }
+    : submission;
+}
+
 /** The connection states worth interrupting a voter about. */
 export function connectionNotice(
   connection: RealtimeConnectionState,

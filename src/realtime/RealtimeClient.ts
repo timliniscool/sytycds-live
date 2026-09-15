@@ -294,12 +294,19 @@ export class RealtimeClient {
   private retryTimer: number | null = null;
   private retryAttempt = 0;
   private disposed = false;
+  /**
+   * True only between `connect()` and `destroy()`. Browser events must never
+   * open a socket the surface has not asked for: a projector waiting for its
+   * pairing code would otherwise connect without a credential the moment the
+   * operator switched tabs, be refused, and latch UNAUTHORISED for good.
+   */
+  private started = false;
   private online =
     typeof navigator === "undefined" || navigator.onLine !== false;
   private state: RealtimeState = INITIAL_STATE;
   private readonly onOnline = () => {
     this.online = true;
-    this.connect();
+    if (this.started) this.connect();
   };
   private readonly onOffline = () => {
     this.online = false;
@@ -315,7 +322,8 @@ export class RealtimeClient {
   private readonly onVisibilityChange = () => {
     if (
       typeof document === "undefined" ||
-      document.visibilityState !== "visible"
+      document.visibilityState !== "visible" ||
+      !this.started
     ) {
       return;
     }
@@ -343,6 +351,7 @@ export class RealtimeClient {
       this.disposed = false;
       this.listenToBrowser();
     }
+    this.started = true;
     if (!this.online || this.socket || this.isTerminal()) {
       return;
     }
@@ -396,6 +405,43 @@ export class RealtimeClient {
         this.scheduleReconnect();
       }
     };
+  }
+
+  /**
+   * The credential this connection authenticates with has changed — a display
+   * has just paired, or an operator has signed in again. UNAUTHORISED is
+   * terminal on purpose (retrying a rejected token loops forever), so it has to
+   * be cleared deliberately here. Any socket opened under the old credential is
+   * closed and replaced, because the coordinator reads the session cookie once,
+   * during the WebSocket handshake; only a new handshake carries the new one.
+   */
+  reconnectWithNewCredential(): void {
+    if (this.retryTimer !== null) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+    this.retryAttempt = 0;
+    const stale = this.socket;
+    this.socket = null;
+    // Detached first, so its close handler cannot schedule a retry or overwrite
+    // the state of the connection that replaces it.
+    if (stale) {
+      stale.onopen = null;
+      stale.onmessage = null;
+      stale.onerror = null;
+      stale.onclose = null;
+      try {
+        stale.close(1000, "Credential replaced");
+      } catch {
+        // A socket that is already gone needs no closing.
+      }
+    }
+    this.publish({
+      ...this.state,
+      connection: "CONNECTING",
+      lastError: null,
+    });
+    this.connect();
   }
 
   send(message: ClientMessage): boolean {
@@ -471,6 +517,7 @@ export class RealtimeClient {
 
   destroy(): void {
     this.disposed = true;
+    this.started = false;
     if (this.retryTimer !== null) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;

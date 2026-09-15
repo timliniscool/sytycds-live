@@ -13,12 +13,12 @@ import {
   submitAudienceVote,
 } from "../worker/audience-votes";
 import {
-  createJudges,
   listJudges,
   revokeJudge,
   rotateJudgeToken,
 } from "../worker/judge-lifecycle";
 import { tokenHash } from "../worker/security";
+import { applyScoringConfiguration } from "../worker/scoring-config";
 import { PRIMARY_SHOW_ID } from "../worker/show-state";
 
 const now = "2026-09-14T00:00:00.000Z";
@@ -210,18 +210,29 @@ describe("admin sessions, anonymous voters, and judge tokens", () => {
     });
   });
 
-  it("creates exactly four hashed judge tokens and makes rotation revoke the old URL", async () => {
+  it("issues one hashed token per configured judge and makes rotation revoke the old URL", async () => {
     await withShow("security-judges", async (storage) => {
-      const issued = await createJudges(storage, PRIMARY_SHOW_ID, [
-        "A",
-        "B",
-        "C",
-        "D",
-      ]);
+      const configured = await applyScoringConfiguration(
+        storage,
+        PRIMARY_SHOW_ID,
+        {
+          judgeNames: ["A", "B", "C", "D"],
+          audienceWeight: 0.5,
+          reset: false,
+          confirm: null,
+        },
+      );
+      const issued = configured.ok ? configured.issued : null;
       expect(issued).toHaveLength(4);
-      expect(
-        await createJudges(storage, PRIMARY_SHOW_ID, ["E", "F", "G", "H"]),
-      ).toBeNull();
+      // Re-applying the same panel issues nothing new: the judges already exist
+      // and their links are unchanged.
+      const again = await applyScoringConfiguration(storage, PRIMARY_SHOW_ID, {
+        judgeNames: ["A", "B", "C", "D"],
+        audienceWeight: 0.5,
+        reset: false,
+        confirm: null,
+      });
+      expect(again.ok && again.issued).toHaveLength(0);
       const first = issued?.[0];
       if (!first) {
         throw new Error("Expected first judge");

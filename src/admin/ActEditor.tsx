@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
 import type {
+  ActPresentation,
   AdminAct,
   CueOperation,
   MediaAsset,
@@ -15,6 +16,13 @@ interface ActDraft {
   publicDescription: string;
   internalNotes: string;
   publicImageAssetId: string;
+  showDescriptionToAudience: boolean;
+  showImageToAudience: boolean;
+  performanceMode: ActPresentation["performanceMode"];
+  performanceAssetId: string;
+  performanceFit: ActPresentation["performanceFit"];
+  backingAudioAssetId: string;
+  backingAudioStart: ActPresentation["backingAudioStart"];
 }
 
 const EMPTY_ACT: ActDraft = {
@@ -25,6 +33,13 @@ const EMPTY_ACT: ActDraft = {
   publicDescription: "",
   internalNotes: "",
   publicImageAssetId: "",
+  showDescriptionToAudience: false,
+  showImageToAudience: false,
+  performanceMode: "DEFAULT",
+  performanceAssetId: "",
+  performanceFit: "contain",
+  backingAudioAssetId: "",
+  backingAudioStart: "MANUAL",
 };
 
 type VisualChoice =
@@ -66,8 +81,28 @@ function actDraft(act: AdminAct | null): ActDraft {
         publicDescription: act.publicDescription,
         internalNotes: act.internalNotes,
         publicImageAssetId: act.publicImageAssetId ?? "",
+        showDescriptionToAudience: act.showDescriptionToAudience,
+        showImageToAudience: act.showImageToAudience,
+        performanceMode: act.presentation.performanceMode,
+        performanceAssetId: act.presentation.performanceAssetId ?? "",
+        performanceFit: act.presentation.performanceFit,
+        backingAudioAssetId: act.presentation.backingAudioAssetId ?? "",
+        backingAudioStart: act.presentation.backingAudioStart,
       }
     : { ...EMPTY_ACT };
+}
+
+function describeAsset(asset: MediaAsset): string {
+  const size = `${(asset.sizeBytes / 1_048_576).toFixed(1)} MB`;
+  const duration =
+    asset.durationMs === null
+      ? null
+      : `${Math.floor(asset.durationMs / 60_000)}:${String(
+          Math.round((asset.durationMs % 60_000) / 1000),
+        ).padStart(2, "0")}`;
+  const dimensions =
+    asset.width && asset.height ? `${asset.width}x${asset.height}` : null;
+  return [duration, dimensions, size].filter(Boolean).join(" · ");
 }
 
 function cueDraft(cue: PersistedCue | null): CueDraft {
@@ -254,8 +289,22 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        ...draft,
+        performerName: draft.performerName,
+        schoolYear: draft.schoolYear,
+        actName: draft.actName,
+        actType: draft.actType,
+        publicDescription: draft.publicDescription,
+        internalNotes: draft.internalNotes,
         publicImageAssetId: draft.publicImageAssetId || null,
+        showDescriptionToAudience: draft.showDescriptionToAudience,
+        showImageToAudience: draft.showImageToAudience,
+        presentation: {
+          performanceMode: draft.performanceMode,
+          performanceAssetId: draft.performanceAssetId || null,
+          performanceFit: draft.performanceFit,
+          backingAudioAssetId: draft.backingAudioAssetId || null,
+          backingAudioStart: draft.backingAudioStart,
+        },
       }),
     });
     const result = (await response.json().catch(() => null)) as {
@@ -311,8 +360,9 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     );
   }
 
-  function uploadFile(file: File): Promise<void> {
-    return new Promise((resolve) => {
+  /** Resolves with the new asset's ID so a drop zone can select what it uploaded. */
+  function uploadFile(file: File): Promise<string | null> {
+    return new Promise<string | null>((resolve) => {
       const xhr = new XMLHttpRequest();
       xhr.open(
         "POST",
@@ -359,10 +409,10 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
               );
             }
             await refreshAssets();
-          })().finally(resolve);
+          })().finally(() => resolve(assetId));
         } else {
           setNotice(`${file.name} failed (HTTP ${xhr.status}).`);
-          resolve();
+          resolve(null);
         }
       };
       xhr.onerror = () => {
@@ -372,7 +422,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
           return next;
         });
         setNotice(`${file.name} could not be uploaded.`);
-        resolve();
+        resolve(null);
       };
       setUploading((current) => ({ ...current, [file.name]: 0 }));
       xhr.send(file);
@@ -699,7 +749,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                   />
                 </label>
                 <label className="act-form__wide">
-                  Public image
+                  Act image
                   <select
                     value={draft.publicImageAssetId}
                     onChange={(event) =>
@@ -714,6 +764,124 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                     ))}
                   </select>
                 </label>
+                <fieldset className="act-form__wide audience-fields">
+                  <legend>On audience phones</legend>
+                  <p>
+                    Phones always receive the act name, the performer and the
+                    year or group. These two are opt-in, and when they are off
+                    the server does not send them at all.
+                  </p>
+                  <label className="switch-row">
+                    <input
+                      type="checkbox"
+                      checked={draft.showDescriptionToAudience}
+                      onChange={(event) =>
+                        updateAct(
+                          "showDescriptionToAudience",
+                          event.target.checked,
+                        )
+                      }
+                    />
+                    <span>Show description on audience phones</span>
+                  </label>
+                  <label className="switch-row">
+                    <input
+                      type="checkbox"
+                      checked={draft.showImageToAudience}
+                      onChange={(event) =>
+                        updateAct("showImageToAudience", event.target.checked)
+                      }
+                    />
+                    <span>Show act image on audience phones</span>
+                  </label>
+                </fieldset>
+                <fieldset className="act-form__wide performance-fields">
+                  <legend>Performance</legend>
+                  <p>
+                    Every act already has a finished performance screen: its
+                    name, performer and year, centred on the projector. Override
+                    it only when this act has its own visual.
+                  </p>
+                  <label className="switch-row">
+                    <input
+                      type="checkbox"
+                      checked={draft.performanceMode === "CUSTOM"}
+                      onChange={(event) =>
+                        updateAct(
+                          "performanceMode",
+                          event.target.checked ? "CUSTOM" : "DEFAULT",
+                        )
+                      }
+                    />
+                    <span>Use custom performance visual</span>
+                  </label>
+                  {draft.performanceMode === "CUSTOM" && (
+                    <>
+                      <MediaDropZone
+                        label="PERFORMANCE VISUAL"
+                        hint="an image or video"
+                        accept="image/jpeg,image/png,image/webp,video/mp4,video/webm"
+                        assets={visualAssets}
+                        selectedId={draft.performanceAssetId}
+                        busy={busy}
+                        onSelect={(id) => updateAct("performanceAssetId", id)}
+                        onUpload={uploadFile}
+                      />
+                      <label>
+                        Image framing
+                        <select
+                          value={draft.performanceFit}
+                          onChange={(event) =>
+                            updateAct(
+                              "performanceFit",
+                              event.target.value === "cover"
+                                ? "cover"
+                                : "contain",
+                            )
+                          }
+                        >
+                          <option value="contain">
+                            Show the whole image (never cropped or stretched)
+                          </option>
+                          <option value="cover">Crop to fill the screen</option>
+                        </select>
+                      </label>
+                    </>
+                  )}
+                  <MediaDropZone
+                    label="BACKING AUDIO"
+                    hint="an MP3, WAV or other audio file"
+                    accept="audio/mpeg,audio/mp4,audio/ogg,audio/wav,video/mp4,video/webm"
+                    assets={audioAssets}
+                    selectedId={draft.backingAudioAssetId}
+                    busy={busy}
+                    onSelect={(id) => updateAct("backingAudioAssetId", id)}
+                    onUpload={uploadFile}
+                  />
+                  {draft.backingAudioAssetId && (
+                    <label>
+                      Start backing audio
+                      <select
+                        value={draft.backingAudioStart}
+                        onChange={(event) =>
+                          updateAct(
+                            "backingAudioStart",
+                            event.target.value === "PERFORMANCE"
+                              ? "PERFORMANCE"
+                              : "MANUAL",
+                          )
+                        }
+                      >
+                        <option value="MANUAL">
+                          Manually, when the operator presses GO
+                        </option>
+                        <option value="PERFORMANCE">
+                          Automatically, when PERFORMANCE begins
+                        </option>
+                      </select>
+                    </label>
+                  )}
+                </fieldset>
                 <div className="editor-actions act-form__wide">
                   <button type="submit" disabled={busy}>
                     {creating ? "ADD TO RUNNING ORDER" : "SAVE ACT"}
@@ -733,7 +901,18 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
             </section>
 
             {!creating && selected && (
-              <>
+              // Everything an ordinary act needs is above. The media library
+              // and the cue engine are still here in full, one disclosure away,
+              // for the acts that genuinely need hand-built sequences.
+              <details className="advanced-cues">
+                <summary>
+                  Advanced cues and media library
+                  <small>
+                    {selected.cues.length} cue
+                    {selected.cues.length === 1 ? "" : "s"} · the derived
+                    PERFORMANCE cue is managed for you
+                  </small>
+                </summary>
                 <section className="editor-section media-library">
                   <div className="editor-section__title">
                     <h3>Media library</h3>
@@ -855,7 +1034,12 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                         className={cueId === item.id ? "is-active" : ""}
                       >
                         <button type="button" onClick={() => setCueId(item.id)}>
-                          <b>{item.operatorLabel}</b>
+                          <b>
+                            {item.operatorLabel}
+                            {item.origin === "SIMPLE" && (
+                              <em className="cue-list__derived">AUTO</em>
+                            )}
+                          </b>
                           <small>
                             {item.operations
                               .map((operation) =>
@@ -890,6 +1074,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                           </button>
                           <button
                             type="button"
+                            disabled={item.origin === "SIMPLE"}
                             onClick={() => void cueAction("delete", item)}
                           >
                             DEL
@@ -1071,12 +1256,21 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                         }
                       />
                     </label>
-                    <button type="submit">
+                    <button
+                      type="submit"
+                      disabled={currentCue?.origin === "SIMPLE"}
+                    >
                       {currentCue ? "SAVE CUE" : "ADD CUE"}
                     </button>
+                    {currentCue?.origin === "SIMPLE" && (
+                      <p className="cue-form__derived">
+                        This cue is derived from the act's Performance settings
+                        above. Change it there and it is rebuilt.
+                      </p>
+                    )}
                   </form>
                 </section>
-              </>
+              </details>
             )}
           </>
         ) : (
@@ -1090,6 +1284,122 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
         <output className="editor-notice" role="status">
           {notice}
         </output>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The upload affordance an ordinary operator expects: drop a file on it, or
+ * click to choose one. Nothing here knows about cues; it only produces an
+ * asset ID for the act field it belongs to.
+ */
+function MediaDropZone({
+  label,
+  hint,
+  accept,
+  assets,
+  selectedId,
+  busy,
+  onSelect,
+  onUpload,
+}: {
+  label: string;
+  hint: string;
+  accept: string;
+  assets: readonly MediaAsset[];
+  selectedId: string;
+  busy: boolean;
+  onSelect: (assetId: string) => void;
+  onUpload: (file: File) => Promise<string | null>;
+}) {
+  const [dragging, setDragging] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const selected = assets.find((asset) => asset.id === selectedId) ?? null;
+
+  async function accept_(file: File | undefined): Promise<void> {
+    if (!file) return;
+    setUploading(true);
+    const id = await onUpload(file);
+    setUploading(false);
+    if (id) onSelect(id);
+  }
+
+  return (
+    <div className="drop-zone">
+      <p className="drop-zone__label">{label}</p>
+      <label
+        className={`drop-zone__target${dragging ? " is-dragging" : ""}`}
+        onDragOver={(event) => {
+          event.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(event) => {
+          event.preventDefault();
+          setDragging(false);
+          void accept_(event.dataTransfer.files[0]);
+        }}
+      >
+        <span>
+          {uploading
+            ? "Uploading…"
+            : dragging
+              ? "Release to upload"
+              : `Drop ${hint} here, or click to choose a file`}
+        </span>
+        <input
+          type="file"
+          accept={accept}
+          disabled={busy || uploading}
+          onChange={(event) => {
+            void accept_(event.target.files?.[0]);
+            event.target.value = "";
+          }}
+        />
+      </label>
+      {assets.length > 0 && (
+        <label className="drop-zone__pick">
+          or reuse an uploaded file
+          <select
+            value={selectedId}
+            onChange={(event) => onSelect(event.target.value)}
+          >
+            <option value="">None</option>
+            {assets.map((asset) => (
+              <option key={asset.id} value={asset.id}>
+                {asset.originalFilename}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+      {selected && (
+        <div className="drop-zone__selected">
+          <b>{selected.originalFilename}</b>
+          <small>{describeAsset(selected)}</small>
+          <span
+            className={
+              selected.durationMs === null && !selected.width
+                ? "drop-zone__state"
+                : "drop-zone__state drop-zone__state--ready"
+            }
+          >
+            {selected.durationMs === null && !selected.width
+              ? "UPLOADED — metadata not read"
+              : "READY"}
+          </span>
+          {selected.mimeType.startsWith("audio/") ? (
+            <audio src={assetUrl(selected)} controls preload="metadata" />
+          ) : selected.mimeType.startsWith("video/") ? (
+            <video src={assetUrl(selected)} controls preload="metadata" />
+          ) : (
+            <img src={assetUrl(selected)} alt="" />
+          )}
+          <button type="button" onClick={() => onSelect("")}>
+            REMOVE
+          </button>
+        </div>
       )}
     </div>
   );

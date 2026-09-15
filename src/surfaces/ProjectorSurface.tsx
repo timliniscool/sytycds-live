@@ -11,6 +11,7 @@ import { cacheStorageAvailable, probeAssets } from "../projector/preflight";
 import {
   ActCardGraphic,
   EmergencyGraphic,
+  PerformanceGraphic,
   HoldGraphic,
   HoldingGraphic,
   IntermissionGraphic,
@@ -49,6 +50,14 @@ export default function ProjectorSurface() {
   );
   const [pairingCode, setPairingCode] = useState("");
   const [pairingError, setPairingError] = useState<string | null>(null);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  /**
+   * The operator has pressed ENABLE AUDIO & ENTER SHOW, or has deliberately
+   * continued without sound. Until then the gate covers the output, so the
+   * gesture the browser needs is impossible to walk past by accident.
+   */
+  const [enteredShow, setEnteredShow] = useState(false);
+  const [armError, setArmError] = useState<string | null>(null);
   const [media, setMedia] = useState(INITIAL_MEDIA);
   const [cache, setCache] = useState<MediaCacheSummary | null>(null);
   const [diagnostics, setDiagnostics] = useState(false);
@@ -98,29 +107,69 @@ export default function ProjectorSurface() {
       .catch(() => setPairing("unpaired"));
   }, []);
 
+  // No socket is opened before this display holds a session. An unpaired
+  // connection would be refused, and a refused connection is terminal.
   useEffect(() => {
     if (pairing !== "paired") return;
     client.connect();
     return () => client.destroy();
   }, [client, pairing]);
 
+  // The coordinator refused this display: its session was revoked or expired.
+  // That is a pairing state, not a dead end, so the display asks for a code
+  // again rather than sitting on "not authorised" until somebody reloads it.
+  useEffect(() => {
+    if (connection !== "UNAUTHORISED") return;
+    setPairing("unpaired");
+    setEnteredShow(false);
+    setPairingError("This display is no longer paired. Enter a new code.");
+  }, [connection]);
+
+  /**
+   * Pairing is a credential transition, not a page load. The coordinator reads
+   * the projector session cookie once, during the WebSocket handshake, so the
+   * unauthorised socket has to be replaced by a new one that carries the cookie
+   * this response just set. The authorised socket then asks for the snapshot
+   * itself, and the display moves straight to live output.
+   */
   async function pair(): Promise<void> {
     setPairingError(null);
-    const response = await fetch("/api/projector/pair", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code: pairingCode }),
-    });
-    const result = (await response.json().catch(() => null)) as {
-      error?: string;
-    } | null;
-    if (!response.ok) {
-      setPairingError(result?.error ?? "Pairing failed");
+    setPairingBusy(true);
+    try {
+      const response = await fetch("/api/projector/pair", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: pairingCode }),
+      });
+      const result = (await response.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      if (!response.ok) {
+        setPairingError(result?.error ?? "Pairing failed");
+        return;
+      }
+      setPairingCode("");
+      setPairing("paired");
+      client.reconnectWithNewCredential();
+    } catch {
+      setPairingError("The show server could not be reached. Try again.");
+    } finally {
+      setPairingBusy(false);
+    }
+  }
+
+  async function enableAudioAndEnter(): Promise<void> {
+    const engine = engineRef.current;
+    if (!engine) {
+      setArmError("The media engine is not ready yet. Try again in a moment.");
       return;
     }
-    setPairingCode("");
-    setPairing("paired");
+    const armed = await engine.arm();
+    setArmError(
+      armed ? null : "This browser refused to enable audio. Try again.",
+    );
+    if (armed) setEnteredShow(true);
   }
 
   useEffect(() => {
@@ -260,6 +309,7 @@ export default function ProjectorSurface() {
   }, []);
 
   const scene = deriveScene(projection, connection, window.location.origin);
+  const blackout = scene.base.kind === "BLACKOUT";
   const degraded = connection !== "LIVE";
   const aggregate = projection?.activeAct
     ? (aggregates.get(projection.activeAct.id) ??
@@ -304,9 +354,11 @@ export default function ProjectorSurface() {
             />
             <button
               type="submit"
-              disabled={pairingCode.replace(/\s/gu, "").length !== 8}
+              disabled={
+                pairingBusy || pairingCode.replace(/\s/gu, "").length !== 8
+              }
             >
-              PAIR DISPLAY
+              {pairingBusy ? "PAIRING…" : "PAIR DISPLAY"}
             </button>
             {pairingError && <p role="alert">{pairingError}</p>}
           </form>
@@ -335,7 +387,10 @@ export default function ProjectorSurface() {
       {scene.layer.kind === "TITLE_CARD" && (
         <TitleCardGraphic title={scene.layer.title} />
       )}
-      {scene.layer.kind === "BLACK" && <div className="projector-black" />}
+      {scene.base.kind === "BLACKOUT" && (
+        // True black over everything: no graphic, no text, no reaction lane.
+        <div className="projector-black" aria-hidden="true" />
+      )}
       {projection?.show.reactionsEnabled &&
         projection.show.displayMode !== "EMERGENCY" &&
         !projection.runtime.blackScreen && (
@@ -349,22 +404,54 @@ export default function ProjectorSurface() {
             clearKey={reactionClear?.commandId ?? null}
           />
         )}
-      {!media.armed && (
-        <>
-          <button
-            className="projector-arm"
-            type="button"
-            onClick={() => void engineRef.current?.arm()}
-          >
-            ARM SHOW / ENABLE AUDIO
-          </button>
-          <p className="projector-arm__help">
-            A projector operator must enable sound once after opening this page.
-          </p>
-        </>
+      {!media.armed && !enteredShow && (
+        // Browsers only unlock sound from a gesture made in *this* browser, so
+        // the gate has to be pressed on the display itself. It covers the
+        // output until it is, which is also how the operator knows to do it.
+        <div className="projector-gate" role="group" aria-label="Enable audio">
+          <div className="projector-gate__card">
+            <p className="projector-gate__kicker">{PLATFORM_NAME}</p>
+            <h2 className="projector-gate__title">This display is paired</h2>
+            <p className="projector-gate__detail">
+              Press this once, here on the projector machine, to unlock sound
+              for the whole show.
+            </p>
+            <button
+              className="projector-gate__enter"
+              type="button"
+              onClick={() => void enableAudioAndEnter()}
+            >
+              ENABLE AUDIO &amp; ENTER SHOW
+            </button>
+            <button
+              className="projector-gate__skip"
+              type="button"
+              onClick={() => setEnteredShow(true)}
+            >
+              Continue without audio
+            </button>
+            {armError && (
+              <p className="projector-gate__error" role="alert">
+                {armError}
+              </p>
+            )}
+          </div>
+        </div>
       )}
-      {degraded && <i className="projector-link" aria-hidden="true" />}
-      {diagnostics && (
+      {!media.armed && enteredShow && (
+        // Entered without sound: small, out of the hall's way, still fixable.
+        <button
+          className="projector-arm"
+          type="button"
+          onClick={() => void enableAudioAndEnter()}
+        >
+          AUDIO NOT ARMED — ENABLE
+        </button>
+      )}
+      {degraded && !blackout && (
+        <i className="projector-link" aria-hidden="true" />
+      )}
+      {diagnostics && !blackout && (
         <output className="projector-diagnostics">
           <span>link {connection.toLowerCase()}</span>
           <span>rev {revision ?? "—"}</span>
@@ -418,6 +505,9 @@ function Base({
           headline={base.unauthorised ? "Display not authorised" : "Connecting"}
         />
       );
+    case "BLACKOUT":
+      // The blackout layer is the entire output; there is no base beneath it.
+      return null;
     case "LOBBY":
       return (
         <LobbyGraphic
@@ -430,10 +520,14 @@ function Base({
       return <ActCardGraphic act={base.act} />;
     case "STAND_BY":
       return <HoldingGraphic kicker="Up next" headline="Stand by" />;
-    case "STAGE":
-      // The performance belongs to the stage; the screen carries only what
-      // the visual channel commands, over black.
-      return <div className="stage stage--empty" />;
+    case "PERFORMANCE":
+      // With no custom visual commanded, the act's own performance screen is
+      // the output; with one, the visual layer above owns the whole frame.
+      return base.automatic && base.act ? (
+        <PerformanceGraphic act={base.act} />
+      ) : (
+        <div className="stage stage--empty" />
+      );
     case "SCOREBOARD":
       return (
         <ScoreboardGraphic

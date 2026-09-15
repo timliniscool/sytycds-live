@@ -319,7 +319,7 @@ describe("final results and ranking", () => {
             entry.actId,
             entry.rank,
           ]),
-      ).toEqual([["act-1", 3]]);
+      ).toEqual([["act-1", 2]]);
 
       command(storage, "REVEAL_NEXT_RESULT");
       const all = projectShowState(storage, PRIMARY_SHOW_ID, {
@@ -335,7 +335,8 @@ describe("final results and ranking", () => {
       ).toEqual([
         ["act-2", 1, true],
         ["act-3", 1, true],
-        ["act-1", 3, false],
+        // Dense ranking: the score below two joint firsts is second, not third.
+        ["act-1", 2, false],
       ]);
       expect(
         command(storage, "REVEAL_NEXT_RESULT").acknowledgement.reason,

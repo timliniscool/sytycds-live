@@ -91,7 +91,10 @@ describe("dynamic scoring configuration", () => {
         storage,
         PRIMARY_SHOW_ID,
         {
-          judgeCount: 5,
+          judgeNames: Array.from(
+            { length: 5 },
+            (_, index) => `Judge ${index + 1}`,
+          ),
           audienceWeight: 0.25,
           reset: false,
           confirm: null,
@@ -120,7 +123,10 @@ describe("dynamic scoring configuration", () => {
         storage,
         PRIMARY_SHOW_ID,
         {
-          judgeCount: 3,
+          judgeNames: Array.from(
+            { length: 3 },
+            (_, index) => `Judge ${index + 1}`,
+          ),
           audienceWeight: 0.75,
           reset: false,
           confirm: null,
@@ -128,7 +134,10 @@ describe("dynamic scoring configuration", () => {
       );
       expect(blocked).toMatchObject({ ok: false, status: 409 });
       const reset = await applyScoringConfiguration(storage, PRIMARY_SHOW_ID, {
-        judgeCount: 3,
+        judgeNames: Array.from(
+          { length: 3 },
+          (_, index) => `Judge ${index + 1}`,
+        ),
         audienceWeight: 0.75,
         reset: true,
         confirm: "RESET SCORING",

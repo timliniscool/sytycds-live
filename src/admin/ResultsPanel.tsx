@@ -2,6 +2,7 @@ import type { AdminCommandType } from "../../shared/admin-command";
 import type {
   AdminRanking,
   DisplayMode,
+  RankingExclusionReason,
   ResultsStage,
 } from "../../shared/domain";
 import { rankGroups } from "../../shared/ranking";
@@ -158,14 +159,16 @@ export function ResultsPanel({
               </tr>
             );
           })}
-          {ranking.incomplete.map((act) => (
+          {ranking.incomplete.map(({ act, reason, missingJudgeSlots }) => (
             <tr key={act.id} className="results-table__incomplete">
               <td>—</td>
               <td>
                 <b>{act.performerName}</b>
                 <small>{act.actName}</small>
               </td>
-              <td className="results-table__score">not finalised</td>
+              <td className="results-table__score">
+                {exclusionLabel(reason, missingJudgeSlots)}
+              </td>
               <td>never</td>
               <td>
                 <button
@@ -204,4 +207,23 @@ export function ResultsPanel({
       </table>
     </section>
   );
+}
+
+/** Exactly why an act is not in the ranking, in one line the operator can act on. */
+function exclusionLabel(
+  reason: RankingExclusionReason,
+  missingJudgeSlots: readonly number[],
+): string {
+  switch (reason) {
+    case "NOT_FINALISED":
+      return "scoring complete — press FINALISE";
+    case "AUDIENCE_RESULT_INCOMPLETE":
+      return "audience result incomplete";
+    case "JUDGE_SCORE_MISSING":
+      return missingJudgeSlots.length === 1
+        ? `judge ${missingJudgeSlots[0]} has not scored`
+        : `judges ${missingJudgeSlots.join(", ")} have not scored`;
+    case "JUDGES_NOT_CONFIGURED":
+      return "no judge panel configured";
+  }
 }

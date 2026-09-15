@@ -1,5 +1,6 @@
-import { actId, type AdminAct } from "../shared/domain";
+import { actId, type ActPresentation, type AdminAct } from "../shared/domain";
 import { isRecord } from "../shared/trust";
+import { syncSimpleCues } from "./simple-flow";
 
 const TEXT_LIMITS = {
   performerName: 160,
@@ -18,20 +19,48 @@ export interface ActInput {
   publicDescription: string;
   internalNotes: string;
   publicImageAssetId?: string | null;
+  showDescriptionToAudience: boolean;
+  showImageToAudience: boolean;
+  presentation: ActPresentation;
+}
+
+const ASSET_ID = /^asset-[A-Za-z0-9-]{1,128}$/u;
+
+function optionalAssetId(value: unknown): string | null | undefined {
+  if (value === null || value === undefined || value === "") return null;
+  return typeof value === "string" && ASSET_ID.test(value) ? value : undefined;
+}
+
+function parsePresentation(value: unknown): ActPresentation | null {
+  const source = isRecord(value) ? value : {};
+  const performanceAssetId = optionalAssetId(source.performanceAssetId);
+  const backingAudioAssetId = optionalAssetId(source.backingAudioAssetId);
+  if (performanceAssetId === undefined || backingAudioAssetId === undefined)
+    return null;
+  const performanceMode =
+    source.performanceMode === "CUSTOM" ? "CUSTOM" : "DEFAULT";
+  // A custom performance visual without a file is the default screen; saying
+  // so here keeps an impossible state out of the database entirely.
+  return {
+    performanceMode:
+      performanceMode === "CUSTOM" && performanceAssetId ? "CUSTOM" : "DEFAULT",
+    performanceAssetId:
+      performanceMode === "CUSTOM" ? performanceAssetId : null,
+    performanceFit: source.performanceFit === "cover" ? "cover" : "contain",
+    backingAudioAssetId,
+    backingAudioStart:
+      source.backingAudioStart === "PERFORMANCE" ? "PERFORMANCE" : "MANUAL",
+  };
 }
 
 export function parseActInput(value: unknown): ActInput | null {
   if (!isRecord(value)) return null;
   const fields = Object.keys(TEXT_LIMITS) as (keyof typeof TEXT_LIMITS)[];
   if (!fields.every((field) => typeof value[field] === "string")) return null;
-  const publicImageAssetId =
-    value.publicImageAssetId === null || value.publicImageAssetId === undefined
-      ? null
-      : typeof value.publicImageAssetId === "string" &&
-          /^asset-[A-Za-z0-9-]{1,128}$/u.test(value.publicImageAssetId)
-        ? value.publicImageAssetId
-        : undefined;
+  const publicImageAssetId = optionalAssetId(value.publicImageAssetId);
   if (publicImageAssetId === undefined) return null;
+  const presentation = parsePresentation(value.presentation);
+  if (!presentation) return null;
   const candidate: ActInput = {
     performerName: (value.performerName as string).trim(),
     schoolYear: (value.schoolYear as string).trim(),
@@ -40,6 +69,9 @@ export function parseActInput(value: unknown): ActInput | null {
     publicDescription: (value.publicDescription as string).trim(),
     internalNotes: (value.internalNotes as string).trim(),
     publicImageAssetId,
+    showDescriptionToAudience: value.showDescriptionToAudience === true,
+    showImageToAudience: value.showImageToAudience === true,
+    presentation,
   };
   if (
     candidate.performerName.length === 0 ||
@@ -71,22 +103,16 @@ export function createAct(
         showIdentifier,
       )
       .one().next_order;
-    if (
-      input.publicImageAssetId &&
-      !storage.sql
-        .exec<{ present: number }>(
-          "SELECT 1 AS present FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL AND mime_type LIKE 'image/%'",
-          showIdentifier,
-          input.publicImageAssetId,
-        )
-        .toArray()[0]
-    )
-      return null;
+    if (!referencedAssetsExist(storage.sql, showIdentifier, input)) return null;
     const id = `act-${crypto.randomUUID()}`;
     const timestamp = new Date().toISOString();
     storage.sql.exec(
-      `INSERT INTO acts (id, show_id, order_index, performer_name, school_year, act_name, act_type, public_description, internal_notes, public_image_asset_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO acts (id, show_id, order_index, performer_name, school_year,
+        act_name, act_type, public_description, internal_notes, public_image_asset_id,
+        show_description_to_audience, show_image_to_audience, performance_mode,
+        performance_asset_id, performance_fit, backing_audio_asset_id,
+        backing_audio_start, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       showIdentifier,
       order,
@@ -97,9 +123,17 @@ export function createAct(
       input.publicDescription,
       input.internalNotes,
       input.publicImageAssetId ?? null,
+      input.showDescriptionToAudience ? 1 : 0,
+      input.showImageToAudience ? 1 : 0,
+      input.presentation.performanceMode,
+      input.presentation.performanceAssetId,
+      input.presentation.performanceFit,
+      input.presentation.backingAudioAssetId,
+      input.presentation.backingAudioStart,
       timestamp,
       timestamp,
     );
+    syncSimpleCues(storage.sql, showIdentifier, id);
     storage.sql.exec(
       "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
       timestamp,
@@ -109,6 +143,44 @@ export function createAct(
   });
 }
 
+/**
+ * Every asset an act points at must exist, belong to this show and be of a kind
+ * the slot can actually present, so an act can never be saved referring to
+ * something the projector will fail to load in front of the hall.
+ */
+function referencedAssetsExist(
+  sql: SqlStorage,
+  showIdentifier: string,
+  input: ActInput,
+): boolean {
+  const usable = (assetId: string, pattern: string): boolean =>
+    sql
+      .exec<{ present: number }>(
+        `SELECT 1 AS present FROM media_assets
+         WHERE show_id = ? AND id = ? AND deleted_at IS NULL AND mime_type GLOB ?`,
+        showIdentifier,
+        assetId,
+        pattern,
+      )
+      .toArray().length > 0;
+  if (input.publicImageAssetId && !usable(input.publicImageAssetId, "image/*"))
+    return false;
+  const { performanceAssetId, backingAudioAssetId } = input.presentation;
+  if (
+    performanceAssetId &&
+    !usable(performanceAssetId, "image/*") &&
+    !usable(performanceAssetId, "video/*")
+  )
+    return false;
+  if (
+    backingAudioAssetId &&
+    !usable(backingAudioAssetId, "audio/*") &&
+    !usable(backingAudioAssetId, "video/*")
+  )
+    return false;
+  return true;
+}
+
 export function editAct(
   storage: DurableObjectStorage,
   showIdentifier: string,
@@ -116,20 +188,15 @@ export function editAct(
   input: ActInput,
 ): boolean {
   return storage.transactionSync(() => {
-    if (
-      input.publicImageAssetId &&
-      !storage.sql
-        .exec<{ present: number }>(
-          "SELECT 1 AS present FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL AND mime_type LIKE 'image/%'",
-          showIdentifier,
-          input.publicImageAssetId,
-        )
-        .toArray()[0]
-    )
+    if (!referencedAssetsExist(storage.sql, showIdentifier, input))
       return false;
     const timestamp = new Date().toISOString();
     const updated = storage.sql.exec(
-      `UPDATE acts SET performer_name = ?, school_year = ?, act_name = ?, act_type = ?, public_description = ?, internal_notes = ?, public_image_asset_id = ?, updated_at = ?
+      `UPDATE acts SET performer_name = ?, school_year = ?, act_name = ?, act_type = ?,
+         public_description = ?, internal_notes = ?, public_image_asset_id = ?,
+         show_description_to_audience = ?, show_image_to_audience = ?,
+         performance_mode = ?, performance_asset_id = ?, performance_fit = ?,
+         backing_audio_asset_id = ?, backing_audio_start = ?, updated_at = ?
        WHERE show_id = ? AND id = ?`,
       input.performerName,
       input.schoolYear,
@@ -138,11 +205,19 @@ export function editAct(
       input.publicDescription,
       input.internalNotes,
       input.publicImageAssetId ?? null,
+      input.showDescriptionToAudience ? 1 : 0,
+      input.showImageToAudience ? 1 : 0,
+      input.presentation.performanceMode,
+      input.presentation.performanceAssetId,
+      input.presentation.performanceFit,
+      input.presentation.backingAudioAssetId,
+      input.presentation.backingAudioStart,
       timestamp,
       showIdentifier,
       requestedId,
     );
     if (updated.rowsWritten !== 1) return false;
+    syncSimpleCues(storage.sql, showIdentifier, requestedId);
     storage.sql.exec(
       "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
       timestamp,

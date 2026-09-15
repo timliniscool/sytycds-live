@@ -235,12 +235,14 @@ function projectorItems(report: ProjectorPreflightReport): PreflightItem[] {
     ),
     result(
       "projector_armed",
-      "Projector audio armed",
+      "AUDIO",
       "projector",
       report.armed ? "READY" : "FAILURE",
       report.armed
-        ? "Sound is enabled"
-        : "Press ARM SHOW / ENABLE AUDIO on the projector page.",
+        ? "ARMED — sound is unlocked on the projector"
+        : // Only a gesture in the projector's own browser can unlock audio;
+          // nothing the operator clicks here will ever do it.
+          "NOT ARMED — go to the projector machine and press ENABLE AUDIO & ENTER SHOW on its screen. This cannot be done from the console.",
     ),
     result(
       "media_engine",

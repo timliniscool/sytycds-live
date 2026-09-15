@@ -103,6 +103,41 @@ export function ActCardGraphic({ act }: { act: PublicAct }) {
   );
 }
 
+/**
+ * Every act's Performance screen, drawn from the act itself. No cue, no upload
+ * and no authoring is required for an act to look finished on a projector.
+ *
+ * Typography is clamped against the stage unit rather than the viewport, so the
+ * same balanced composition holds at 1920x1080 and 1280x720 and one long word
+ * never grows to fill half the screen.
+ */
+export function PerformanceGraphic({ act }: { act: PublicAct }) {
+  return (
+    <section className="stage performance" key={act.id}>
+      {act.publicImageAssetId && (
+        <img
+          className="performance__image"
+          src={`/api/public/media/${encodeURIComponent(act.publicImageAssetId)}`}
+          alt=""
+        />
+      )}
+      <div className="performance__copy">
+        <h1 className="performance__act">{act.actName}</h1>
+        <p className="performance__performer">{act.performerName}</p>
+        <p className="performance__meta">
+          <span>{act.schoolYear}</span>
+          {act.actType && (
+            <>
+              <i aria-hidden="true" />
+              <span>{act.actType}</span>
+            </>
+          )}
+        </p>
+      </div>
+    </section>
+  );
+}
+
 export function HoldingGraphic({
   kicker,
   headline,
