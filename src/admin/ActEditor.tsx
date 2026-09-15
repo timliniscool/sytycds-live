@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 
+import { describeOperation } from "./cue-language";
 import type {
   ActPresentation,
   AdminAct,
@@ -215,6 +216,8 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
   const [cue, setCue] = useState<CueDraft>(() => cueDraft(currentCue));
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  const [deletion, setDeletion] = useState<ActDeletionPreview | null>(null);
+  const [deletePhrase, setDeletePhrase] = useState("");
 
   useEffect(() => {
     if (selectedId && acts.some((act) => act.id === selectedId)) return;
@@ -321,27 +324,65 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     setNotice(creating ? "Act added to the running order." : "Act saved.");
   }
 
-  async function deleteAct(): Promise<void> {
-    if (
-      !selected ||
-      !window.confirm(`Delete ${selected.actName}? This cannot be undone.`)
-    )
-      return;
+  /**
+   * Deleting is two steps on purpose. The first asks the server what would
+   * actually be destroyed — scores, cues, files only this act uses — so the
+   * operator confirms against the truth instead of a generic warning.
+   */
+  async function openDeletion(): Promise<void> {
+    if (!selected) return;
     setBusy(true);
+    setNotice(null);
     const response = await fetch(
-      `/api/admin/acts/${encodeURIComponent(selected.id)}`,
-      {
-        method: "DELETE",
-        credentials: "same-origin",
-      },
+      `/api/admin/acts/${encodeURIComponent(selected.id)}/deletion`,
+      { credentials: "same-origin" },
     );
     setBusy(false);
     if (!response.ok) {
       setNotice(await readError(response));
       return;
     }
+    setDeletePhrase("");
+    setDeletion((await response.json()) as ActDeletionPreview);
+  }
+
+  async function confirmDeletion(): Promise<void> {
+    if (!deletion) return;
+    setBusy(true);
+    setNotice(null);
+    const response = await fetch(
+      `/api/admin/acts/${encodeURIComponent(deletion.actId)}`,
+      {
+        method: "DELETE",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: "DELETE ACT" }),
+      },
+    );
+    const result = (await response.json().catch(() => null)) as {
+      error?: string;
+      retiredAssets?: number;
+      keptSharedAssets?: number;
+      objectsDeleted?: number;
+      objectsPending?: number;
+      cleanupComplete?: boolean;
+    } | null;
+    setBusy(false);
+    setDeletion(null);
+    setDeletePhrase("");
+    if (!response.ok) {
+      setNotice(result?.error ?? "Act could not be deleted.");
+      return;
+    }
     setSelectedId(null);
-    setNotice("Act deleted.");
+    const kept = result?.keptSharedAssets
+      ? ` ${result.keptSharedAssets} shared file(s) kept.`
+      : "";
+    setNotice(
+      result?.cleanupComplete === false
+        ? `Act deleted, but ${result.objectsPending} media file(s) could not be removed from storage yet. Retry from Setup → Danger.${kept}`
+        : `Act deleted. ${result?.objectsDeleted ?? 0} media file(s) removed.${kept}`,
+    );
   }
 
   async function reorderAct(direction: -1 | 1): Promise<void> {
@@ -891,7 +932,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                       className="danger-action"
                       type="button"
                       disabled={busy}
-                      onClick={() => void deleteAct()}
+                      onClick={() => void openDeletion()}
                     >
                       DELETE ACT
                     </button>
@@ -1041,15 +1082,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                             )}
                           </b>
                           <small>
-                            {item.operations
-                              .map((operation) =>
-                                operation.kind === "visual"
-                                  ? operation.visual.kind
-                                  : operation.kind === "audio"
-                                    ? `AUDIO ${operation.action}`
-                                    : `WAIT ${operation.durationMs}ms`,
-                              )
-                              .join(" + ")}
+                            {item.operations.map(describeOperation).join(" + ")}
                           </small>
                           <em>{item.validationState ?? "VALID"}</em>
                         </button>
@@ -1102,7 +1135,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                       />
                     </label>
                     <label>
-                      Visual action
+                      What the screen does
                       <select
                         value={cue.visualKind}
                         onChange={(event) =>
@@ -1112,13 +1145,13 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                           }))
                         }
                       >
-                        <option value="">Leave visual unchanged</option>
-                        <option value="TITLE_CARD">Title card</option>
-                        <option value="IMAGE">Image</option>
-                        <option value="SLIDES">Slide image</option>
-                        <option value="VIDEO">Video</option>
-                        <option value="BLACK">Black</option>
-                        <option value="CLEAR">Clear visual</option>
+                        <option value="">Leave the screen as it is</option>
+                        <option value="TITLE_CARD">Show a title card</option>
+                        <option value="IMAGE">Show image</option>
+                        <option value="SLIDES">Show slide</option>
+                        <option value="VIDEO">Play video</option>
+                        <option value="BLACK">Black screen</option>
+                        <option value="CLEAR">Clear the screen</option>
                       </select>
                     </label>
                     {cue.visualKind === "TITLE_CARD" && (
@@ -1183,7 +1216,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                       </label>
                     )}
                     <label>
-                      Backing audio action
+                      What the sound does
                       <select
                         value={cue.audioAction}
                         onChange={(event) =>
@@ -1193,14 +1226,16 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                           }))
                         }
                       >
-                        <option value="">Leave audio unchanged</option>
-                        <option value="LOAD">Load / play selected audio</option>
-                        <option value="PLAY">Play selected/current</option>
-                        <option value="PAUSE">Pause</option>
-                        <option value="RESUME">Resume</option>
-                        <option value="STOP">Stop</option>
-                        <option value="REPLAY">Replay from start</option>
-                        <option value="SEEK">Seek and play</option>
+                        <option value="">Leave audio as it is</option>
+                        <option value="LOAD">Start backing audio</option>
+                        <option value="PLAY">Play current backing audio</option>
+                        <option value="PAUSE">Pause audio</option>
+                        <option value="RESUME">Resume audio</option>
+                        <option value="STOP">Stop audio</option>
+                        <option value="REPLAY">
+                          Replay audio from the start
+                        </option>
+                        <option value="SEEK">Jump to a point and play</option>
                       </select>
                     </label>
                     {(cue.audioAction === "LOAD" ||
@@ -1280,6 +1315,101 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
           </div>
         )}
       </div>
+      {deletion && (
+        <div
+          className="act-delete"
+          role="alertdialog"
+          aria-labelledby="act-delete-title"
+        >
+          <div className="act-delete__card">
+            <h3 id="act-delete-title">
+              Delete “{deletion.actName}” by {deletion.performerName}?
+            </h3>
+            {deletion.blockers.length > 0 ? (
+              <>
+                <p className="act-delete__blocked">
+                  This act cannot be deleted right now:
+                </p>
+                <ul className="act-delete__list">
+                  {deletion.blockers.map((blocker) => (
+                    <li key={blocker}>{blocker}</li>
+                  ))}
+                </ul>
+                <div className="act-delete__actions">
+                  <button type="button" onClick={() => setDeletion(null)}>
+                    CLOSE
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <p>This permanently removes:</p>
+                <ul className="act-delete__list">
+                  <li>the act and its {deletion.cues} cue(s)</li>
+                  {deletion.audienceVotes > 0 && (
+                    <li>
+                      <b>{deletion.audienceVotes}</b> audience vote(s)
+                    </li>
+                  )}
+                  {deletion.judgeSubmissions > 0 && (
+                    <li>
+                      <b>{deletion.judgeSubmissions}</b> judge score(s)
+                    </li>
+                  )}
+                  {deletion.finalisedResult && (
+                    <li>
+                      <b>its finalised result</b> — it will leave the rankings
+                    </li>
+                  )}
+                  {deletion.releasedAssets.map((asset) => (
+                    <li key={asset.id}>
+                      {asset.filename} (deleted from storage)
+                    </li>
+                  ))}
+                  {deletion.sharedAssets.map((asset) => (
+                    <li key={asset.id} className="act-delete__kept">
+                      {asset.filename} — kept, another act uses it
+                    </li>
+                  ))}
+                </ul>
+                {deletion.isCurrentAct && (
+                  <p className="act-delete__blocked">
+                    This is the current act. Deleting it clears the current
+                    selection.
+                  </p>
+                )}
+                <label htmlFor="act-delete-phrase">
+                  Type <b>DELETE ACT</b> to confirm
+                </label>
+                <input
+                  id="act-delete-phrase"
+                  type="text"
+                  autoComplete="off"
+                  value={deletePhrase}
+                  onChange={(event) => setDeletePhrase(event.target.value)}
+                />
+                <div className="act-delete__actions">
+                  <button
+                    type="button"
+                    className="danger-action"
+                    disabled={busy || deletePhrase.trim() !== "DELETE ACT"}
+                    onClick={() => void confirmDeletion()}
+                  >
+                    {busy ? "DELETING…" : "DELETE ACT"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setDeletion(null)}
+                  >
+                    CANCEL
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
       {notice && (
         <output className="editor-notice" role="status">
           {notice}
@@ -1287,6 +1417,25 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
       )}
     </div>
   );
+}
+
+/** Mirrors the coordinator's deletion preview; see `worker/acts.ts`. */
+interface ActDeletionPreview {
+  actId: string;
+  actName: string;
+  performerName: string;
+  isCurrentAct: boolean;
+  audienceVotes: number;
+  judgeSubmissions: number;
+  finalisedResult: boolean;
+  cues: number;
+  releasedAssets: readonly {
+    id: string;
+    filename: string;
+    sizeBytes: number;
+  }[];
+  sharedAssets: readonly { id: string; filename: string }[];
+  blockers: readonly string[];
 }
 
 /**

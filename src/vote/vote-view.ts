@@ -138,7 +138,7 @@ export function connectionNotice(
 export function rejectionMessage(reason: VoteRejection): string {
   switch (reason) {
     case "VOTING_CLOSED":
-      return "Voting has closed. Your score was not counted.";
+      return "Voting closed before your score was submitted.";
     case "WRONG_ACT":
       return "The act changed before your score arrived.";
     case "INVALID_SCORE":

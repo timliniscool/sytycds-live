@@ -4,6 +4,7 @@ import {
   type MediaManifestEntry,
 } from "../shared/domain";
 import { isRecord } from "../shared/trust";
+import { isAssetReferenced, queueObjectForCleanup } from "./media-cleanup";
 
 const MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set([
@@ -192,7 +193,10 @@ export function listReferencedAssets(
          EXISTS (SELECT 1 FROM cue_asset_references r
            WHERE r.show_id = m.show_id AND r.asset_id = m.id)
          OR EXISTS (SELECT 1 FROM acts a
-           WHERE a.show_id = m.show_id AND a.public_image_asset_id = m.id)
+           WHERE a.show_id = m.show_id AND (
+             a.public_image_asset_id = m.id
+             OR a.performance_asset_id = m.id
+             OR a.backing_audio_asset_id = m.id))
        )
        ORDER BY m.id`,
       showIdentifier,
@@ -217,7 +221,10 @@ export function listMediaAssets(
               EXISTS (
                 SELECT 1 FROM cue_asset_references r WHERE r.asset_id = m.id
               ) OR EXISTS (
-                SELECT 1 FROM acts a WHERE a.public_image_asset_id = m.id
+                SELECT 1 FROM acts a WHERE a.show_id = m.show_id AND (
+                  a.public_image_asset_id = m.id
+                  OR a.performance_asset_id = m.id
+                  OR a.backing_audio_asset_id = m.id)
               ) AS referenced
        FROM media_assets m
        WHERE m.show_id = ? AND m.deleted_at IS NULL
@@ -282,41 +289,67 @@ export async function deleteMediaAsset(
     )
     .toArray()[0];
   if (!row) return "not_found";
-  if (
-    storage.sql
-      .exec<{ present: number }>(
-        "SELECT 1 AS present FROM cue_asset_references WHERE asset_id = ?",
-        assetId,
-      )
-      .toArray().length > 0
-  )
-    return "referenced";
-  if (
-    storage.sql
-      .exec<{ present: number }>(
-        "SELECT 1 AS present FROM acts WHERE show_id = ? AND public_image_asset_id = ? LIMIT 1",
-        showIdentifier,
-        assetId,
-      )
-      .toArray().length > 0
-  )
+  // One authoritative reference test: cues and the act columns that name an
+  // asset. A file another act still uses is never deleted.
+  if (isAssetReferenced(storage.sql, showIdentifier, assetId))
     return "referenced";
   storage.transactionSync(() => {
+    const timestamp = new Date().toISOString();
     storage.sql.exec(
       "UPDATE media_assets SET deleted_at = ? WHERE id = ?",
-      new Date().toISOString(),
+      timestamp,
       assetId,
+    );
+    queueObjectForCleanup(
+      storage.sql,
+      showIdentifier,
+      row.object_key,
+      assetId,
+      "asset_deleted",
     );
     storage.sql.exec(
       "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
-      new Date().toISOString(),
+      timestamp,
       showIdentifier,
     );
   });
-  // Metadata becomes inaccessible first. A failed object deletion leaves only
-  // an unreferenced private R2 object, never a live record pointing at a hole.
-  await bucket.delete(row.object_key).catch(() => undefined);
+  // Metadata becomes inaccessible first, so a live record never points at a
+  // hole. The object is queued work: if R2 refuses now, it is retried later
+  // rather than leaking silently.
+  await removeQueuedObject(storage, bucket, row.object_key);
   return "deleted";
+}
+
+/**
+ * Deletes one queued object and clears its queue row on success. A failure is
+ * recorded against the row so the operator's retry control can see it.
+ */
+async function removeQueuedObject(
+  storage: DurableObjectStorage,
+  bucket: R2Bucket,
+  objectKey: string,
+): Promise<boolean> {
+  try {
+    await bucket.delete(objectKey);
+    storage.sql.exec(
+      "DELETE FROM media_cleanup_queue WHERE object_key = ?",
+      objectKey,
+    );
+    return true;
+  } catch (error: unknown) {
+    storage.sql.exec(
+      `UPDATE media_cleanup_queue
+         SET attempts = attempts + 1, last_error = ?, last_attempted_at = ?
+       WHERE object_key = ?`,
+      (error instanceof Error ? error.message : "R2 delete failed").slice(
+        0,
+        300,
+      ),
+      new Date().toISOString(),
+      objectKey,
+    );
+    return false;
+  }
 }
 
 function mediaKind(mime: string): "image" | "audio" | "video" | "other" {
@@ -415,11 +448,21 @@ export async function replaceMediaAsset(
         cue.id,
         uploaded.asset.id,
       );
+    // Every column that can name an asset is retargeted, or replacing a file
+    // would leave an act pointing at bytes that no longer exist.
     storage.sql.exec(
-      "UPDATE acts SET public_image_asset_id = ? WHERE show_id = ? AND public_image_asset_id = ?",
+      `UPDATE acts SET
+         public_image_asset_id = CASE WHEN public_image_asset_id = ? THEN ? ELSE public_image_asset_id END,
+         performance_asset_id = CASE WHEN performance_asset_id = ? THEN ? ELSE performance_asset_id END,
+         backing_audio_asset_id = CASE WHEN backing_audio_asset_id = ? THEN ? ELSE backing_audio_asset_id END
+       WHERE show_id = ?`,
+      oldAssetId,
+      uploaded.asset.id,
+      oldAssetId,
+      uploaded.asset.id,
+      oldAssetId,
       uploaded.asset.id,
       showIdentifier,
-      oldAssetId,
     );
     storage.sql.exec(
       "UPDATE media_assets SET deleted_at = ? WHERE id = ?",
@@ -427,7 +470,19 @@ export async function replaceMediaAsset(
       oldAssetId,
     );
   });
-  await bucket.delete(old.object_key).catch(() => undefined);
+  // The superseded bytes are queued work, not a fire-and-forget delete: a
+  // failed removal here used to leak an object nothing could ever find again.
+  storage.sql.exec(
+    `INSERT INTO media_cleanup_queue
+      (object_key, show_id, asset_id, reason, attempts, last_error, queued_at, last_attempted_at)
+     VALUES (?, ?, ?, 'asset_replaced', 0, NULL, ?, NULL)
+     ON CONFLICT(object_key) DO NOTHING`,
+    old.object_key,
+    showIdentifier,
+    oldAssetId,
+    new Date().toISOString(),
+  );
+  await removeQueuedObject(storage, bucket, old.object_key);
   return uploaded;
 }
 

@@ -55,8 +55,15 @@ import {
   deleteAct,
   editAct,
   parseActInput,
+  previewActDeletion,
   replaceActOrder,
 } from "./acts";
+import {
+  cleanOrphanedAssets,
+  drainMediaCleanupQueue,
+  findOrphanedAssets,
+  pendingCleanupCount,
+} from "./media-cleanup";
 import {
   createCue,
   deleteCue,
@@ -79,7 +86,12 @@ import { configuredPublicOrigin } from "./public-origin";
 import { hasSameOrigin } from "./security";
 import { initialiseSchema, readSchemaVersion } from "./schema";
 import { parseShowInput, upsertShow } from "./show-config";
-import { RESET_CONFIRMATION, isResetConfirmed, resetShow } from "./show-reset";
+import {
+  DELETE_ACT_CONFIRMATION,
+  RESET_CONFIRMATION,
+  isResetConfirmed,
+  resetShow,
+} from "./show-reset";
 import {
   applyScoringConfiguration,
   parseScoringConfiguration,
@@ -333,6 +345,24 @@ export class ShowCoordinator extends DurableObject<Env> {
       return this.handleEditAct(request, actMatch[1] ?? "");
     if (actMatch && request.method === "DELETE")
       return this.handleDeleteAct(request, actMatch[1] ?? "");
+    const actDeletionMatch =
+      /^\/api\/admin\/acts\/([A-Za-z0-9_-]{1,128})\/deletion$/u.exec(
+        url.pathname,
+      );
+    if (actDeletionMatch && request.method === "GET")
+      return this.handleActDeletionPreview(request, actDeletionMatch[1] ?? "");
+    if (url.pathname === "/api/admin/media/orphans" && request.method === "GET")
+      return this.handleOrphanReport(request);
+    if (
+      url.pathname === "/api/admin/media/orphans" &&
+      request.method === "POST"
+    )
+      return this.handleOrphanCleanup(request);
+    if (
+      url.pathname === "/api/admin/media/cleanup/retry" &&
+      request.method === "POST"
+    )
+      return this.handleCleanupRetry(request);
     if (url.pathname === "/api/admin/cues" && request.method === "POST")
       return this.handleCreateCue(request);
     if (url.pathname === "/api/admin/cues/reorder" && request.method === "POST")
@@ -658,7 +688,13 @@ export class ShowCoordinator extends DurableObject<Env> {
       sockets: this.socketInventory(),
       only: only && /^[a-z_]{1,40}$/u.test(only) ? only : undefined,
     });
-    return Response.json({ items });
+    return Response.json({
+      items,
+      pendingMediaCleanup: pendingCleanupCount(
+        this.ctx.storage.sql,
+        PRIMARY_SHOW_ID,
+      ),
+    });
   }
 
   /** Provisioning: the first call creates the show, later calls rename it. */
@@ -737,7 +773,17 @@ export class ShowCoordinator extends DurableObject<Env> {
       PRIMARY_SHOW_ID,
     );
     this.lastProjectorError = null;
-    // Every client is told the show is gone; the console offers creation.
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "show.reset",
+      actor: "admin",
+      data: {
+        acts: result.clearedActs,
+        objectsDeleted: result.objectsDeleted,
+        objectsPending: result.objectsPending,
+      },
+    });
+    // The show still exists with its setup intact; every surface re-reads the
+    // cleared operational state rather than being told the show is gone.
     this.broadcastSnapshots("admin");
     this.broadcastSnapshots("projector");
     this.broadcastSnapshots("audience");
@@ -965,23 +1011,123 @@ export class ShowCoordinator extends DurableObject<Env> {
     return Response.json({ updated: true });
   }
 
+  /** What deleting this act would destroy, so the operator confirms the truth. */
+  private async handleActDeletionPreview(
+    request: Request,
+    requestedId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const result = previewActDeletion(
+      this.ctx.storage.sql,
+      PRIMARY_SHOW_ID,
+      requestedId,
+    );
+    return result.ok
+      ? Response.json(result.preview)
+      : Response.json({ error: result.reason }, { status: result.status });
+  }
+
+  /**
+   * Deleting an act is one database transaction followed by best-effort R2
+   * work. The response tells the operator exactly what happened, including
+   * whether any object is still waiting to leave the bucket.
+   */
   private async handleDeleteAct(
     request: Request,
     requestedId: string,
   ): Promise<Response> {
     if (!(await this.authenticatedAdmin(request, true)))
       return Response.json({ error: "Unauthorised" }, { status: 401 });
-    const result = deleteAct(this.ctx.storage, PRIMARY_SHOW_ID, requestedId);
-    if (result !== "deleted")
+    const body = await this.adminBody(request);
+    if (!isRecord(body) || body.confirm !== DELETE_ACT_CONFIRMATION)
       return Response.json(
-        { error: result },
-        { status: result === "not_found" ? 404 : 409 },
+        { error: `Type ${DELETE_ACT_CONFIRMATION} to confirm` },
+        { status: 400 },
       );
+    const result = deleteAct(this.ctx.storage, PRIMARY_SHOW_ID, requestedId);
+    if (!result.ok)
+      return Response.json({ error: result.reason }, { status: result.status });
+    const { preview, retiredAssets } = result.outcome;
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "act.deleted",
+      actor: "admin",
+      data: {
+        actId: preview.actId,
+        actName: preview.actName,
+        audienceVotes: preview.audienceVotes,
+        judgeSubmissions: preview.judgeSubmissions,
+        finalisedResult: preview.finalisedResult,
+        retiredAssets,
+      },
+    });
+    const cleanup = await drainMediaCleanupQueue(
+      this.ctx.storage,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+    );
     this.broadcastSnapshots("admin");
     this.broadcastSnapshots("projector");
     this.broadcastSnapshots("audience");
     this.broadcastSnapshots("judge");
-    return Response.json({ deleted: true });
+    return Response.json({
+      deleted: true,
+      actName: preview.actName,
+      retiredAssets,
+      keptSharedAssets: preview.sharedAssets.length,
+      objectsDeleted: cleanup.deleted,
+      objectsPending: cleanup.pending,
+      cleanupComplete: cleanup.complete,
+    });
+  }
+
+  private async handleOrphanReport(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    return Response.json(
+      findOrphanedAssets(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+    );
+  }
+
+  /** The destructive half of the sweep; the dry run above is a separate call. */
+  private async handleOrphanCleanup(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const body = await this.adminBody(request);
+    if (!isRecord(body) || body.confirm !== "CLEAN ORPHANED MEDIA")
+      return Response.json(
+        { error: "Confirmation phrase required" },
+        { status: 400 },
+      );
+    const result = await cleanOrphanedAssets(
+      this.ctx.storage,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+    );
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "media.orphans_cleaned",
+      actor: "admin",
+      data: {
+        retired: result.retired,
+        deleted: result.deleted,
+        pending: result.pending,
+      },
+    });
+    this.broadcastSnapshots("admin");
+    return Response.json(result);
+  }
+
+  /** Works whatever R2 refused last time; safe to press repeatedly. */
+  private async handleCleanupRetry(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    return Response.json(
+      await drainMediaCleanupQueue(
+        this.ctx.storage,
+        this.env.MEDIA,
+        PRIMARY_SHOW_ID,
+      ),
+    );
   }
 
   private async handleReorderActs(request: Request): Promise<Response> {

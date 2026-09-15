@@ -40,10 +40,15 @@ const SetupWorkspace = lazy(async () => {
   const module = await import("../admin/SetupWorkspace");
   return { default: module.SetupWorkspace };
 });
+// The guide carries the whole README; it loads only when an operator opens it.
+const HelpPanel = lazy(async () => {
+  const module = await import("../admin/HelpPanel");
+  return { default: module.HelpPanel };
+});
 
 type AuthenticationState =
   "checking" | "submitting" | "signed-out" | "signed-in" | "failed";
-type ConsoleView = "show" | "acts" | "results" | "setup" | "history";
+type ConsoleView = "show" | "acts" | "results" | "setup" | "history" | "help";
 
 interface PublicConfig {
   title: string;
@@ -225,6 +230,7 @@ const VIEWS: readonly { view: ConsoleView; label: string }[] = [
   { view: "results", label: "RESULTS" },
   { view: "setup", label: "SETUP & PREFLIGHT" },
   { view: "history", label: "HISTORY" },
+  { view: "help", label: "? HELP & OPERATOR GUIDE" },
 ];
 function id(): string {
   return crypto.randomUUID().replaceAll("-", "");
@@ -378,6 +384,11 @@ function Console() {
   const active =
     projection.acts.find((act) => act.id === projection.show.activeActId) ??
     null;
+  // What the operator has to be ready for, not just what is on now.
+  const nextAct =
+    projection.acts.find(
+      (act) => !act.withdrawn && act.order > (active?.order ?? -1),
+    ) ?? null;
   const aggregate = active
     ? projection.audienceAggregates.find((entry) => entry.actId === active.id)
     : null;
@@ -544,6 +555,13 @@ function Console() {
             revision={revision === null ? null : Number(revision)}
           />
         )}
+        {view === "help" && (
+          <Suspense
+            fallback={<p className="admin-loading">Loading the guide…</p>}
+          >
+            <HelpPanel />
+          </Suspense>
+        )}
         {view === "acts" && (
           <Suspense
             fallback={<p className="admin-loading">Loading act editor…</p>}
@@ -567,6 +585,38 @@ function Console() {
         )}
         {view === "show" && (
           <>
+            {/*
+              An override is on the screen in the hall. The console says so in
+              its own right, above everything else, because the display-mode
+              buttons below will happily look normal while the projector is
+              black — and an operator must never have to infer that.
+            */}
+            {(projection.runtime.blackScreen ||
+              projection.show.displayMode === "EMERGENCY") && (
+              <section className="override-banner" role="alert">
+                <strong>
+                  {projection.show.displayMode === "EMERGENCY"
+                    ? "EMERGENCY ON SCREEN"
+                    : "BLACKOUT ACTIVE"}
+                </strong>
+                <span>
+                  {projection.show.displayMode === "EMERGENCY"
+                    ? "The hall sees the emergency output. Nothing else is visible."
+                    : "The hall sees black. Changing the display mode will not appear until blackout is lifted."}
+                </span>
+                <button
+                  type="button"
+                  className="override-banner__return"
+                  onClick={() =>
+                    projection.show.displayMode === "EMERGENCY"
+                      ? send("RESTORE_DISPLAY")
+                      : send("BLACK_SCREEN")
+                  }
+                >
+                  RETURN TO SHOW
+                </button>
+              </section>
+            )}
             <section
               className="current-workspace"
               aria-label="Current act workspace"
@@ -580,6 +630,12 @@ function Console() {
                   {active?.withdrawn ? " · WITHDRAWN" : ""}
                 </span>
               </div>
+              <p className="current-workspace__next">
+                <b>NEXT</b>{" "}
+                {nextAct
+                  ? `${nextAct.actName} — ${nextAct.performerName}`
+                  : "End of the running order"}
+              </p>
               <div className="display-controls">
                 <p>DISPLAY MODE</p>
                 {MODES.map((mode) => (

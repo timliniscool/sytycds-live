@@ -367,10 +367,9 @@ describe("zero-act show lifecycle", () => {
       expect(JSON.stringify(admin)).toContain("stage left");
       expect(JSON.stringify(admin)).toContain("GO after");
 
-      // Safe incomplete content can be removed directly. Completed content is
-      // intentionally protected, so the isolated rehearsal finishes with the
-      // same explicit full-reset path the operator would use.
-      expect(deleteAct(storage, PRIMARY_SHOW_ID, secondAct.id)).toBe("deleted");
+      // Deleting an act takes its cues with it in one transaction.
+      const removed = deleteAct(storage, PRIMARY_SHOW_ID, secondAct.id);
+      expect(removed.ok).toBe(true);
       expect(
         storage.sql
           .exec<{ count: number }>(
@@ -379,12 +378,19 @@ describe("zero-act show lifecycle", () => {
           )
           .one().count,
       ).toBe(0);
-      expect(await resetShow(storage, env.MEDIA, PRIMARY_SHOW_ID)).toEqual({
-        deletedObjects: 3,
-      });
+
+      // The rehearsal finishes with the operator's own full-reset path: the
+      // event's performance data goes, its setup stays.
       expect(
-        projectShowState(storage, PRIMARY_SHOW_ID, { kind: "admin" }),
-      ).toBeNull();
+        await resetShow(storage, env.MEDIA, PRIMARY_SHOW_ID),
+      ).toMatchObject({ mediaCleanupComplete: true });
+      const afterReset = projectShowState(storage, PRIMARY_SHOW_ID, {
+        kind: "admin",
+      });
+      expect(afterReset?.role === "admin" && afterReset.acts).toEqual([]);
+      expect(afterReset?.role === "admin" && afterReset.show.displayMode).toBe(
+        "LOBBY",
+      );
       expect(
         storage.sql
           .exec<{ count: number }>("SELECT COUNT(*) AS count FROM media_assets")

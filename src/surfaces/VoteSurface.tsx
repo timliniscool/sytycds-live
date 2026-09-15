@@ -208,8 +208,9 @@ export default function VoteSurface() {
       ? submission.score
       : null;
 
+  const voting = view.kind === "VOTING";
   return (
-    <main className="vote" aria-live="polite">
+    <main className={`vote${voting ? " vote--voting" : ""}`} aria-live="polite">
       <header className="vote__head">
         <p className="vote__mark">
           {projection?.show.shortName || projection?.show.title || "Audience"}
@@ -218,7 +219,13 @@ export default function VoteSurface() {
         view.kind === "ACT" ||
         view.kind === "CLOSED" ? (
           <>
-            {view.act.publicImageAssetId && (
+            {/*
+              Act identity comes first and always fits. The optional artwork and
+              description are the first things to yield space: while voting is
+              open the selector and LOCK IN must be reachable without scrolling,
+              so they are not competing with a picture.
+            */}
+            {!voting && view.act.publicImageAssetId && (
               <img
                 className="vote__act-image"
                 src={`/api/public/media/${encodeURIComponent(view.act.publicImageAssetId)}`}
@@ -229,6 +236,9 @@ export default function VoteSurface() {
             <p className="vote__performer">
               {view.act.performerName} · {view.act.schoolYear}
             </p>
+            {!voting && view.act.publicDescription && (
+              <p className="vote__description">{view.act.publicDescription}</p>
+            )}
           </>
         ) : (
           <h1 className="vote__act">
@@ -269,7 +279,14 @@ export default function VoteSurface() {
       {view.kind === "CLOSED" && (
         <Message
           body="Voting has closed"
-          detail="Scores for this act are locked in."
+          detail={
+            // A score that was being sent when the operator closed voting is a
+            // lost race, not a silent failure: say exactly what happened.
+            submission.kind === "rejected" &&
+            submission.reason === "VOTING_CLOSED"
+              ? "Voting closed before your score was submitted."
+              : "Scores for this act are locked in."
+          }
         />
       )}
       {view.kind === "RESULTS" && !view.publicResults && (
@@ -358,6 +375,15 @@ export default function VoteSurface() {
                 {rejectionMessage(submission.reason)}
               </p>
             )}
+            {/*
+              Choosing is not sending, and the phone says so in as many words
+              until LOCK IN is pressed and the server has accepted it.
+            */}
+            <p className="vote__pending" aria-live="polite">
+              {pendingScore === null
+                ? "Tap a score. Nothing is sent until you lock it in."
+                : `Selected ${pendingScore} — not sent yet`}
+            </p>
             <button
               type="button"
               className="vote__lock"
@@ -374,10 +400,10 @@ export default function VoteSurface() {
               }}
             >
               {pendingScore === null
-                ? "Choose a score"
+                ? "CHOOSE A SCORE"
                 : submission.kind === "submitting"
-                  ? "Sending…"
-                  : `Lock in ${pendingScore}`}
+                  ? "SENDING…"
+                  : `LOCK IN ${pendingScore}`}
             </button>
           </footer>
         </>
@@ -395,7 +421,7 @@ export default function VoteSurface() {
               className="vote__lock"
               onClick={() => void submit(submission.score)}
             >
-              Yes, lock it in
+              YES, LOCK IT IN
             </button>
             <button
               type="button"

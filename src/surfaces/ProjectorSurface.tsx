@@ -375,6 +375,10 @@ export default function ProjectorSurface() {
         judges={projection?.scoreboard.judges ?? []}
         aggregate={aggregate}
         revealedResult={projection?.revealedResult ?? null}
+        // A commanded visual that never produced a frame — a missing file, a
+        // codec the projector cannot decode — must not leave the hall staring
+        // at nothing. The act's own performance screen is the safe fallback.
+        mediaFrameReady={media.hasFrame}
       />
       <div
         className={[
@@ -491,11 +495,13 @@ function Base({
   judges,
   aggregate,
   revealedResult,
+  mediaFrameReady,
 }: {
   base: ProjectorBase;
   judges: Parameters<typeof ScoreboardGraphic>[0]["judges"];
   aggregate: Parameters<typeof ScoreboardGraphic>[0]["aggregate"];
   revealedResult: number | null;
+  mediaFrameReady: boolean;
 }) {
   switch (base.kind) {
     case "CONNECTING":
@@ -521,9 +527,10 @@ function Base({
     case "STAND_BY":
       return <HoldingGraphic kicker="Up next" headline="Stand by" />;
     case "PERFORMANCE":
-      // With no custom visual commanded, the act's own performance screen is
-      // the output; with one, the visual layer above owns the whole frame.
-      return base.automatic && base.act ? (
+      // With no custom visual commanded — or with one that failed to produce a
+      // frame — the act's own performance screen is the output. A custom visual
+      // that is genuinely on screen owns the whole frame.
+      return (base.automatic || !mediaFrameReady) && base.act ? (
         <PerformanceGraphic act={base.act} />
       ) : (
         <div className="stage stage--empty" />

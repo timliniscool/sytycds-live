@@ -639,6 +639,33 @@ const CONFIGURATION_SCHEMA_RECONCILIATION: SchemaMigration = {
   },
 };
 
+/**
+ * Durable cleanup work. Deleting media spans two systems — SQLite in this
+ * Durable Object and objects in R2 — and no transaction covers both. The
+ * database is always made correct first; every object that still has to leave
+ * R2 is recorded here, so a failed or interrupted delete becomes retryable work
+ * rather than an object that leaks silently and forever.
+ */
+const MEDIA_CLEANUP_QUEUE_SCHEMA: SchemaMigration = {
+  version: 14,
+  name: "durable_media_cleanup_queue",
+  statements: [
+    `CREATE TABLE media_cleanup_queue (
+      object_key TEXT PRIMARY KEY NOT NULL,
+      show_id TEXT NOT NULL,
+      asset_id TEXT,
+      reason TEXT NOT NULL CHECK (reason IN (
+        'act_deleted', 'asset_deleted', 'asset_replaced', 'show_reset', 'orphan_sweep'
+      )),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      last_error TEXT,
+      queued_at TEXT NOT NULL,
+      last_attempted_at TEXT
+    ) STRICT`,
+    "CREATE INDEX idx_media_cleanup_queue_show ON media_cleanup_queue (show_id, queued_at)",
+  ],
+};
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -653,6 +680,7 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   ADMIN_CREDENTIAL_RECOVERY_SCHEMA,
   ACT_PRESENTATION_AND_RESULT_IDENTITY_SCHEMA,
   CONFIGURATION_SCHEMA_RECONCILIATION,
+  MEDIA_CLEANUP_QUEUE_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

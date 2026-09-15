@@ -1,3 +1,5 @@
+import type React from "react";
+
 import type { PublicResults, RankingEntry } from "../../shared/domain";
 import { rankGroups } from "../../shared/ranking";
 import { HoldingGraphic } from "./ProjectorGraphics";
@@ -55,7 +57,10 @@ export function FinalResultsGraphic({
       return (
         <section className="stage results" key="leaderboard">
           <p className="stage__kicker">Final results</p>
-          <ol className="results__list">
+          <ol
+            className="results__list"
+            style={{ "--rows": results.entries.length } as React.CSSProperties}
+          >
             {results.entries.map((entry) => (
               <ResultRow key={entry.actId} entry={entry} />
             ))}
@@ -80,7 +85,14 @@ function StagedResults({ results }: { results: PublicResults }) {
   return (
     <section className="stage results" key="staged">
       <p className="stage__kicker">Final results</p>
-      <ol className="results__list">
+      <ol
+        className="results__list"
+        style={
+          {
+            "--rows": results.entries.length + results.pendingGroups,
+          } as React.CSSProperties
+        }
+      >
         {pending.map((index) => (
           <li
             className="results__row results__row--pending"
@@ -101,31 +113,63 @@ function StagedResults({ results }: { results: PublicResults }) {
   );
 }
 
+/**
+ * The podium is the top three *rank numbers*, not the top three acts. Under
+ * dense ranking two joint firsts still leave a second and a third, so four or
+ * more people can stand on a three-step podium — and every one of them appears.
+ * A step never truncates its tie group to keep a tidy silhouette.
+ */
 function Podium({ entries }: { entries: readonly RankingEntry[] }) {
   const groups = rankGroups(entries);
   const byRank = (rank: number) =>
     entries.filter((entry) => entry.rank === rank);
-  // Second, first, third: the classic podium silhouette. A tie at a rank puts
-  // every tied act on that step rather than inventing an order between them.
+  // Second, first, third: the classic silhouette, with first in the middle.
   const order = [groups[1], groups[0], groups[2]].filter(
     (rank): rank is number => rank !== undefined,
   );
+  const widest = Math.max(1, ...order.map((rank) => byRank(rank).length));
   return (
     <section className="stage podium" key="podium">
-      <p className="stage__kicker">Top three</p>
-      <div className="podium__steps">
-        {order.map((rank) => (
-          <div className={`podium__step podium__step--${rank}`} key={rank}>
-            <p className="podium__place">{ordinal(rank)}</p>
-            {byRank(rank).map((entry) => (
-              <div className="podium__entry" key={entry.actId}>
-                <b>{entry.performerName}</b>
-                <small>{entry.actName}</small>
-                <span>{formatScore(entry.finalScore)}</span>
+      <p className="stage__kicker">
+        {entries.length > order.length ? "Top three places" : "Top three"}
+      </p>
+      <div
+        className="podium__steps"
+        // The whole podium scales to its biggest tie group, so five joint
+        // winners shrink the type on every step together rather than one step
+        // overflowing the screen.
+        style={
+          {
+            "--members": widest,
+            // Two rank groups occupy two steps, not two thirds of a podium.
+            gridTemplateColumns: `repeat(${order.length}, minmax(0, 1fr))`,
+          } as React.CSSProperties
+        }
+      >
+        {order.map((rank) => {
+          const members = byRank(rank);
+          return (
+            <div className={`podium__step podium__step--${rank}`} key={rank}>
+              <p className="podium__place">
+                {ordinal(rank)}
+                {members.length > 1 && (
+                  <em className="podium__shared">{members.length} way tie</em>
+                )}
+              </p>
+              <div
+                className={`podium__entries${members.length > 2 ? " podium__entries--dense" : ""}`}
+              >
+                {members.map((entry) => (
+                  <div className="podium__entry" key={entry.actId}>
+                    <b>{entry.performerName}</b>
+                    <small>{entry.actName}</small>
+                    <span>{formatScore(entry.finalScore)}</span>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        ))}
+            </div>
+          );
+        })}
       </div>
     </section>
   );

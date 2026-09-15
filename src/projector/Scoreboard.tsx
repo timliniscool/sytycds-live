@@ -102,7 +102,18 @@ export function ScoreboardGraphic({
           </p>
         </div>
 
-        <ul className="scoreboard__judges">
+        {/*
+          The column count comes from the panel itself, so one to four judges
+          share a row and five to eight fall into two even rows. Leaving it to
+          `auto-fit` made the track width depend on the longest judge name,
+          which is how four judges ended up on three columns.
+        */}
+        <ul
+          className="scoreboard__judges"
+          style={{
+            gridTemplateColumns: `repeat(${Math.min(Math.max(tiles.length, 1), 4)}, minmax(0, 1fr))`,
+          }}
+        >
           {tiles.map((tile, index) => (
             <li
               key={index}

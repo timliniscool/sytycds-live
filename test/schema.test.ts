@@ -57,6 +57,9 @@ describe("coordinator SQLite schema", () => {
       ) STRICT`);
       sql.exec("DROP TABLE font_assets");
       sql.exec("DROP TABLE selected_font_css");
+      // Rewind the recorded history to before the reconciliation step, exactly
+      // as a coordinator that never received it would look.
+      sql.exec("DROP TABLE media_cleanup_queue");
       sql.exec("DELETE FROM schema_migrations WHERE version >= 13");
 
       initialiseSchema(state.storage);

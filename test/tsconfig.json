@@ -17,7 +17,11 @@
     "exactOptionalPropertyTypes": true,
     "isolatedModules": true,
     "skipLibCheck": true,
-    "types": ["@cloudflare/vitest-plugin/types", "../worker-configuration.d.ts"]
+    "types": [
+      "@cloudflare/vitest-plugin/types",
+      "vite/client",
+      "../worker-configuration.d.ts"
+    ]
   },
   "include": [
     "./**/*.ts",

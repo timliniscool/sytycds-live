@@ -31,9 +31,13 @@ control is not described here, it does not exist.
 18. [HOLD, INTERMISSION, BLACK and EMERGENCY](#hold-intermission-black-and-emergency)
 19. [Finalising results](#finalising-results)
 20. [Final Results and ties](#final-results-and-ties)
-21. [Common problems](#common-problems)
-22. [Emergency recovery](#emergency-recovery)
-23. [Developer and deployment notes](#developer-and-deployment-notes)
+21. [Deleting an act](#deleting-an-act)
+22. [Resetting the whole show](#resetting-the-whole-show)
+23. [Orphaned media](#orphaned-media)
+24. [Help inside the console](#help-inside-the-console)
+25. [Common problems](#common-problems)
+26. [Emergency recovery](#emergency-recovery)
+27. [Developer and deployment notes](#developer-and-deployment-notes)
 
 ---
 
@@ -279,8 +283,8 @@ hidden in the phone, it is absent. Stage media — performance visuals and
 backing audio — is never sent to phones under any setting.
 
 **MOVE UP / MOVE DOWN** set the running order. **SELECT FOR SHOW** makes an
-act current. **DELETE ACT** works only for an act with no votes, scores or
-finalised result; withdraw it instead.
+act current. **DELETE ACT** opens a summary of exactly what would be destroyed;
+see [Deleting an act](#deleting-an-act).
 
 ---
 
@@ -405,10 +409,14 @@ the current act 0–10. **CLOSE AUDIENCE VOTING** ends it.
 
 How a phone vote works, exactly:
 
-1. The voter taps a number. **This is local. Nothing is sent.**
-2. They press **Lock in**, then confirm.
+1. The voter taps a number. **This is local. Nothing is sent.** The phone says
+   so: _"Selected 8 — not sent yet"_.
+2. They press **LOCK IN 8**, then confirm.
 3. Only then is a vote sent, and only the server decides whether it counts.
 4. The phone shows the score as locked only after the server accepts it.
+
+If the operator closes voting while a score was being sent, the phone says
+_"Voting closed before your score was submitted."_ — never a false success.
 
 Closing voting never submits anything. A voter who chose a number but did not
 lock it in has their choice discarded and sees "Voting has closed"; no vote is
@@ -557,6 +565,105 @@ Switch the projector to **FINAL RESULTS** to put the current stage on screen.
 
 ---
 
+## Deleting an act
+
+_ACTS & CUES → act → **DELETE ACT**._
+
+Deleting is two steps. The first asks the server what deleting this act would
+really destroy, and shows it:
+
+- the act and its cues
+- every audience vote cast for it
+- every judge score submitted for it
+- its finalised result, if it has one — **it leaves the rankings**
+- the uploaded files only this act uses, which are deleted from storage
+- the uploaded files another act also uses, which are **kept**
+
+You then type `DELETE ACT` to confirm. Everything happens in one transaction:
+either all of it is gone or none of it is, and no half-deleted act can be left
+behind. Deleting the current act also clears the current selection.
+
+Two conditions stop a deletion, and no confirmation can override them:
+
+- audience voting is open for that act — close voting first
+- media is playing for that act — stop it first
+
+Deleting the same act twice is safe: the second attempt reports that it is
+already gone rather than doing anything.
+
+**Storage.** A file only this act used is deleted from storage with it. A file
+shared with another act stays. If storage refuses the deletion, the act is still
+deleted and the console tells you the file is outstanding — use **RETRY MEDIA
+CLEANUP** under _SETUP & PREFLIGHT → DANGER_. Nothing is ever reported as
+cleaned when it is not.
+
+The operational log keeps its record that the act was deleted, and what it
+contained. Show history is append-only and is never rewritten.
+
+---
+
+## Resetting the whole show
+
+_SETUP & PREFLIGHT → 04 / DANGER → **RESET ENTIRE SHOW…**_
+
+This is the between-events control. It returns the event to a clean, ready state
+without making you set it up again.
+
+**It clears:** every act, every cue, every uploaded file, every audience vote and
+aggregate, every judge score, every finalised result and ranking snapshot, the
+current act, the display mode, the voting and reveal state, and the projector
+pairing code. The projector returns to the lobby with nothing playing and no
+blackout.
+
+**It keeps:** the event name and tagline, the theme, the typeface, the public
+intermission and emergency text, the judge panel and the judges' links, and the
+audience/judge weighting. Paired displays stay paired — a screen already trusted
+in the hall should not need re-pairing because the running order changed. Your
+operator sign-in is untouched.
+
+**It never touches** the administrator account, deployment secrets, Cloudflare
+configuration or any platform asset. This is not a factory reset.
+
+The confirmation is deliberate: pressing **RESET ENTIRE SHOW…** opens a warning,
+and the destructive button stays disabled until you type either the event's own
+name or `RESET`.
+
+Afterwards the console reports what actually happened, including whether every
+media file really left storage. If storage refused, the reset has still fully
+happened and the outstanding files are retryable work — the console says so
+rather than claiming a clean bucket.
+
+---
+
+## Orphaned media
+
+_SETUP & PREFLIGHT → 04 / DANGER → **FIND ORPHANED MEDIA**_
+
+An orphan is an uploaded file that no act and no cue refers to any more —
+usually left behind by an interrupted upload or an older version of the
+software. Scanning is safe: it changes nothing and reports the count and total
+size. **DELETE … FILES** then removes them from storage.
+
+Orphan status comes from the database's own references, never from a filename.
+Platform and deployment assets are not uploaded show media and can never appear
+in this list.
+
+**RETRY MEDIA CLEANUP** works through anything storage refused earlier, from any
+deletion or reset. It is safe to press at any time and does nothing when there
+is nothing outstanding.
+
+---
+
+## Help inside the console
+
+The last item in the console's navigation is **? HELP & OPERATOR GUIDE**. It
+renders this manual inside the app, with a contents rail and a search box, so
+the guide is available on the night without another device.
+
+Opening it changes nothing: it sends no command and touches no show state.
+
+---
+
 ## Common problems
 
 **The projector says "Pair this display".**
@@ -588,6 +695,13 @@ audience result is missing.
 
 **An act is missing from the final results.**
 Open **RESULTS**; it is listed with its reason.
+
+**DELETE ACT says voting is open or media is playing.**
+It is protecting a live act. Close voting, or press STOP ALL MEDIA, then delete.
+
+**The console says media files are still pending in storage.**
+Storage refused a deletion. The database is already correct; press **RETRY MEDIA
+CLEANUP** under _SETUP & PREFLIGHT → DANGER_. Nothing is lost.
 
 **The screen is black and nothing brings it back.**
 That is blackout working as designed. Press **BLACK** again. The console
@@ -628,9 +742,11 @@ undo for a single act. The only reset is _SETUP & PREFLIGHT → 02 / SCORING →
 `RESET SCORING`_, which erases every vote, judge score and finalised result for
 the whole show. Do not use it during a show unless you mean it.
 
-**Start completely fresh.** _SETUP & PREFLIGHT → DANGER → START COMPLETELY
-FRESH…_ and type `RESET SHOW`. This erases the show, every act, cue, media file, judge link,
-vote, score and the history. There is no undo.
+**Start completely fresh.** _SETUP & PREFLIGHT → 04 / DANGER → RESET ENTIRE
+SHOW…_, then type the event name or `RESET`. This erases every act, cue, media
+file, vote, score and result, and keeps your event name, theme, typeface and
+judge panel. There is no undo. See
+[Resetting the whole show](#resetting-the-whole-show).
 
 ---
 
@@ -690,5 +806,19 @@ production they are Worker secrets. `docs/deployment.md` is the full runbook.
   allowed to draw, for every theme, in both the web and projector palettes.
 - **Audio arming is a projector-side gesture.** It can never be triggered
   remotely, and `armed` is set only after a real unlock succeeds.
+- **Media spans two systems that cannot commit together.** The rule is fixed and
+  one-directional: SQLite is made correct first, and every object that must
+  still leave R2 is recorded in `media_cleanup_queue` as retryable work. A row
+  never points at an object that is already gone, and an object that should be
+  gone is never silently forgotten. `worker/media-cleanup.ts` owns this, and
+  "referenced" is decided from cue references and the act columns that name an
+  asset — never from a filename or an object key.
+- **The operator guide is the README.** `src/admin/HelpPanel.tsx` parses it into
+  a typed tree and renders React elements; there is no HTML path, so document
+  content cannot execute. It is a lazy chunk and never reaches `/vote`.
+- **`test/admin-controls.test.ts` discovers the console's controls from the
+  source** rather than a hand-kept list, and fails if a control sends a command
+  the server does not implement, if a server command has no control, or if a
+  rendered button has no action.
 
 Made by Tim Lin.
