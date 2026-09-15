@@ -639,14 +639,23 @@ rather than claiming a clean bucket.
 
 _SETUP & PREFLIGHT → 04 / DANGER → **FIND ORPHANED MEDIA**_
 
-An orphan is an uploaded file that no act and no cue refers to any more —
-usually left behind by an interrupted upload or an older version of the
-software. Scanning is safe: it changes nothing and reports the count and total
-size. **DELETE … FILES** then removes them from storage.
+An orphan is uploaded media the show no longer has any use for. The sweep looks
+in both directions, because leaks happen in both:
 
-Orphan status comes from the database's own references, never from a filename.
-Platform and deployment assets are not uploaded show media and can never appear
-in this list.
+- **A record with nothing referencing it** — a file no act and no cue points at
+  any more.
+- **Bytes with no record at all** — a file whose database row was already
+  deleted while the storage delete failed and was swallowed by an older version
+  of this software. Nothing in the database can reveal these, so the sweep asks
+  storage directly what it is holding.
+
+Scanning is safe: it changes nothing and reports the count and total size.
+**DELETE … FILES** then removes them from storage.
+
+Orphan status comes from the database's own references and from storage itself,
+never from a filename. The show's uploads live under their own storage prefix;
+cached typefaces and every platform and deployment asset live outside it and can
+never appear in this list.
 
 **RETRY MEDIA CLEANUP** works through anything storage refused earlier, from any
 deletion or reset. It is safe to press at any time and does nothing when there

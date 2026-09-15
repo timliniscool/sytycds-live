@@ -28,20 +28,32 @@ import { PRIMARY_SHOW_ID, projectShowState } from "../worker/show-state";
 
 const NOW = "2026-09-15T00:00:00.000Z";
 
-/** An R2 bucket that records deletions, and can be told to start refusing. */
-function recordingBucket() {
+/**
+ * A small in-memory R2: it holds objects, records deletions, and can be told to
+ * start refusing so the retry path can be exercised.
+ */
+function recordingBucket(initial: Record<string, number> = {}) {
+  const objects = new Map<string, number>(Object.entries(initial));
   const deleted: string[] = [];
   let failing = false;
   return {
     deleted,
+    objects,
     fail(value: boolean) {
       failing = value;
     },
     bucket: {
       delete: async (key: string) => {
         if (failing) throw new Error("R2 unavailable");
+        objects.delete(key);
         deleted.push(key);
       },
+      list: async (options?: { prefix?: string }) => ({
+        objects: [...objects.entries()]
+          .filter(([key]) => key.startsWith(options?.prefix ?? ""))
+          .map(([key, size]) => ({ key, size })),
+        truncated: false as const,
+      }),
     } as unknown as R2Bucket,
   };
 }
@@ -341,7 +353,11 @@ describe("orphaned media", () => {
         actInput({ publicImageAssetId: "asset-used" }),
       );
 
-      const report = findOrphanedAssets(storage.sql, PRIMARY_SHOW_ID);
+      const report = await findOrphanedAssets(
+        storage.sql,
+        r2.bucket,
+        PRIMARY_SHOW_ID,
+      );
       expect(report.assets.map((asset) => asset.id)).toEqual(["asset-leaked"]);
       expect(report.totalBytes).toBe(2048);
 
@@ -361,8 +377,68 @@ describe("orphaned media", () => {
       ).toBe(1);
       // A second sweep has nothing to do.
       expect(
-        findOrphanedAssets(storage.sql, PRIMARY_SHOW_ID).assets,
+        (await findOrphanedAssets(storage.sql, r2.bucket, PRIMARY_SHOW_ID))
+          .assets,
       ).toHaveLength(0);
+    });
+  });
+
+  it("finds and removes objects whose metadata row is already gone", async () => {
+    await withShow("orphans-stray", async (storage) => {
+      // The leak an older build produced: the row was deleted and the R2
+      // failure was swallowed, so nothing in the database can reveal the bytes.
+      const r2 = recordingBucket({
+        "primary/asset-stranded": 7_000_000,
+        "fonts/abc123.woff2": 42_000,
+      });
+      seedAsset(storage, "asset-live");
+      createAct(
+        storage,
+        PRIMARY_SHOW_ID,
+        actInput({ publicImageAssetId: "asset-live" }),
+      );
+
+      const report = await findOrphanedAssets(
+        storage.sql,
+        r2.bucket,
+        PRIMARY_SHOW_ID,
+      );
+      expect(report.assets).toHaveLength(0);
+      expect(report.strayObjects.map((object) => object.key)).toEqual([
+        "primary/asset-stranded",
+      ]);
+      expect(report.strayBytes).toBe(7_000_000);
+
+      const cleaned = await cleanOrphanedAssets(
+        storage,
+        r2.bucket,
+        PRIMARY_SHOW_ID,
+      );
+      expect(cleaned).toMatchObject({ strays: 1, deleted: 1, complete: true });
+      expect(r2.deleted).toEqual(["primary/asset-stranded"]);
+      // The cached typeface lives outside the show's namespace and is untouched.
+      expect(r2.objects.has("fonts/abc123.woff2")).toBe(true);
+    });
+  });
+
+  it("never treats a live asset's object as stray", async () => {
+    await withShow("orphans-stray-safe", async (storage) => {
+      const r2 = recordingBucket({ "primary/asset-live": 1024 });
+      seedAsset(storage, "asset-live");
+      createAct(
+        storage,
+        PRIMARY_SHOW_ID,
+        actInput({ publicImageAssetId: "asset-live" }),
+      );
+      const report = await findOrphanedAssets(
+        storage.sql,
+        r2.bucket,
+        PRIMARY_SHOW_ID,
+      );
+      expect(report.strayObjects).toEqual([]);
+      await cleanOrphanedAssets(storage, r2.bucket, PRIMARY_SHOW_ID);
+      expect(r2.deleted).toEqual([]);
+      expect(r2.objects.has("primary/asset-live")).toBe(true);
     });
   });
 

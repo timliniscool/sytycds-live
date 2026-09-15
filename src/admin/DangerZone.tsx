@@ -10,6 +10,10 @@ interface OrphanReport {
   }[];
   totalBytes: number;
   pendingCleanup: number;
+  /** Bytes in storage with no metadata row at all. */
+  strayObjects: readonly { key: string; sizeBytes: number }[];
+  strayBytes: number;
+  strayListingTruncated: boolean;
 }
 
 interface ResetResult {
@@ -68,6 +72,10 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
   const confirmed =
     phrase.trim() === "RESET" ||
     phrase.trim().toLowerCase() === eventTitle.trim().toLowerCase();
+  // Both directions count: rows nothing references, and bytes nothing records.
+  const orphanCount = orphans
+    ? orphans.assets.length + orphans.strayObjects.length
+    : 0;
 
   async function reset(): Promise<void> {
     setBusy(true);
@@ -107,10 +115,15 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
     }
     setOrphans(result);
     setFailed(false);
+    const total = result.assets.length + result.strayObjects.length;
+    const bytes = result.totalBytes + result.strayBytes;
     setNotice(
-      result.assets.length === 0
-        ? "No orphaned media. Every uploaded file is still in use."
-        : `${result.assets.length} orphaned file${result.assets.length === 1 ? "" : "s"} using ${megabytes(result.totalBytes)}.`,
+      total === 0
+        ? "No orphaned media. Every file in storage is still in use."
+        : `${total} orphaned file${total === 1 ? "" : "s"} using ${megabytes(bytes)}` +
+            (result.strayObjects.length > 0
+              ? ` — ${result.strayObjects.length} of them left in storage with no record, from an interrupted delete.`
+              : "."),
     );
   }
 
@@ -119,6 +132,7 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
     setNotice(null);
     const result = await request<{
       retired: number;
+      strays: number;
       deleted: number;
       pending: number;
       complete: boolean;
@@ -237,9 +251,11 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
         <div className="danger-zone__copy">
           <h3>Orphaned media</h3>
           <p>
-            Uploaded files that no act and no cue refers to any more. Scanning
-            is safe and changes nothing; cleaning deletes them from storage.
-            Platform and deployment assets are never included.
+            Uploaded files that no act and no cue refers to any more, plus any
+            bytes left in storage with no record at all. Scanning is safe and
+            changes nothing; cleaning deletes them from storage. Cached
+            typefaces and platform assets live outside the show's storage
+            namespace and are never included.
           </p>
         </div>
         <div className="danger-zone__buttons">
@@ -249,18 +265,18 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
           <button
             type="button"
             className="danger-zone__fire"
-            disabled={busy || !orphans || orphans.assets.length === 0}
+            disabled={busy || !orphans || orphanCount === 0}
             onClick={() => void clean()}
           >
-            {orphans && orphans.assets.length > 0
-              ? `DELETE ${orphans.assets.length} FILE${orphans.assets.length === 1 ? "" : "S"}`
+            {orphanCount > 0
+              ? `DELETE ${orphanCount} FILE${orphanCount === 1 ? "" : "S"}`
               : "NOTHING TO DELETE"}
           </button>
           <button type="button" disabled={busy} onClick={() => void retry()}>
             RETRY MEDIA CLEANUP
           </button>
         </div>
-        {orphans && orphans.assets.length > 0 && (
+        {orphans && orphanCount > 0 && (
           <ul className="danger-zone__orphans">
             {orphans.assets.slice(0, 20).map((asset) => (
               <li key={asset.id}>
@@ -270,9 +286,15 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
                 </small>
               </li>
             ))}
-            {orphans.assets.length > 20 && (
+            {orphans.strayObjects.slice(0, 20).map((object) => (
+              <li key={object.key}>
+                <b>{object.key}</b>
+                <small>no record · {megabytes(object.sizeBytes)}</small>
+              </li>
+            ))}
+            {orphanCount > 40 && (
               <li>
-                <small>and {orphans.assets.length - 20} more…</small>
+                <small>and {orphanCount - 40} more…</small>
               </li>
             )}
           </ul>

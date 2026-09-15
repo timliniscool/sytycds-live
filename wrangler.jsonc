@@ -27,7 +27,10 @@
     "PUBLIC_ORIGIN": "https://sytycds-live.timctro-dscgd.workers.dev",
   },
   // The show is a single public origin; preview URLs would only add surface.
-  "workers_dev": true,
+  // Currently OFF: the public URL is disabled while the show is between events.
+  // Set this back to `true` and redeploy to bring the site back up — the Worker,
+  // the show database, the R2 bucket and the secrets are all unaffected by it.
+  "workers_dev": false,
   "preview_urls": false,
   "r2_buckets": [
     {

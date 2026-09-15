@@ -1085,7 +1085,11 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (!(await this.authenticatedAdmin(request, false)))
       return Response.json({ error: "Unauthorised" }, { status: 401 });
     return Response.json(
-      findOrphanedAssets(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+      await findOrphanedAssets(
+        this.ctx.storage.sql,
+        this.env.MEDIA,
+        PRIMARY_SHOW_ID,
+      ),
     );
   }
 
@@ -1109,6 +1113,7 @@ export class ShowCoordinator extends DurableObject<Env> {
       actor: "admin",
       data: {
         retired: result.retired,
+        strays: result.strays,
         deleted: result.deleted,
         pending: result.pending,
       },
