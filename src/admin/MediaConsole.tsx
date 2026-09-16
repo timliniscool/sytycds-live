@@ -150,13 +150,6 @@ export function MediaConsole({
           PROJECTOR MEDIA ERROR: {telemetry.error}
         </p>
       )}
-      {telemetry && !telemetry.armed && (
-        <p className="media-console__warn">
-          PROJECTOR CONNECTED · AUDIO NOT ARMED — go to the projector machine
-          and press ENABLE AUDIO &amp; ENTER SHOW on its screen. Only a click in
-          that browser can unlock sound.
-        </p>
-      )}
       {telemetry?.held && (
         <p className="media-console__warn">
           Projector reloaded during playback: media is held. Press RESUME to
@@ -219,74 +212,6 @@ export function MediaConsole({
         })}
       </ol>
 
-      <div className="media-readout">
-        <span>
-          <small>Selected</small>
-          <b>{selected ? selected.operatorLabel || "Untitled cue" : "—"}</b>
-        </span>
-        <span>
-          <small>Prepared</small>
-          <b>
-            {cues.find((cue) => cue.id === runtime.preparedCueId)
-              ?.operatorLabel ?? "—"}
-          </b>
-        </span>
-        <span>
-          <small>Executing</small>
-          <b>
-            {cues.find(
-              (cue) =>
-                cue.id === runtime.activeVisualCueId ||
-                cue.id === runtime.activeAudioCueId,
-            )?.operatorLabel ?? "—"}
-          </b>
-        </span>
-        <span>
-          <small>Projector</small>
-          <b>
-            {telemetry
-              ? `${telemetry.visual.toLowerCase()} / ${telemetry.audio.toLowerCase()}`
-              : "no telemetry"}
-          </b>
-        </span>
-        <span>
-          <small>Time</small>
-          <b>
-            {clock(position)} / {clock(duration)}
-          </b>
-        </span>
-        <span>
-          <small>Media cache</small>
-          <b>
-            {telemetry?.cache
-              ? `${telemetry.cache.cached}/${telemetry.cache.files} · ${megabytes(telemetry.cache.cachedBytes)}/${megabytes(telemetry.cache.bytes)} MB${telemetry.cache.persisted === true ? " · protected" : ""}`
-              : "—"}
-          </b>
-        </span>
-      </div>
-
-      {duration !== null && duration > 0 && (
-        <div className="media-seek">
-          <input
-            type="range"
-            aria-label="Seek media position"
-            min={0}
-            max={duration}
-            step={1000}
-            value={position ?? 0}
-            onChange={(event) => setSeekMs(Number(event.target.value))}
-            onPointerUp={() => {
-              if (seekMs !== null) run("SEEK_MEDIA", { positionMs: seekMs });
-              setSeekMs(null);
-            }}
-            onKeyUp={() => {
-              if (seekMs !== null) run("SEEK_MEDIA", { positionMs: seekMs });
-              setSeekMs(null);
-            }}
-          />
-        </div>
-      )}
-
       <div className="media-go">
         <button
           type="button"
@@ -301,86 +226,150 @@ export function MediaConsole({
             {selected ? selected.operatorLabel || "Untitled cue" : "no cue"}
           </small>
         </button>
+        <div className="media-go__side">
+          <button
+            type="button"
+            disabled={!selected || busy}
+            onClick={() =>
+              run("PREPARE_CUE", selected ? { cueId: selected.id } : {})
+            }
+          >
+            PREPARE
+          </button>
+          <button
+            type="button"
+            className="media-emergency__replay"
+            disabled={busy}
+            onClick={() => run("REPLAY_MEDIA")}
+          >
+            REPLAY AUDIO
+          </button>
+          <button
+            type="button"
+            className="media-emergency__stop-all"
+            disabled={busy}
+            onClick={() => run("STOP_ALL_MEDIA")}
+          >
+            STOP ALL
+          </button>
+        </div>
       </div>
 
-      <div className="media-transport">
-        <button
-          type="button"
-          disabled={!selected || busy}
-          onClick={() =>
-            run("PREPARE_CUE", selected ? { cueId: selected.id } : {})
-          }
-        >
-          PREPARE
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => run("PAUSE_MEDIA")}
-        >
-          PAUSE
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => run("RESUME_MEDIA")}
-        >
-          RESUME
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => run("RESTART_MEDIA")}
-        >
-          RESTART
-        </button>
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => run("PREVIOUS_CUE")}
-        >
-          ◀ PREV CUE
-        </button>
-        <button type="button" disabled={busy} onClick={() => run("NEXT_CUE")}>
-          NEXT CUE ▶
-        </button>
-      </div>
+      <details className="media-advanced">
+        <summary>
+          Advanced transport
+          <small>readout · pause, resume, restart, seek · cue stepping</small>
+        </summary>
+        <div className="media-readout">
+          <span>
+            <small>Selected</small>
+            <b>{selected ? selected.operatorLabel || "Untitled cue" : "—"}</b>
+          </span>
+          <span>
+            <small>Prepared</small>
+            <b>
+              {cues.find((cue) => cue.id === runtime.preparedCueId)
+                ?.operatorLabel ?? "—"}
+            </b>
+          </span>
+          <span>
+            <small>Executing</small>
+            <b>
+              {cues.find(
+                (cue) =>
+                  cue.id === runtime.activeVisualCueId ||
+                  cue.id === runtime.activeAudioCueId,
+              )?.operatorLabel ?? "—"}
+            </b>
+          </span>
+          <span>
+            <small>Projector</small>
+            <b>
+              {telemetry
+                ? `${telemetry.visual.toLowerCase()} / ${telemetry.audio.toLowerCase()}`
+                : "no telemetry"}
+            </b>
+          </span>
+          <span>
+            <small>Time</small>
+            <b>
+              {clock(position)} / {clock(duration)}
+            </b>
+          </span>
+          <span>
+            <small>Media cache</small>
+            <b>
+              {telemetry?.cache
+                ? `${telemetry.cache.cached}/${telemetry.cache.files} · ${megabytes(telemetry.cache.cachedBytes)}/${megabytes(telemetry.cache.bytes)} MB${telemetry.cache.persisted === true ? " · protected" : ""}`
+                : "—"}
+            </b>
+          </span>
+        </div>
 
-      <div className="media-emergency">
-        <p>EMERGENCY</p>
-        <button
-          type="button"
-          className="media-emergency__replay"
-          disabled={busy}
-          onClick={() => run("REPLAY_MEDIA")}
-        >
-          REPLAY BACKING AUDIO
-        </button>
-        <button
-          type="button"
-          className={runtime.blackScreen ? "is-active" : ""}
-          disabled={busy}
-          onClick={() => run("BLACK_SCREEN")}
-        >
-          {runtime.blackScreen ? "UNBLACK SCREEN" : "BLACK SCREEN"}
-        </button>
-        <button
-          type="button"
-          className="media-emergency__stop"
-          disabled={busy}
-          onClick={() => run("STOP_MEDIA")}
-        >
-          STOP VISUAL
-        </button>
-        <button
-          type="button"
-          className="media-emergency__stop-all"
-          disabled={busy}
-          onClick={() => run("STOP_ALL_MEDIA")}
-        >
-          STOP ALL MEDIA
-        </button>
-      </div>
+        {duration !== null && duration > 0 && (
+          <div className="media-seek">
+            <input
+              type="range"
+              aria-label="Seek media position"
+              min={0}
+              max={duration}
+              step={1000}
+              value={position ?? 0}
+              onChange={(event) => setSeekMs(Number(event.target.value))}
+              onPointerUp={() => {
+                if (seekMs !== null) run("SEEK_MEDIA", { positionMs: seekMs });
+                setSeekMs(null);
+              }}
+              onKeyUp={() => {
+                if (seekMs !== null) run("SEEK_MEDIA", { positionMs: seekMs });
+                setSeekMs(null);
+              }}
+            />
+          </div>
+        )}
+
+        <div className="media-transport">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => run("PAUSE_MEDIA")}
+          >
+            PAUSE
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => run("RESUME_MEDIA")}
+          >
+            RESUME
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => run("RESTART_MEDIA")}
+          >
+            RESTART
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => run("PREVIOUS_CUE")}
+          >
+            ◀ PREV CUE
+          </button>
+          <button type="button" disabled={busy} onClick={() => run("NEXT_CUE")}>
+            NEXT CUE ▶
+          </button>
+          <button
+            type="button"
+            className="media-emergency__stop"
+            disabled={busy}
+            onClick={() => run("STOP_MEDIA")}
+          >
+            STOP VISUAL
+          </button>
+        </div>
+      </details>
 
       <p className="media-console__pending" aria-live="polite">
         {pending

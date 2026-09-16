@@ -9,6 +9,7 @@ import { submitJudgeScore } from "../worker/judge-submissions";
 import { finaliseResult } from "../worker/results";
 import {
   applyScoringConfiguration,
+  clearActScoringData,
   resetScoringData,
 } from "../worker/scoring-config";
 import { upsertShow } from "../worker/show-config";
@@ -142,18 +143,65 @@ describe("reset all votes and scores", () => {
         kind: "admin",
       });
       expect(before?.role === "admin" && before.ranking.ranked).toHaveLength(1);
-      const revisionBefore = storage.sql
+
+      // Per-act clear first: only the first act's scoring goes, and because it
+      // is the current act its reveal is hidden and voting is closed.
+      expect(command("OPEN_ALL_JUDGES").acknowledgement.status).toBe(
+        "accepted",
+      );
+      expect(
+        command("SELECT_ACT", { actId: second.id }).acknowledgement.status,
+      ).toBe("accepted");
+      expect(command("OPEN_ALL_JUDGES").acknowledgement.status).toBe(
+        "accepted",
+      );
+      expect(
+        submitJudgeScore(storage, PRIMARY_SHOW_ID, judgeIds[0]!, "6").ok,
+      ).toBe(true);
+      expect(
+        command("SELECT_ACT", { actId: first.id }).acknowledgement.status,
+      ).toBe("accepted");
+      expect(
+        clearActScoringData(storage, PRIMARY_SHOW_ID, "act-missing"),
+      ).toEqual({
+        ok: false,
+        reason: "Act not found",
+      });
+      const one = clearActScoringData(storage, PRIMARY_SHOW_ID, first.id);
+      expect(one).toEqual({
+        ok: true,
+        audienceVotes: 1,
+        judgeScores: 2,
+        finalisedResults: 1,
+      });
+      const afterOne = projectShowState(storage, PRIMARY_SHOW_ID, {
+        kind: "admin",
+      });
+      if (afterOne?.role !== "admin")
+        throw new Error("expected admin projection");
+      expect(afterOne.ranking.ranked).toHaveLength(0);
+      // The second act's judge score survives a clear aimed at the first.
+      expect(
+        storage.sql
+          .exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM show_judge_submissions WHERE act_id = ?",
+            second.id,
+          )
+          .one().count,
+      ).toBe(1);
+      expect(afterOne.show.audienceVoteState).toBe("CLOSED");
+
+      const revisionBeforeReset = storage.sql
         .exec<{ revision: number }>(
           "SELECT revision FROM shows WHERE id = ?",
           PRIMARY_SHOW_ID,
         )
         .one().revision;
-
       const summary = resetScoringData(storage, PRIMARY_SHOW_ID);
       expect(summary).toEqual({
-        audienceVotes: 1,
-        judgeScores: 2,
-        finalisedResults: 1,
+        audienceVotes: 0,
+        judgeScores: 1,
+        finalisedResults: 0,
       });
 
       const after = projectShowState(storage, PRIMARY_SHOW_ID, {
@@ -170,7 +218,7 @@ describe("reset all votes and scores", () => {
       );
       expect(after.show.audienceVoteState).toBe("CLOSED");
       expect(after.runtime.resultsStage).toBe("HIDDEN");
-      expect(after.show.revision).toBe(revisionBefore + 1);
+      expect(after.show.revision).toBe(revisionBeforeReset + 1);
       expect(after.audienceAggregates).toHaveLength(0);
       // The show itself is untouched: acts, order, current act, judge panel.
       expect(after.acts.map((act) => act.id)).toEqual([first.id, second.id]);

@@ -153,6 +153,84 @@ export function clearScoringData(
   return summary;
 }
 
+export const CLEAR_ACT_SCORING_CONFIRMATION = "CLEAR ACT SCORING";
+
+/**
+ * Clears the scoring of one act only: its audience votes and aggregate, judge
+ * scores and permissions, and any finalised result. Every other act keeps its
+ * scores. If the act is the current one, audience voting closes and a revealed
+ * result is hidden, because what was on the screen no longer exists.
+ */
+export function clearActScoringData(
+  storage: DurableObjectStorage,
+  showIdentifier: string,
+  actIdentifier: string,
+):
+  | {
+      ok: true;
+      audienceVotes: number;
+      judgeScores: number;
+      finalisedResults: number;
+    }
+  | { ok: false; reason: string } {
+  return storage.transactionSync(() => {
+    const sql = storage.sql;
+    const act = sql
+      .exec<{ id: string }>(
+        "SELECT id FROM acts WHERE show_id = ? AND id = ?",
+        showIdentifier,
+        actIdentifier,
+      )
+      .toArray()[0];
+    if (!act) return { ok: false, reason: "Act not found" };
+    const count = (table: string) =>
+      sql
+        .exec<{ count: number }>(
+          `SELECT COUNT(*) AS count FROM ${table} WHERE show_id = ? AND act_id = ?`,
+          showIdentifier,
+          actIdentifier,
+        )
+        .one().count;
+    const summary = {
+      audienceVotes: count("audience_votes"),
+      judgeScores: count("show_judge_submissions"),
+      finalisedResults: count("finalised_results_v2"),
+    };
+    for (const table of SCORING_TABLES)
+      sql.exec(
+        `DELETE FROM ${table} WHERE show_id = ? AND act_id = ?`,
+        showIdentifier,
+        actIdentifier,
+      );
+    const timestamp = new Date().toISOString();
+    const current = sql
+      .exec<{ active_act_id: string | null }>(
+        "SELECT active_act_id FROM shows WHERE id = ?",
+        showIdentifier,
+      )
+      .toArray()[0];
+    if (current?.active_act_id === actIdentifier) {
+      sql.exec(
+        `UPDATE shows SET result_reveal_state = 'HIDDEN', audience_vote_state = 'CLOSED'
+         WHERE id = ?`,
+        showIdentifier,
+      );
+      sql.exec(
+        `UPDATE show_runtime SET vote_close_revision = NULL, vote_closed_at = NULL,
+           global_judge_permission = 'CLOSED'
+         WHERE show_id = ?`,
+        showIdentifier,
+      );
+    }
+    sql.exec(
+      "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
+      timestamp,
+      showIdentifier,
+    );
+    return { ok: true, ...summary };
+  });
+}
+
 /**
  * The operator's hard reset of every vote and score, leaving the show itself
  * as built. The revision moves so every connected surface re-derives.

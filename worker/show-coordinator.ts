@@ -103,6 +103,8 @@ import {
 } from "./show-reset";
 import {
   applyScoringConfiguration,
+  CLEAR_ACT_SCORING_CONFIRMATION,
+  clearActScoringData,
   parseScoringConfiguration,
   RESET_SCORING_CONFIRMATION,
   resetScoringData,
@@ -431,6 +433,12 @@ export class ShowCoordinator extends DurableObject<Env> {
       );
     if (actDeletionMatch && request.method === "GET")
       return this.handleActDeletionPreview(request, actDeletionMatch[1] ?? "");
+    const actScoringMatch =
+      /^\/api\/admin\/acts\/([A-Za-z0-9_-]{1,128})\/scoring\/reset$/u.exec(
+        url.pathname,
+      );
+    if (actScoringMatch && request.method === "POST")
+      return this.handleClearActScoring(request, actScoringMatch[1] ?? "");
     if (url.pathname === "/api/admin/media/orphans" && request.method === "GET")
       return this.handleOrphanReport(request);
     if (
@@ -901,6 +909,44 @@ export class ShowCoordinator extends DurableObject<Env> {
     this.broadcastSnapshots("audience");
     this.broadcastSnapshots("judge");
     return Response.json(summary);
+  }
+
+  /** Clears one act's votes, judge scores and result; the rest of the show stays. */
+  private async handleClearActScoring(
+    request: Request,
+    actIdentifier: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    const body = await this.adminBody(request);
+    if (!isRecord(body) || body.confirm !== CLEAR_ACT_SCORING_CONFIRMATION) {
+      return Response.json(
+        { error: `Send confirm: "${CLEAR_ACT_SCORING_CONFIRMATION}"` },
+        { status: 400 },
+      );
+    }
+    const result = clearActScoringData(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      actIdentifier,
+    );
+    if (!result.ok)
+      return Response.json({ error: result.reason }, { status: 404 });
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "act.scoring_cleared",
+      actor: "admin",
+      data: { actId: actIdentifier, ...result },
+    });
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("audience");
+    this.broadcastSnapshots("judge");
+    return Response.json({
+      audienceVotes: result.audienceVotes,
+      judgeScores: result.judgeScores,
+      finalisedResults: result.finalisedResults,
+    });
   }
 
   /** Every cached typeface, so an act override can only choose what exists. */

@@ -245,3 +245,34 @@ Six operator reports after the first hand-over, each addressed and verified:
   cache, R2 storage (show, test, fonts, total), database size and schema, and
   the most recent refusals and media errors. **RE-LIST STORAGE** bypasses the
   server's 45 s cache.
+
+---
+
+## Follow-up 2 (same day): console redesign and feedback
+
+- **Console redesign.** The operator console is now a set of rounded cards on
+  a quiet ground: no hairline boxes around every control, one accent, soft
+  status tints, pill navigation, a calmer running order. Duplicates from the
+  Prompt 1 classification are folded: the screen row keeps only LOBBY,
+  INTERMISSION, FINAL RESULTS and BLACK (the step rail owns the act steps),
+  the media console shows GO · PREPARE · REPLAY · STOP ALL with the transport
+  readout, pause/resume/restart/seek and cue stepping behind an **Advanced
+  transport** disclosure, and its "audio not armed" banner (a duplicate of the
+  status bar) is gone. Audience voting is one toggle that says what it will do.
+- **Help** is a static pill in the running-order footer that opens the guide
+  as a centred sheet; it never floats over other controls.
+- **Feedback.** Every refused command is shown as an on-screen notification
+  with the coordinator's reason. A `stale` acknowledgement (console revision
+  behind the show) now triggers a resync and says so, instead of a control
+  that appears dead. While audience voting is open, Previous/Next are disabled
+  with a note and pressing an act row explains why. The two blocking
+  `window.confirm` dialogs on the SHOW view are replaced by press-again
+  confirmation. Lazily loaded views sit inside an error boundary, so a chunk
+  that fails to load (an old tab after a deployment) shows a reload prompt
+  instead of a blank screen — the likely cause of "Help makes the screen
+  opaque".
+- **Per-act clear.** **CLEAR VOTES & SCORES…** on the current act's scoring
+  card and **CLEAR** on every RESULTS row remove one act's votes, judge scores
+  and result behind a typed confirmation (`CLEAR`), via
+  `POST /api/admin/acts/:id/scoring/reset`. The show-wide reset remains in
+  Danger. Both are covered by `test/scoring-reset.test.ts`.

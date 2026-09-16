@@ -5,6 +5,8 @@ import {
   useRef,
   useState,
   type FormEvent,
+  Component,
+  type ReactNode,
 } from "react";
 
 import {
@@ -23,6 +25,7 @@ import type {
 import { EmergencyPanel } from "../admin/EmergencyPanel";
 import { HistoryPanel } from "../admin/HistoryPanel";
 import { AnalyticsPanel } from "../admin/AnalyticsPanel";
+import { ClearActScoresDialog } from "../admin/ClearActScores";
 import { MediaConsole } from "../admin/MediaConsole";
 import { JudgeEntry } from "../math/MathExpression";
 import { ResultsPanel } from "../admin/ResultsPanel";
@@ -50,6 +53,39 @@ const HelpPanel = lazy(async () => {
   const module = await import("../admin/HelpPanel");
   return { default: module.HelpPanel };
 });
+
+/**
+ * A lazily loaded view can fail to arrive — most often an old console tab
+ * asking for a chunk that a new deployment has replaced. Without a boundary
+ * that error unmounts the whole console and the operator sees a blank screen;
+ * with one, the view says what happened and offers the one fix.
+ */
+class ViewBoundary extends Component<
+  { name: string; children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  render(): ReactNode {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <div className="admin-view-failed" role="alert">
+        <strong>The {this.props.name} could not be loaded.</strong>
+        <span>
+          This usually means the console was updated while this tab was open.
+          Reload to pick up the current version; the show itself is unaffected.
+        </span>
+        <button type="button" onClick={() => window.location.reload()}>
+          RELOAD CONSOLE
+        </button>
+      </div>
+    );
+  }
+}
 
 type AuthenticationState =
   "checking" | "submitting" | "signed-out" | "signed-in" | "failed";
@@ -229,6 +265,13 @@ const MODES: readonly DisplayMode[] = [
   "INTERMISSION",
   "FINAL_RESULTS",
 ];
+
+/** Modes that are steps of the act flow; the step rail owns them. */
+const SCREEN_STEP_MODES: ReadonlySet<DisplayMode> = new Set([
+  "ACT_CARD",
+  "PERFORMANCE",
+  "SCOREBOARD",
+]);
 const VIEWS: readonly { view: ConsoleView; label: string }[] = [
   { view: "show", label: "SHOW" },
   { view: "acts", label: "ACTS & MEDIA" },
@@ -266,6 +309,10 @@ function Console() {
   const [notice, setNotice] = useState<string | null>(null);
   const [view, setView] = useState<ConsoleView>("show");
   const [helpOpen, setHelpOpen] = useState(false);
+  const [clearing, setClearing] = useState<{
+    actId: string;
+    actName: string;
+  } | null>(null);
   if (!clientRef.current)
     clientRef.current = new RealtimeClient({
       url: showWebSocketUrl(window.location),
@@ -319,10 +366,27 @@ function Console() {
     client.connect();
     return () => client.destroy();
   }, [client]);
+  // Every refusal is said plainly. A "stale" answer means this console's
+  // revision fell behind the coordinator: the state is re-fetched and the
+  // operator is told to press again, instead of a control that seems dead.
   useEffect(() => {
-    if (acknowledgement?.acknowledgement.reason)
-      setNotice(acknowledgement.acknowledgement.reason);
-  }, [acknowledgement]);
+    const ack = acknowledgement?.acknowledgement;
+    if (!ack) return;
+    if (ack.status === "stale") {
+      client.requestResync();
+      setNotice(
+        "The console was a step behind the show and has refreshed. Press that again.",
+      );
+      return;
+    }
+    if (ack.status !== "accepted")
+      setNotice(ack.reason ?? "That command was not accepted.");
+  }, [acknowledgement, client]);
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 7_000);
+    return () => clearTimeout(timer);
+  }, [notice]);
 
   /** Returns the command ID so a caller can wait for its acknowledgement. */
   function send(
@@ -355,10 +419,30 @@ function Console() {
   const mediaPlaying =
     projection?.runtime.visualTransport === "PLAYING" ||
     projection?.runtime.audioTransport === "PLAYING";
+  // Nothing here blocks with a dialog. A refused or risky action is said on
+  // screen, and a risky one is confirmed by pressing the same control again
+  // within a few seconds.
+  const pressAgainRef = useRef<{ key: string; until: number } | null>(null);
+  function confirmByPressingAgain(key: string, message: string): boolean {
+    const pending = pressAgainRef.current;
+    if (pending && pending.key === key && pending.until > Date.now()) {
+      pressAgainRef.current = null;
+      return true;
+    }
+    pressAgainRef.current = { key, until: Date.now() + 6_000 };
+    setNotice(`${message} Press again to confirm.`);
+    return false;
+  }
   function select(actId: string): void {
+    if (projection?.show.audienceVoteState === "OPEN") {
+      setNotice(
+        "Audience voting is open. Close it before changing the current act.",
+      );
+      return;
+    }
     if (
       mediaPlaying &&
-      !window.confirm("Media is playing. Change the current act?")
+      !confirmByPressingAgain(`select:${actId}`, "Media is playing.")
     )
       return;
     send("SELECT_ACT", { actId });
@@ -487,7 +571,6 @@ function Console() {
             PROJECTOR COMMAND FAILED
           </strong>
         )}
-        {notice && <output>{notice}</output>}
         <small className="admin-status__attribution">
           {PLATFORM_ATTRIBUTION}
         </small>
@@ -538,6 +621,7 @@ function Console() {
                 aria-selected={current}
                 key={act.id}
                 className={`act-row${current ? " act-row--current" : ""}${act.withdrawn ? " act-row--withdrawn" : ""}`}
+                aria-disabled={votingOpen && !current}
                 onClick={() => select(act.id)}
               >
                 <span>{String(act.order + 1).padStart(2, "0")}</span>
@@ -558,12 +642,35 @@ function Console() {
           })}
         </div>
         <div className="sequence-controls">
-          <button type="button" onClick={() => send("PREVIOUS_ACT")}>
+          <button
+            type="button"
+            className="admin-help-button"
+            aria-haspopup="dialog"
+            aria-expanded={helpOpen}
+            title="Help & operator guide"
+            onClick={() => setHelpOpen(true)}
+          >
+            <span aria-hidden="true">?</span> Help
+          </button>
+          <button
+            type="button"
+            disabled={votingOpen}
+            onClick={() => send("PREVIOUS_ACT")}
+          >
             ← Previous
           </button>
-          <button type="button" onClick={() => send("NEXT_ACT")}>
+          <button
+            type="button"
+            disabled={votingOpen}
+            onClick={() => send("NEXT_ACT")}
+          >
             Next →
           </button>
+          {votingOpen && (
+            <p className="sequence-controls__hint">
+              Audience voting is open — close it to change the act.
+            </p>
+          )}
         </div>
       </section>
       <div className="admin-column">
@@ -583,26 +690,32 @@ function Console() {
           />
         )}
         {view === "acts" && (
-          <Suspense
-            fallback={<p className="admin-loading">Loading act editor…</p>}
-          >
-            <ActEditor
-              acts={projection.acts}
-              activeActId={projection.show.activeActId}
-              onSelectLive={select}
-            />
-          </Suspense>
+          <ViewBoundary name="act editor">
+            <Suspense
+              fallback={<p className="admin-loading">Loading act editor…</p>}
+            >
+              <ActEditor
+                acts={projection.acts}
+                activeActId={projection.show.activeActId}
+                onSelectLive={select}
+              />
+            </Suspense>
+          </ViewBoundary>
         )}
         {view === "setup" && (
-          <Suspense fallback={<p className="admin-loading">Loading setup…</p>}>
-            <SetupWorkspace
-              projection={projection}
-              client={client}
-              judgeConnections={judgeConnections}
-              presence={presence}
-              send={send}
-            />
-          </Suspense>
+          <ViewBoundary name="setup view">
+            <Suspense
+              fallback={<p className="admin-loading">Loading setup…</p>}
+            >
+              <SetupWorkspace
+                projection={projection}
+                client={client}
+                judgeConnections={judgeConnections}
+                presence={presence}
+                send={send}
+              />
+            </Suspense>
+          </ViewBoundary>
         )}
         {view === "show" && (
           <>
@@ -693,20 +806,22 @@ function Console() {
                 </div>
               </div>
               <div className="display-controls">
-                <p>DISPLAY MODE</p>
-                {MODES.map((mode) => (
-                  <button
-                    key={mode}
-                    type="button"
-                    className={
-                      projection.show.displayMode === mode ? "is-active" : ""
-                    }
-                    aria-pressed={projection.show.displayMode === mode}
-                    onClick={() => send("SET_DISPLAY_MODE", { mode })}
-                  >
-                    {mode.replaceAll("_", " ")}
-                  </button>
-                ))}
+                <p>SCREEN</p>
+                {MODES.filter((mode) => !SCREEN_STEP_MODES.has(mode)).map(
+                  (mode) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      className={
+                        projection.show.displayMode === mode ? "is-active" : ""
+                      }
+                      aria-pressed={projection.show.displayMode === mode}
+                      onClick={() => send("SET_DISPLAY_MODE", { mode })}
+                    >
+                      {mode.replaceAll("_", " ")}
+                    </button>
+                  ),
+                )}
                 <button
                   type="button"
                   className={`display-controls__black${projection.runtime.blackScreen ? " is-active" : ""}`}
@@ -758,26 +873,33 @@ function Console() {
                 </span>
               </div>
               <div className="vote-actions">
-                <button
-                  type="button"
-                  disabled={!active || votingOpen}
-                  onClick={() => {
-                    if (
-                      active &&
-                      window.confirm(`Open voting for ${active.actName}?`)
-                    )
-                      send("OPEN_AUDIENCE_VOTING");
-                  }}
-                >
-                  OPEN AUDIENCE VOTING
-                </button>
-                <button
-                  type="button"
-                  disabled={!votingOpen}
-                  onClick={() => send("CLOSE_AUDIENCE_VOTING")}
-                >
-                  CLOSE AUDIENCE VOTING
-                </button>
+                {votingOpen ? (
+                  <button
+                    type="button"
+                    className="vote-actions__close"
+                    onClick={() => send("CLOSE_AUDIENCE_VOTING")}
+                  >
+                    CLOSE AUDIENCE VOTING
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="vote-actions__open"
+                    disabled={!active}
+                    onClick={() => {
+                      if (
+                        active &&
+                        confirmByPressingAgain(
+                          "open-voting",
+                          `Open audience voting for ${active.actName}?`,
+                        )
+                      )
+                        send("OPEN_AUDIENCE_VOTING");
+                    }}
+                  >
+                    OPEN AUDIENCE VOTING
+                  </button>
+                )}
               </div>
             </section>
             <section className="judge-workspace" aria-labelledby="judge-title">
@@ -958,6 +1080,18 @@ function Console() {
                 >
                   HIDE
                 </button>
+                <button
+                  type="button"
+                  className="score-actions__clear"
+                  disabled={!active}
+                  title="Remove every vote, judge score and result for this act"
+                  onClick={() =>
+                    active &&
+                    setClearing({ actId: active.id, actName: active.actName })
+                  }
+                >
+                  CLEAR VOTES & SCORES…
+                </button>
               </div>
             </section>
             <AnalyticsPanel />
@@ -965,26 +1099,34 @@ function Console() {
         )}
       </div>
       {/*
-        The operator guide is one press away from every view, out of the way
-        in the corner, and never a destination the console has to switch to.
+        The operator guide opens over the console from the Help pill in the
+        running-order footer; it is never a destination the console switches to.
       */}
-      <button
-        type="button"
-        className="admin-help-button"
-        aria-haspopup="dialog"
-        aria-expanded={helpOpen}
-        title="Help & operator guide"
-        onClick={() => setHelpOpen(true)}
-      >
-        <span aria-hidden="true">?</span>
-        <small>HELP</small>
-      </button>
+      {clearing && (
+        <ClearActScoresDialog
+          actId={clearing.actId}
+          actName={clearing.actName}
+          onDone={(message) => setNotice(message)}
+          onClose={() => setClearing(null)}
+        />
+      )}
+      {notice && (
+        <output className="admin-toast" role="status">
+          <span>{notice}</span>
+          <button type="button" onClick={() => setNotice(null)}>
+            DISMISS
+          </button>
+        </output>
+      )}
       {helpOpen && (
         <div
           className="admin-help"
           role="dialog"
           aria-modal="true"
           aria-label="Help and operator guide"
+          onClick={(event) => {
+            if (event.target === event.currentTarget) setHelpOpen(false);
+          }}
         >
           <div className="admin-help__sheet">
             <header className="admin-help__head">
@@ -994,11 +1136,13 @@ function Console() {
               </button>
             </header>
             <div className="admin-help__body">
-              <Suspense
-                fallback={<p className="admin-loading">Loading guide…</p>}
-              >
-                <HelpPanel />
-              </Suspense>
+              <ViewBoundary name="operator guide">
+                <Suspense
+                  fallback={<p className="admin-loading">Loading guide…</p>}
+                >
+                  <HelpPanel />
+                </Suspense>
+              </ViewBoundary>
             </div>
           </div>
         </div>

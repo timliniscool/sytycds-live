@@ -1,3 +1,5 @@
+import { useState } from "react";
+
 import type { AdminCommandType } from "../../shared/admin-command";
 import type {
   AdminRanking,
@@ -5,6 +7,7 @@ import type {
   ResultsStage,
 } from "../../shared/domain";
 import { rankGroups } from "../../shared/ranking";
+import { ClearActScoresDialog } from "./ClearActScores";
 import { exclusionLabel, whyNothingIsEligible } from "./results-view";
 
 export interface ResultsPanelProps {
@@ -38,6 +41,11 @@ export function ResultsPanel({
   send,
 }: ResultsPanelProps) {
   const groups = rankGroups(ranking.ranked);
+  const [clearing, setClearing] = useState<{
+    actId: string;
+    actName: string;
+  } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const onScreen = displayMode === "FINAL_RESULTS";
   const nothingRanked = ranking.ranked.length === 0;
   // A disabled control that says nothing is the worst thing to meet mid-show,
@@ -150,18 +158,22 @@ export function ResultsPanel({
                   {entry.finalScore.toFixed(3)}
                 </td>
                 <td>{revealed ? "SHOWN" : "hidden"}</td>
-                <td>
+                <td className="results-table__actions">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setClearing({
+                        actId: entry.actId,
+                        actName: entry.actName,
+                      })
+                    }
+                  >
+                    CLEAR
+                  </button>
                   <button
                     type="button"
                     disabled={entry.actId === activeActId}
-                    onClick={() => {
-                      if (
-                        window.confirm(
-                          `Withdraw ${entry.performerName}? Their result stays stored but leaves the ranking.`,
-                        )
-                      )
-                        send("WITHDRAW_ACT", { actId: entry.actId });
-                    }}
+                    onClick={() => send("WITHDRAW_ACT", { actId: entry.actId })}
                   >
                     WITHDRAW
                   </button>
@@ -180,14 +192,19 @@ export function ResultsPanel({
                 {exclusionLabel(reason, missingJudgeSlots)}
               </td>
               <td>never</td>
-              <td>
+              <td className="results-table__actions">
+                <button
+                  type="button"
+                  onClick={() =>
+                    setClearing({ actId: act.id, actName: act.actName })
+                  }
+                >
+                  CLEAR
+                </button>
                 <button
                   type="button"
                   disabled={act.id === activeActId}
-                  onClick={() => {
-                    if (window.confirm(`Withdraw ${act.performerName}?`))
-                      send("WITHDRAW_ACT", { actId: act.id });
-                  }}
+                  onClick={() => send("WITHDRAW_ACT", { actId: act.id })}
                 >
                   WITHDRAW
                 </button>
@@ -215,6 +232,19 @@ export function ResultsPanel({
           ))}
         </tbody>
       </table>
+      {notice && (
+        <output className="results-panel__notice" role="status">
+          {notice}
+        </output>
+      )}
+      {clearing && (
+        <ClearActScoresDialog
+          actId={clearing.actId}
+          actName={clearing.actName}
+          onDone={(message) => setNotice(message)}
+          onClose={() => setClearing(null)}
+        />
+      )}
     </section>
   );
 }

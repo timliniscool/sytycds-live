@@ -5334,3 +5334,699 @@ summary::-webkit-details-marker {
   overflow-wrap: anywhere;
   color: var(--admin-dim);
 }
+
+/* ============================ console redesign ============================ */
+
+/*
+ * The operator console as a calm surface: a few rounded cards on a quiet
+ * ground, one accent, soft status colours and no hairline boxes around every
+ * control. Everything below refines the rules above it; the show theme still
+ * supplies every colour through its tokens.
+ */
+.admin-console {
+  --c-radius: 16px;
+  --c-radius-sm: 10px;
+  --c-card: var(--theme-surface);
+  --c-card-2: var(--theme-elevated);
+  --c-line: color-mix(in srgb, var(--theme-border) 45%, transparent);
+  --c-soft-accent: color-mix(in srgb, var(--theme-accent) 16%, transparent);
+  --c-soft-live: color-mix(in srgb, var(--theme-success) 16%, transparent);
+  --c-soft-danger: color-mix(in srgb, var(--theme-danger) 14%, transparent);
+  --c-soft-warning: color-mix(in srgb, var(--theme-warning) 16%, transparent);
+  grid-template-columns: minmax(250px, 0.72fr) minmax(0, 2fr);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Controls -------------------------------------------------------------- */
+.admin-console button {
+  min-height: 40px;
+  padding: 0.5rem 0.85rem;
+  border: 1px solid transparent;
+  border-radius: var(--c-radius-sm);
+  background: var(--c-card-2);
+  font-weight: 650;
+  letter-spacing: 0.01em;
+  line-height: 1.15;
+}
+.admin-console button:hover:not(:disabled) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--c-card-2) 70%, var(--theme-accent));
+}
+.admin-console button.is-active {
+  border-color: transparent;
+  background: var(--admin-accent);
+  color: var(--admin-on-accent);
+}
+.admin-console button:disabled {
+  opacity: 0.38;
+}
+.admin-console button:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--theme-accent) 70%, transparent);
+  outline-offset: 2px;
+}
+
+/* Status bar --------------------------------------------------------------- */
+.admin-status {
+  gap: 0.5rem 0.9rem;
+  min-height: 44px;
+  padding: 0.35rem 1rem;
+  border-bottom: 1px solid var(--c-line);
+  background: var(--theme-background);
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.admin-mark {
+  letter-spacing: 0.08em;
+}
+.connection,
+.projector-readout {
+  padding: 0.22rem 0.55rem;
+  border: 0 !important;
+  border-radius: 999px;
+  background: var(--c-card-2);
+  font-weight: 700;
+}
+.connection--live {
+  background: var(--c-soft-live);
+}
+.projector-readout.is-ready {
+  background: var(--c-soft-live);
+}
+.admin-views {
+  gap: 0.15rem;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--c-card-2);
+}
+.admin-views button {
+  min-height: 28px !important;
+  padding: 0.2rem 0.75rem !important;
+  border-radius: 999px !important;
+  background: transparent;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+.admin-views button:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--theme-accent) 22%, transparent);
+}
+
+/* Running order ---------------------------------------------------------- */
+.running-order {
+  padding: 0.9rem 0.75rem 0.75rem;
+  border-right: 1px solid var(--c-line);
+  background: var(--theme-background);
+}
+.running-order .region-title {
+  padding: 0 0.35rem 0.6rem;
+  border: 0;
+}
+.act-list {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.1rem;
+}
+.act-row {
+  min-height: 52px;
+  padding: 0.45rem 0.6rem;
+  border: 0 !important;
+  border-radius: var(--c-radius-sm) !important;
+  background: transparent !important;
+}
+.act-row:hover:not(:disabled) {
+  background: var(--c-card-2) !important;
+}
+.act-row--current {
+  border-left: 0 !important;
+  background: var(--c-soft-accent) !important;
+}
+.act-row span:nth-last-child(-n + 2) {
+  font-size: 0.6rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.sequence-controls {
+  grid-template-columns: auto 1fr 1fr;
+  gap: 0.4rem;
+  padding: 0.75rem 0.1rem 0;
+  border-top: 1px solid var(--c-line);
+}
+.admin-help-button {
+  position: static;
+  width: auto;
+  min-height: 40px !important;
+  padding: 0.5rem 0.8rem !important;
+  border-radius: var(--c-radius-sm) !important;
+  border-color: transparent !important;
+  background: var(--c-soft-accent) !important;
+  box-shadow: none;
+  color: var(--admin-ink);
+  font-size: 0.8rem;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 0.4rem !important;
+}
+.admin-help-button span {
+  display: inline-grid;
+  place-items: center;
+  width: 1.3rem;
+  height: 1.3rem;
+  border-radius: 999px;
+  background: var(--admin-accent);
+  color: var(--admin-on-accent);
+  font-size: 0.8rem;
+}
+.admin-help {
+  place-items: center;
+  padding: 1.5rem;
+  background: color-mix(in srgb, var(--theme-background) 62%, transparent);
+  backdrop-filter: blur(2px);
+}
+.admin-help__sheet {
+  width: min(60rem, 100%);
+  height: min(86dvh, 100%);
+  border: 0;
+  border-radius: var(--c-radius);
+  overflow: hidden;
+  background: var(--c-card);
+}
+.admin-help__head {
+  border-bottom: 1px solid var(--c-line);
+}
+
+/* The main column: stacked cards ------------------------------------------ */
+.admin-column {
+  display: grid;
+  /* Cards are max-content tracks: an `auto` track lets an overflow-hidden card
+     shrink to nothing when the column is shorter than its content. */
+  grid-auto-rows: max-content;
+  align-content: start;
+  gap: 0.9rem;
+  padding: 1rem 1.1rem 3rem;
+  overflow-y: auto;
+}
+.admin-column > section,
+.admin-column > .media-console,
+.admin-column > .analytics,
+.admin-column > .emergency-panel {
+  border: 0 !important;
+  border-radius: var(--c-radius);
+  background: var(--c-card);
+  overflow: hidden;
+}
+.admin-column > .override-banner {
+  border: 0;
+  border-radius: var(--c-radius);
+}
+.region-title {
+  padding: 1rem 1.1rem 0.6rem;
+  border: 0;
+}
+.region-title p,
+.media-console__head p,
+.media-emergency p,
+.display-controls p,
+.show-flow p,
+.emergency-panel__head p {
+  margin: 0 0 0.15rem;
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.region-title h1,
+.region-title h2 {
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+.region-title span {
+  font-size: 0.8rem;
+}
+
+/* Current act, GO, screen -------------------------------------------------- */
+.current-workspace .region-title h2 {
+  font-size: 1.45rem;
+}
+.current-workspace__next {
+  padding: 0 1.1rem 0.7rem;
+}
+.show-flow {
+  padding: 0 1.1rem 0.9rem;
+}
+.show-flow__go {
+  min-height: 72px !important;
+  border: 0 !important;
+  border-radius: var(--c-radius-sm) !important;
+  letter-spacing: 0.14em;
+}
+.show-flow__go:disabled {
+  border: 0 !important;
+}
+.show-flow__steps {
+  gap: 0.3rem;
+  padding: 3px;
+  border-radius: var(--c-radius-sm);
+  background: var(--c-card-2);
+}
+.show-flow__steps button {
+  min-height: 100%;
+  border-radius: 8px;
+  background: transparent;
+  font-size: 0.72rem;
+}
+.display-controls {
+  gap: 0.35rem;
+  padding: 0 1.1rem 1rem;
+}
+.display-controls button {
+  border-radius: 999px;
+  font-size: 0.74rem;
+}
+.display-controls__black {
+  border: 0 !important;
+  background: var(--c-soft-danger);
+  color: var(--admin-danger);
+}
+.display-controls__black.is-active {
+  background: var(--admin-danger) !important;
+  color: var(--admin-on-danger) !important;
+}
+
+/* Emergency ---------------------------------------------------------------- */
+.emergency-panel {
+  gap: 0.5rem;
+  padding: 0.9rem 1.1rem 1rem;
+  background: color-mix(
+    in srgb,
+    var(--theme-danger) 5%,
+    var(--c-card)
+  ) !important;
+}
+.emergency-panel--active {
+  background: color-mix(
+    in srgb,
+    var(--theme-danger) 18%,
+    var(--c-card)
+  ) !important;
+  box-shadow: none;
+}
+.emergency-panel__head h2 {
+  font-size: 1rem;
+}
+.emergency-panel__row button {
+  min-height: 44px !important;
+  border: 0 !important;
+}
+.emergency-panel__arm {
+  background: var(--c-soft-warning) !important;
+}
+.emergency-panel__return {
+  background: var(--c-soft-live) !important;
+}
+.emergency-panel__row--armed {
+  outline: 2px solid var(--admin-danger);
+  outline-offset: 3px;
+  border-radius: var(--c-radius-sm);
+}
+
+/* Media console ------------------------------------------------------------ */
+.media-console__head {
+  padding: 1rem 1.1rem 0.5rem;
+}
+.media-console__head h2 {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+.cue-stack {
+  max-height: 13rem;
+  margin: 0 0.6rem;
+  border: 0;
+}
+.cue-row {
+  border: 0 !important;
+  border-radius: var(--c-radius-sm) !important;
+  min-height: 46px;
+}
+.cue-row--selected {
+  border-left: 0 !important;
+  background: var(--c-soft-accent) !important;
+}
+.flag {
+  border: 0;
+  border-radius: 999px;
+  padding: 0.12rem 0.4rem;
+  background: var(--c-card-2);
+}
+.media-go {
+  display: grid;
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr);
+  gap: 0.5rem;
+  padding: 0.7rem 1.1rem 0.9rem;
+}
+.media-go__button {
+  min-height: 72px !important;
+  border: 0 !important;
+  border-radius: var(--c-radius-sm) !important;
+  letter-spacing: 0.14em;
+}
+.media-go__side {
+  display: grid;
+  gap: 0.4rem;
+}
+.media-go__side button {
+  min-height: 0 !important;
+  font-size: 0.72rem;
+}
+.media-emergency__replay {
+  border: 0 !important;
+  background: var(--c-soft-accent) !important;
+  color: var(--admin-ink) !important;
+}
+.media-emergency__stop,
+.media-emergency__stop-all {
+  border: 0 !important;
+}
+.media-emergency__stop {
+  background: var(--c-soft-danger) !important;
+}
+.media-advanced {
+  margin: 0 1.1rem 0.9rem;
+  border-radius: var(--c-radius-sm);
+  background: var(--theme-background);
+}
+.media-advanced > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  padding: 0.6rem 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  list-style: none;
+}
+.media-advanced > summary::-webkit-details-marker {
+  display: none;
+}
+.media-advanced > summary::before {
+  content: "▸";
+  color: var(--admin-accent);
+}
+.media-advanced[open] > summary::before {
+  content: "▾";
+}
+.media-advanced > summary small {
+  color: var(--admin-dim);
+  font-weight: 500;
+}
+.media-advanced .media-readout {
+  gap: 0.4rem;
+  padding: 0 0.6rem;
+  background: transparent;
+}
+.media-advanced .media-readout span {
+  border-radius: 8px;
+  background: var(--c-card-2);
+}
+.media-advanced .media-seek {
+  padding: 0.6rem 0.8rem 0;
+}
+.media-advanced .media-transport {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.35rem;
+  padding: 0.6rem 0.6rem 0.7rem;
+}
+.media-advanced .media-transport button {
+  font-size: 0.72rem;
+}
+.media-console__pending {
+  padding: 0 1.1rem 0.8rem;
+}
+.media-console__alarm,
+.media-console__warn {
+  margin: 0 1.1rem 0.4rem;
+  border-radius: var(--c-radius-sm);
+}
+
+/* Voting -------------------------------------------------------------------- */
+.voting-workspace {
+  padding: 0;
+  background: var(--c-card);
+}
+.voting-workspace--open {
+  box-shadow: inset 0 0 0 2px var(--admin-live);
+}
+.voting-workspace .region-title {
+  padding: 1rem 1.1rem 0.5rem;
+}
+.vote-metrics {
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0 1.1rem 0.7rem;
+}
+.vote-metrics span {
+  padding: 0.55rem 0.7rem;
+  border-radius: var(--c-radius-sm);
+  background: var(--c-card-2);
+}
+.vote-actions {
+  grid-template-columns: minmax(0, 1fr);
+  padding: 0 1.1rem 1rem;
+}
+.vote-actions button {
+  min-height: 52px;
+  border: 0 !important;
+  font-size: 0.9rem;
+  letter-spacing: 0.06em;
+}
+.vote-actions__open {
+  background: var(--admin-live) !important;
+  color: var(--admin-on-live) !important;
+}
+.vote-actions__close {
+  background: var(--admin-danger) !important;
+  color: var(--admin-on-danger) !important;
+}
+
+/* Judges ---------------------------------------------------------------------- */
+.judge-global,
+.score-actions {
+  padding: 0 1.1rem 0.7rem;
+  border: 0;
+}
+.judge-global button,
+.score-actions button {
+  border: 0 !important;
+}
+.judge-global button:first-child {
+  background: var(--c-soft-live);
+}
+.judge-global button:last-child,
+.score-actions button:last-child {
+  background: var(--c-soft-danger);
+}
+.judge-grid {
+  grid-template-columns: repeat(auto-fill, minmax(11.5rem, 1fr));
+  gap: 0.5rem;
+  padding: 0 1.1rem 1rem;
+}
+.judge-row {
+  padding: 0.7rem 0.75rem;
+  border: 0;
+  border-radius: var(--c-radius-sm);
+  background: var(--c-card-2);
+}
+.judge-row header b {
+  font-size: 0.9rem;
+}
+.judge-row p {
+  min-height: 2rem;
+  margin: 0.45rem 0;
+}
+.signal {
+  margin: 0.35rem 0.3rem 0 0;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  background: var(--theme-background);
+  font-size: 0.58rem;
+}
+.signal--live {
+  background: var(--c-soft-live);
+}
+.signal--locked {
+  background: var(--c-soft-accent);
+}
+.judge-row footer button {
+  min-height: 34px;
+  font-size: 0.7rem;
+}
+
+/* Scoring ----------------------------------------------------------------- */
+.score-metrics {
+  grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
+  gap: 0.5rem;
+  padding: 0 1.1rem 0.7rem;
+  background: transparent;
+}
+.score-metrics span {
+  border-radius: var(--c-radius-sm);
+  background: var(--c-card-2);
+}
+.score-metrics b {
+  font-size: 1.3rem;
+}
+.score-actions {
+  padding-bottom: 1rem;
+}
+
+/* Analytics / override ------------------------------------------------- */
+.analytics > summary {
+  padding: 0.9rem 1.1rem;
+}
+.analytics__grid > span,
+.analytics__failures li {
+  border: 0;
+  border-radius: var(--c-radius-sm);
+  background: var(--c-card-2);
+}
+.override-banner {
+  border: 0;
+}
+
+/* Editors and setup: the same cards ------------------------------------- */
+.editor-section,
+.setup-section,
+.results-panel,
+.history,
+.preflight,
+.danger-zone__action,
+.act-editor__head {
+  border: 0 !important;
+  border-radius: var(--c-radius);
+  background: var(--c-card);
+}
+.setup-form input,
+.setup-form select,
+.act-form input,
+.act-form select,
+.act-form textarea,
+.cue-form input,
+.cue-form select,
+.cue-form textarea,
+.scoring-config input,
+.font-search input,
+.font-search select,
+.scoring-reset input,
+.test-show__options input,
+.test-show__options select,
+.danger-zone__confirm input,
+select {
+  border-color: var(--c-line);
+  border-radius: var(--c-radius-sm);
+  background-color: var(--theme-background);
+}
+.media-library,
+.appearance-fields,
+.advanced-settings,
+.performance-fields,
+.performer-editor {
+  border-color: var(--c-line) !important;
+  border-radius: var(--c-radius-sm);
+}
+.media-list__item,
+.analytics__grid > span {
+  border-color: var(--c-line);
+  border-radius: var(--c-radius-sm);
+}
+.editor-order > button,
+.results-table button {
+  border-radius: var(--c-radius-sm);
+}
+.danger-zone__confirm {
+  border-radius: var(--c-radius-sm);
+}
+
+@media (max-width: 900px) {
+  .admin-console {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .admin-column {
+    padding: 0.75rem 0.75rem 3rem;
+  }
+  .media-go {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Feedback: a refused or stale command is said out loud, not in the margin. */
+.admin-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 1.25rem;
+  z-index: 35;
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  max-width: min(40rem, calc(100vw - 2rem));
+  padding: 0.7rem 0.6rem 0.7rem 1rem;
+  border-radius: 12px;
+  background: var(--theme-text);
+  color: var(--theme-background);
+  font-size: 0.86rem;
+  font-weight: 600;
+  line-height: 1.35;
+  box-shadow: 0 12px 40px color-mix(in srgb, black 40%, transparent);
+  transform: translateX(-50%);
+}
+.admin-toast button {
+  min-height: 30px !important;
+  padding: 0.25rem 0.6rem !important;
+  background: color-mix(
+    in srgb,
+    var(--theme-background) 22%,
+    transparent
+  ) !important;
+  color: inherit !important;
+  font-size: 0.7rem;
+}
+.sequence-controls__hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--admin-warning);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.act-row[aria-disabled="true"] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.admin-view-failed {
+  display: grid;
+  gap: 0.5rem;
+  justify-items: start;
+  padding: 1.2rem;
+}
+.admin-view-failed span {
+  color: var(--admin-dim);
+  font-size: 0.85rem;
+}
+
+.score-actions__clear {
+  margin-left: auto;
+  background: var(--c-soft-danger) !important;
+}
+.results-table__actions {
+  display: flex;
+  gap: 0.3rem;
+  justify-content: flex-end;
+}
+.results-panel__notice {
+  display: block;
+  margin: 0 1rem 1rem;
+  color: var(--admin-dim);
+  font-size: 0.82rem;
+}
+.clear-scores .act-delete__card {
+  border-color: var(--c-line);
+  border-radius: var(--c-radius);
+}

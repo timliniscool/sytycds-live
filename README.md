@@ -768,19 +768,35 @@ rather than claiming a clean bucket.
 
 ---
 
-## Resetting all votes and scores
+## Clearing votes and scores
 
-_SETUP & PREFLIGHT → 04 / DANGER → **RESET ALL VOTES & SCORES…**_
+**For one act** — in LIVE SCORING on the SHOW view, **CLEAR VOTES & SCORES…**
+removes the current act's audience votes, judge scores and any finalised
+result, so it can be scored again from nothing; the RESULTS view has a
+**CLEAR** button on every act's row for the same thing. Type **CLEAR** in the
+sheet to confirm. If the act is the one on stage, its voting closes and a
+revealed result is hidden. Other acts are untouched.
 
-Removes every audience vote, judge score, finalised result and results reveal
-for every act, and closes voting and judge scoring, while keeping every act,
-performer, media file, cue, judge link and setting. Use it to rerun scoring
-after a rehearsal, or to revisit acts that were already finalised. Type
-**RESET VOTES** to confirm.
+**For the whole show** — _SETUP & PREFLIGHT → 04 / DANGER →
+**RESET ALL VOTES & SCORES…**_ does the same for every act at once (type
+**RESET VOTES**). Acts, performers, media, cues, judge links and settings all
+stay.
 
 Changing the current act is always allowed, including to an act that has
 already been finalised; the one exception is while audience voting is open,
-which must be closed first so no phone can vote for the wrong act.
+which must be closed first so no phone can vote for the wrong act. The
+console says so on screen: **← Previous** and **Next →** are disabled with a
+note, and pressing an act row shows the reason as a notification.
+
+## Notifications
+
+Anything the show refuses — a command that is not allowed right now, a
+console that has fallen a step behind the coordinator, a file that would not
+upload — appears as a notification at the bottom of the console, never as a
+browser alert. It dismisses itself after a few seconds or on **DISMISS**.
+Risky actions such as changing act while media plays, or opening audience
+voting, ask you to press the same control again within a few seconds rather
+than opening a dialog.
 
 ---
 
