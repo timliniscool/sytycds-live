@@ -33,9 +33,16 @@ import {
   type CueOperation,
   type VisualCue,
   type VisualCueKind,
+  type PerformanceVisualMode,
+  type ShowFlowNext,
+  type ShowFlowPolicy,
+  type ShowFlowState,
+  type ShowStep,
+  type TestShowGeneration,
 } from "../shared/domain";
 import { rankGroups } from "../shared/ranking";
 import { isThemeId, DEFAULT_THEME_ID } from "../shared/themes";
+import { scenarioLabel } from "../shared/test-show";
 import { auditEventForCommand, recordAuditEvent } from "./audit";
 import { cueValidationState } from "./cues";
 import { listReferencedAssets } from "./media-assets";
@@ -86,6 +93,10 @@ interface ShowRow extends Record<string, SqlStorageValue> {
   result_reveal_state: string;
   active_act_id: string | null;
   revision: number;
+  flow_open_judges_on_scoring: number;
+  flow_open_voting_on_scoring: number;
+  flow_scoreboard_step: number;
+  flow_stop_media_on_scoring: number;
 }
 
 interface RuntimeRow extends Record<string, SqlStorageValue> {
@@ -100,6 +111,9 @@ interface RuntimeRow extends Record<string, SqlStorageValue> {
   emergency_presentation: string;
   results_stage: string;
   results_revealed_groups: number;
+  flow_step: string | null;
+  vote_close_revision: string | null;
+  vote_closed_at: number | null;
 }
 
 interface ActRow extends Record<string, SqlStorageValue> {
@@ -120,13 +134,15 @@ interface ActRow extends Record<string, SqlStorageValue> {
   performance_fit: string;
   backing_audio_asset_id: string | null;
   backing_audio_start: string;
+  theme_id: string | null;
+  font_family: string | null;
 }
 
 const ACT_COLUMNS = `id, order_index, performer_name, school_year, act_name, act_type,
                 public_description, internal_notes, withdrawn_at, public_image_asset_id,
                 show_description_to_audience, show_image_to_audience, performance_mode,
                 performance_asset_id, performance_fit, backing_audio_asset_id,
-                backing_audio_start`;
+                backing_audio_start, theme_id, font_family`;
 
 interface JudgeSubmissionRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -235,7 +251,9 @@ function loadShow(sql: SqlStorage, id: string): ShowRow | null {
         `SELECT id, title, tagline, short_name, theme_id, font_family,
                 audience_weight, reactions_enabled, intermission_message, emergency_message,
                 display_mode, audience_vote_state, result_reveal_state,
-                active_act_id, revision
+                active_act_id, revision, flow_open_judges_on_scoring,
+                flow_open_voting_on_scoring, flow_scoreboard_step,
+                flow_stop_media_on_scoring
          FROM shows WHERE id = ?`,
         id,
       )
@@ -246,7 +264,8 @@ function loadShow(sql: SqlStorage, id: string): ShowRow | null {
 const RUNTIME_COLUMNS = `previous_display_mode, global_judge_permission, prepared_cue_id,
               active_visual_cue_id, active_audio_cue_id, visual_transport,
               audio_transport, black_screen, emergency_presentation,
-              results_stage, results_revealed_groups`;
+              results_stage, results_revealed_groups, flow_step,
+              vote_close_revision, vote_closed_at`;
 
 function readRuntime(sql: SqlStorage, id: string): RuntimeRow | undefined {
   return sql
@@ -277,8 +296,118 @@ function ensureRuntime(sql: SqlStorage, id: string): RuntimeRow {
   return row;
 }
 
-function runtimeState(id: string, row: RuntimeRow): ShowRuntimeState {
+function flowPolicyOf(show: ShowRow): ShowFlowPolicy {
   return {
+    openJudgesOnScoring: show.flow_open_judges_on_scoring === 1,
+    openVotingOnScoring: show.flow_open_voting_on_scoring === 1,
+    scoreboardStep: show.flow_scoreboard_step === 1,
+    stopMediaOnScoring: show.flow_stop_media_on_scoring === 1,
+  };
+}
+
+const SHOW_STEP_SET = new Set<ShowStep>([
+  "ACT_CARD",
+  "PERFORMANCE",
+  "SCORING",
+  "SCOREBOARD",
+]);
+
+function showStepOf(value: string | null): ShowStep | null {
+  return value && SHOW_STEP_SET.has(value as ShowStep)
+    ? (value as ShowStep)
+    : null;
+}
+
+function actLabel(act: ActRow): string {
+  return `${act.act_name} — ${act.performer_name}`;
+}
+
+/**
+ * What the next GO would do. Derived, never stored: it depends on the current
+ * step, the policy, the running order and whether voting is open, and the
+ * console shows it on the button so the operator presses GO knowing exactly
+ * what will happen.
+ */
+function computeFlow(
+  sql: SqlStorage,
+  show: ShowRow,
+  runtime: RuntimeRow,
+): ShowFlowState {
+  const policy = flowPolicyOf(show);
+  const step = showStepOf(runtime.flow_step);
+  const emergency = show.display_mode === "EMERGENCY";
+  if (!show.active_act_id) {
+    const first = selectedActForDirection(sql, show, "next");
+    const next: ShowFlowNext = first
+      ? { kind: "first_act", actId: actId(first.id), label: actLabel(first) }
+      : { kind: "end" };
+    return {
+      step: null,
+      next,
+      blocked: emergency
+        ? "Return from EMERGENCY before advancing the show"
+        : first
+          ? null
+          : "Add an act to the running order first",
+    };
+  }
+  let next: ShowFlowNext;
+  switch (step) {
+    case null:
+      next = { kind: "step", step: "ACT_CARD" };
+      break;
+    case "ACT_CARD":
+      next = { kind: "step", step: "PERFORMANCE" };
+      break;
+    case "PERFORMANCE":
+      next = { kind: "step", step: "SCORING" };
+      break;
+    case "SCORING":
+      next = policy.scoreboardStep
+        ? { kind: "step", step: "SCOREBOARD" }
+        : nextActFlow(sql, show);
+      break;
+    case "SCOREBOARD":
+      next = nextActFlow(sql, show);
+      break;
+  }
+  let blocked: string | null = null;
+  if (emergency) blocked = "Return from EMERGENCY before advancing the show";
+  else if (next.kind === "next_act" && show.audience_vote_state === "OPEN")
+    blocked = "Close audience voting before moving to the next act";
+  else if (next.kind === "end")
+    blocked =
+      "End of the running order. Put FINAL RESULTS on the projector when ready.";
+  return { step, next, blocked };
+}
+
+function nextActFlow(sql: SqlStorage, show: ShowRow): ShowFlowNext {
+  const next = selectedActForDirection(sql, show, "next");
+  return next
+    ? { kind: "next_act", actId: actId(next.id), label: actLabel(next) }
+    : { kind: "end" };
+}
+
+/** The flow state alone, for a cheap admin patch after any accepted command. */
+export function loadFlowState(
+  sql: SqlStorage,
+  showIdentifier: string,
+): ShowFlowState | null {
+  const show = loadShow(sql, showIdentifier);
+  if (!show) return null;
+  return computeFlow(sql, show, ensureRuntime(sql, show.id));
+}
+
+function runtimeState(
+  sql: SqlStorage,
+  show: ShowRow,
+  row: RuntimeRow,
+): ShowRuntimeState {
+  const id = show.id;
+  return {
+    flow: computeFlow(sql, show, row),
+    voteCloseRevision:
+      show.audience_vote_state === "CLOSED" ? row.vote_close_revision : null,
     showId: showId(id),
     previousDisplayMode: row.previous_display_mode
       ? requireDisplayMode(row.previous_display_mode)
@@ -312,6 +441,7 @@ function persistedShow(row: ShowRow): PersistedShow {
     fontFamily: row.font_family,
     audienceWeight: row.audience_weight,
     reactionsEnabled: row.reactions_enabled === 1,
+    flowPolicy: flowPolicyOf(row),
     intermissionMessage: row.intermission_message,
     emergencyMessage: row.emergency_message,
     displayMode: requireDisplayMode(row.display_mode),
@@ -334,6 +464,10 @@ function toPublicAct(row: ActRow): PublicAct {
     publicDescription: row.public_description,
     publicImageAssetId: row.public_image_asset_id,
     withdrawn: row.withdrawn_at !== null,
+    appearance: {
+      themeId: isThemeId(row.theme_id) ? row.theme_id : null,
+      fontFamily: row.font_family,
+    },
   };
 }
 
@@ -356,9 +490,39 @@ function toAudienceAct(row: ActRow): PublicAct {
   };
 }
 
-function toActPresentation(row: ActRow): ActPresentation {
+/**
+ * The operator-facing performance visual: automatic, or the chosen asset's
+ * kind. Derived from the stored mode plus the asset, so an asset that has been
+ * deleted underneath the act reads as automatic rather than as a dead link.
+ */
+function performanceVisualMode(
+  sql: SqlStorage,
+  showIdentifier: string,
+  row: ActRow,
+): PerformanceVisualMode {
+  if (row.performance_mode !== "CUSTOM" || !row.performance_asset_id)
+    return "AUTOMATIC";
+  const mime = sql
+    .exec<{ mime_type: string }>(
+      "SELECT mime_type FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL",
+      showIdentifier,
+      row.performance_asset_id,
+    )
+    .toArray()[0]?.mime_type;
+  if (mime?.startsWith("video/")) return "VIDEO";
+  if (mime?.startsWith("image/")) return "IMAGE";
+  return "AUTOMATIC";
+}
+
+function toActPresentation(
+  sql: SqlStorage,
+  showIdentifier: string,
+  row: ActRow,
+): ActPresentation {
   return {
+    actImageAssetId: row.public_image_asset_id,
     performanceMode: row.performance_mode === "CUSTOM" ? "CUSTOM" : "DEFAULT",
+    performanceVisualMode: performanceVisualMode(sql, showIdentifier, row),
     performanceAssetId: row.performance_asset_id,
     performanceFit: row.performance_fit === "cover" ? "cover" : "contain",
     backingAudioAssetId: row.backing_audio_asset_id,
@@ -682,6 +846,197 @@ function isSafeDisplayMode(mode: DisplayMode): boolean {
   return mode !== "HOLD" && mode !== "EMERGENCY";
 }
 
+/** Display modes that are themselves a step of the ordinary act flow. */
+function stepForDisplayMode(mode: DisplayMode): ShowStep | null | "keep" {
+  switch (mode) {
+    case "ACT_CARD":
+      return "ACT_CARD";
+    case "PERFORMANCE":
+      return "PERFORMANCE";
+    case "SCOREBOARD":
+      return "SCOREBOARD";
+    case "HOLD":
+    case "EMERGENCY":
+      return "keep";
+    default:
+      return null;
+  }
+}
+
+/** Makes an act current: hides any reveal and forgets the previous act's flow. */
+function selectAct(sql: SqlStorage, show: ShowRow, id: string): void {
+  sql.exec(
+    "UPDATE shows SET active_act_id = ?, result_reveal_state = 'HIDDEN' WHERE id = ?",
+    id,
+    show.id,
+  );
+  runtimeUpdate(
+    sql,
+    show.id,
+    "flow_step = NULL, vote_close_revision = NULL, vote_closed_at = NULL",
+  );
+}
+
+/**
+ * Simple Show Flow: an act configured with a custom performance visual puts it
+ * up as the performance begins, and a backing track set to start with the
+ * performance starts here too. An act that asked for GO waits for GO. Nothing
+ * here touches the blackout override.
+ */
+function enterPerformance(
+  sql: SqlStorage,
+  show: ShowRow,
+  runtime: RuntimeRow,
+  activeActId: string | null,
+): readonly StateChange[] {
+  sql.exec(
+    "UPDATE shows SET display_mode = 'PERFORMANCE' WHERE id = ?",
+    show.id,
+  );
+  runtimeUpdate(sql, show.id, "flow_step = 'PERFORMANCE'");
+  const performance = activeActId
+    ? simpleCueForAct(sql, show.id, activeActId)
+    : null;
+  if (!performance || (!performance.hasVisual && !performance.autoStartAudio))
+    return ["display"];
+  runtimeUpdate(
+    sql,
+    show.id,
+    `prepared_cue_id = ?, active_visual_cue_id = ?, active_audio_cue_id = ?,
+     visual_transport = ?, audio_transport = ?`,
+    performance.id,
+    performance.hasVisual ? performance.id : runtime.active_visual_cue_id,
+    performance.hasAudio && performance.autoStartAudio
+      ? performance.id
+      : runtime.active_audio_cue_id,
+    performance.hasVisual ? "PLAYING" : runtime.visual_transport,
+    performance.hasAudio && performance.autoStartAudio
+      ? "PLAYING"
+      : runtime.audio_transport,
+  );
+  return ["display", "media"];
+}
+
+/** Opens every active judge who has not yet scored; false when none exist. */
+function openAllJudges(
+  sql: SqlStorage,
+  show: ShowRow,
+  activeActId: string,
+): boolean {
+  const judges = sql
+    .exec<{ id: string }>(
+      "SELECT id FROM show_judges WHERE show_id = ? AND active = 1 ORDER BY slot",
+      show.id,
+    )
+    .toArray();
+  if (judges.length === 0 || judges.length > 8) return false;
+  for (const judge of judges) {
+    if (!judgeHasSubmitted(sql, show.id, activeActId, judge.id)) {
+      setJudgePermission(sql, show.id, activeActId, judge.id, "OPEN");
+    }
+  }
+  runtimeUpdate(sql, show.id, "global_judge_permission = 'OPEN'");
+  return true;
+}
+
+function openAudienceVoting(sql: SqlStorage, show: ShowRow): void {
+  sql.exec(
+    "UPDATE shows SET audience_vote_state = 'OPEN' WHERE id = ?",
+    show.id,
+  );
+  runtimeUpdate(
+    sql,
+    show.id,
+    "vote_close_revision = NULL, vote_closed_at = NULL",
+  );
+}
+
+/**
+ * Closing voting mints a close revision. Phones that were holding a selection
+ * submit it against this identifier inside the grace window; nothing else can
+ * be accepted after the close.
+ */
+function closeAudienceVoting(sql: SqlStorage, show: ShowRow): void {
+  sql.exec(
+    "UPDATE shows SET audience_vote_state = 'CLOSED' WHERE id = ?",
+    show.id,
+  );
+  runtimeUpdate(
+    sql,
+    show.id,
+    "vote_close_revision = ?, vote_closed_at = ?",
+    `close-${crypto.randomUUID()}`,
+    Date.now(),
+  );
+}
+
+/**
+ * Enters one high-level step of the ordinary act flow, performing every
+ * low-level action that step implies. Dangerous actions are never implied:
+ * voting opens only when the show's policy says so, and closing voting,
+ * blackout, emergency and finalising remain explicit controls.
+ */
+function enterStep(
+  sql: SqlStorage,
+  show: ShowRow,
+  runtime: RuntimeRow,
+  activeActId: string,
+  step: ShowStep,
+): readonly StateChange[] {
+  const policy = flowPolicyOf(show);
+  switch (step) {
+    case "ACT_CARD":
+      sql.exec(
+        "UPDATE shows SET display_mode = 'ACT_CARD' WHERE id = ?",
+        show.id,
+      );
+      runtimeUpdate(sql, show.id, "flow_step = 'ACT_CARD'");
+      return ["display"];
+    case "PERFORMANCE":
+      return enterPerformance(sql, show, runtime, activeActId);
+    case "SCORING": {
+      const changes: StateChange[] = ["display"];
+      // The act is over: the performance visual and its backing track end
+      // together, and the hall sees the act identity while scores come in.
+      if (
+        policy.stopMediaOnScoring &&
+        (runtime.active_visual_cue_id !== null ||
+          runtime.active_audio_cue_id !== null ||
+          runtime.visual_transport !== "STOPPED" ||
+          runtime.audio_transport !== "STOPPED")
+      ) {
+        runtimeUpdate(
+          sql,
+          show.id,
+          `active_visual_cue_id = NULL, active_audio_cue_id = NULL,
+           visual_transport = 'STOPPED', audio_transport = 'STOPPED'`,
+        );
+        changes.push("media");
+      }
+      sql.exec(
+        "UPDATE shows SET display_mode = 'ACT_CARD' WHERE id = ?",
+        show.id,
+      );
+      runtimeUpdate(sql, show.id, "flow_step = 'SCORING'");
+      if (policy.openJudgesOnScoring && openAllJudges(sql, show, activeActId)) {
+        changes.push("judge_permission");
+      }
+      if (policy.openVotingOnScoring && show.audience_vote_state !== "OPEN") {
+        openAudienceVoting(sql, show);
+        changes.push("audience_voting");
+      }
+      return changes;
+    }
+    case "SCOREBOARD":
+      sql.exec(
+        "UPDATE shows SET display_mode = 'SCOREBOARD' WHERE id = ?",
+        show.id,
+      );
+      runtimeUpdate(sql, show.id, "flow_step = 'SCOREBOARD'");
+      return ["display"];
+  }
+}
+
 /**
  * HOLD and EMERGENCY are overlays: the show underneath is preserved so the
  * operator can return to it. EMERGENCY additionally pauses anything audible,
@@ -727,6 +1082,55 @@ function enterOverrideMode(
   return changes;
 }
 
+/**
+ * GO. Performs exactly what `computeFlow` said it would, or refuses with the
+ * reason it said it would refuse, so the button and the behaviour can never
+ * disagree.
+ */
+function advanceShow(
+  sql: SqlStorage,
+  show: ShowRow,
+  runtime: RuntimeRow,
+  activeActId: string | null,
+): { accepted: boolean; reason?: string; changes: readonly StateChange[] } {
+  const flow = computeFlow(sql, show, runtime);
+  if (flow.blocked) {
+    return { accepted: false, reason: flow.blocked, changes: [] };
+  }
+  switch (flow.next.kind) {
+    case "first_act":
+    case "next_act": {
+      selectAct(sql, show, flow.next.actId);
+      const selected: ShowRow = { ...show, active_act_id: flow.next.actId };
+      const after = readRuntime(sql, show.id) ?? runtime;
+      return {
+        accepted: true,
+        changes: [
+          "act",
+          ...enterStep(sql, selected, after, flow.next.actId, "ACT_CARD"),
+        ],
+      };
+    }
+    case "step":
+      return {
+        accepted: true,
+        changes: enterStep(
+          sql,
+          show,
+          runtime,
+          activeActId ?? "",
+          flow.next.step,
+        ),
+      };
+    case "end":
+      return {
+        accepted: false,
+        reason: "End of the running order",
+        changes: [],
+      };
+  }
+}
+
 function executeTransition(
   sql: SqlStorage,
   show: ShowRow,
@@ -750,12 +1154,30 @@ function executeTransition(
           changes: [],
         };
       }
-      sql.exec(
-        "UPDATE shows SET active_act_id = ?, result_reveal_state = 'HIDDEN' WHERE id = ?",
-        command.actId,
-        show.id,
-      );
+      selectAct(sql, show, command.actId);
       return { accepted: true, changes: ["act"] };
+    case "ADVANCE_SHOW":
+      return advanceShow(sql, show, runtime, activeActId);
+    case "SET_SHOW_STEP": {
+      if (!activeActId) {
+        return {
+          accepted: false,
+          reason: "Select an act before choosing a show step",
+          changes: [],
+        };
+      }
+      if (show.display_mode === "EMERGENCY") {
+        return {
+          accepted: false,
+          reason: "Return from EMERGENCY before changing the show step",
+          changes: [],
+        };
+      }
+      return {
+        accepted: true,
+        changes: enterStep(sql, show, runtime, activeActId, command.step),
+      };
+    }
     case "WITHDRAW_ACT": {
       const act = loadAct(sql, show.id, command.actId);
       if (!act) {
@@ -816,11 +1238,7 @@ function executeTransition(
       if (!next) {
         return { accepted: false, reason: "There is no next act", changes: [] };
       }
-      sql.exec(
-        "UPDATE shows SET active_act_id = ?, result_reveal_state = 'HIDDEN' WHERE id = ?",
-        next.id,
-        show.id,
-      );
+      selectAct(sql, show, next.id);
       return { accepted: true, changes: ["act"] };
     }
     case "PREVIOUS_ACT": {
@@ -839,11 +1257,7 @@ function executeTransition(
           changes: [],
         };
       }
-      sql.exec(
-        "UPDATE shows SET active_act_id = ?, result_reveal_state = 'HIDDEN' WHERE id = ?",
-        previous.id,
-        show.id,
-      );
+      selectAct(sql, show, previous.id);
       return { accepted: true, changes: ["act"] };
     }
     case "SET_DISPLAY_MODE": {
@@ -853,40 +1267,22 @@ function executeTransition(
           changes: enterOverrideMode(sql, show, runtime, command.mode, null),
         };
       }
+      if (command.mode === "PERFORMANCE") {
+        return {
+          accepted: true,
+          changes: enterPerformance(sql, show, runtime, activeActId),
+        };
+      }
       sql.exec(
         "UPDATE shows SET display_mode = ? WHERE id = ?",
         command.mode,
         show.id,
       );
-      // Simple Show Flow: an act configured with a custom performance visual
-      // puts it up as the performance begins, and a backing track set to start
-      // with the performance starts here too. An act that asked for GO waits
-      // for GO. Nothing here touches the blackout override.
-      const performance =
-        command.mode === "PERFORMANCE" && activeActId
-          ? simpleCueForAct(sql, show.id, activeActId)
-          : null;
-      if (
-        !performance ||
-        (!performance.hasVisual && !performance.autoStartAudio)
-      )
-        return { accepted: true, changes: ["display"] };
-      runtimeUpdate(
-        sql,
-        show.id,
-        `prepared_cue_id = ?, active_visual_cue_id = ?, active_audio_cue_id = ?,
-         visual_transport = ?, audio_transport = ?`,
-        performance.id,
-        performance.hasVisual ? performance.id : runtime.active_visual_cue_id,
-        performance.hasAudio && performance.autoStartAudio
-          ? performance.id
-          : runtime.active_audio_cue_id,
-        performance.hasVisual ? "PLAYING" : runtime.visual_transport,
-        performance.hasAudio && performance.autoStartAudio
-          ? "PLAYING"
-          : runtime.audio_transport,
-      );
-      return { accepted: true, changes: ["display", "media"] };
+      // A display mode that is a step of the act flow moves the flow with it,
+      // so GO after a manual SCOREBOARD means "next act", not "performance".
+      const step = stepForDisplayMode(command.mode);
+      if (step !== "keep") runtimeUpdate(sql, show.id, "flow_step = ?", step);
+      return { accepted: true, changes: ["display"] };
     }
     case "ACTIVATE_EMERGENCY":
       return {
@@ -989,16 +1385,15 @@ function executeTransition(
           changes: [],
         };
       }
-      sql.exec(
-        "UPDATE shows SET audience_vote_state = 'OPEN' WHERE id = ?",
-        show.id,
-      );
+      openAudienceVoting(sql, show);
       return { accepted: true, changes: ["audience_voting"] };
     case "CLOSE_AUDIENCE_VOTING":
-      sql.exec(
-        "UPDATE shows SET audience_vote_state = 'CLOSED' WHERE id = ?",
-        show.id,
-      );
+      if (show.audience_vote_state === "CLOSED") {
+        // Closing twice must not mint a second revision: the first close's
+        // grace window is the only one phones were told about.
+        return { accepted: true, changes: [] };
+      }
+      closeAudienceVoting(sql, show);
       return { accepted: true, changes: ["audience_voting"] };
     case "OPEN_ALL_JUDGES": {
       if (!activeActId) {
@@ -1008,25 +1403,13 @@ function executeTransition(
           changes: [],
         };
       }
-      const judges = sql
-        .exec<{ id: string }>(
-          "SELECT id FROM show_judges WHERE show_id = ? AND active = 1 ORDER BY slot",
-          show.id,
-        )
-        .toArray();
-      if (judges.length === 0 || judges.length > 8) {
+      if (!openAllJudges(sql, show, activeActId)) {
         return {
           accepted: false,
           reason: "Configure between one and eight active judges first",
           changes: [],
         };
       }
-      for (const judge of judges) {
-        if (!judgeHasSubmitted(sql, show.id, activeActId, judge.id)) {
-          setJudgePermission(sql, show.id, activeActId, judge.id, "OPEN");
-        }
-      }
-      runtimeUpdate(sql, show.id, "global_judge_permission = 'OPEN'");
       return { accepted: true, changes: ["judge_permission"] };
     }
     case "CLOSE_ALL_JUDGES": {
@@ -1638,6 +2021,10 @@ export function projectShowState(
         requireResultsStage(runtime.results_stage),
         runtime.results_revealed_groups,
       ),
+      voteCloseRevision:
+        show.audience_vote_state === "CLOSED"
+          ? runtime.vote_close_revision
+          : null,
     };
     return projection;
   }
@@ -1777,7 +2164,7 @@ export function projectShowState(
       internalNotes: row.internal_notes,
       showDescriptionToAudience: row.show_description_to_audience === 1,
       showImageToAudience: row.show_image_to_audience === 1,
-      presentation: toActPresentation(row),
+      presentation: toActPresentation(storage.sql, show.id, row),
       cues: loadCues(storage.sql, show.id, row.id),
     }));
   const aggregates: AudienceAggregate[] = storage.sql
@@ -1800,7 +2187,7 @@ export function projectShowState(
     show: persisted,
     acts,
     audienceAggregates: aggregates,
-    runtime: runtimeState(show.id, runtime),
+    runtime: runtimeState(storage.sql, show, runtime),
     results: Object.fromEntries(
       acts.map((act) => [
         act.id,
@@ -1809,6 +2196,33 @@ export function projectShowState(
     ),
     judges: loadJudgeStates(storage.sql, show, runtime),
     ranking: loadRanking(storage.sql, show.id),
+    testShow: loadTestShowGeneration(storage.sql, show.id),
   };
   return projection;
+}
+
+export function loadTestShowGeneration(
+  sql: SqlStorage,
+  showIdentifier: string,
+): TestShowGeneration | null {
+  const row = sql
+    .exec<{
+      test_show_id: string;
+      seed: string;
+      scenario: string;
+      generated_at: string;
+    }>(
+      "SELECT test_show_id, seed, scenario, generated_at FROM test_show_generations WHERE show_id = ?",
+      showIdentifier,
+    )
+    .toArray()[0];
+  return row
+    ? {
+        testShowId: row.test_show_id,
+        seed: row.seed,
+        scenario: row.scenario,
+        scenarioLabel: scenarioLabel(row.scenario),
+        generatedAt: row.generated_at,
+      }
+    : null;
 }

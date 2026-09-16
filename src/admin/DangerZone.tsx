@@ -1,4 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
+
+import type { TestShowGeneration } from "../../shared/domain";
+import { DEFAULT_EVENT_NAME } from "../../shared/platform";
 
 interface OrphanReport {
   assets: readonly {
@@ -21,11 +24,34 @@ interface ResetResult {
   objectsDeleted: number;
   objectsPending: number;
   mediaCleanupComplete: boolean;
+  projectorSessionsRevoked: number;
+}
+
+interface TestShowStatus {
+  current: TestShowGeneration | null;
+  scenarios: readonly { id: string; label: string; phase: string }[];
+  showDataExists: boolean;
+}
+
+interface TestShowSummary {
+  testShowId: string;
+  seed: string;
+  scenario: string;
+  scenarioLabel: string;
+  acts: number;
+  votes: number;
+  judgeSubmissions: number;
+  finalised: number;
+  assets: number;
+  brokenAssets: number;
+  objectsPending: number;
 }
 
 export interface DangerZoneProps {
   /** Typing the event's own name is one of the two accepted confirmations. */
   eventTitle: string;
+  /** The generated test show currently loaded, if any. */
+  testShow: TestShowGeneration | null;
 }
 
 function megabytes(bytes: number): string {
@@ -56,12 +82,12 @@ async function request<Value>(
 }
 
 /**
- * The two operations that destroy data, kept together, last, and behind
- * deliberate confirmation. Neither is reachable by a single click: the reset
- * opens a warning, then requires the operator to type something only somebody
- * who meant it would type.
+ * The operations that destroy data, kept together, last, and behind
+ * deliberate confirmation. None is reachable by a single click: each opens a
+ * warning, then requires the operator to type something only somebody who
+ * meant it would type.
  */
-export function DangerZone({ eventTitle }: DangerZoneProps) {
+export function DangerZone({ eventTitle, testShow }: DangerZoneProps) {
   const [open, setOpen] = useState(false);
   const [phrase, setPhrase] = useState("");
   const [busy, setBusy] = useState(false);
@@ -96,10 +122,11 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
     }
     // Never report a clean bucket that is not clean.
     setFailed(!result.mediaCleanupComplete);
+    const summary = `${result.clearedActs} act${result.clearedActs === 1 ? "" : "s"} and ${result.objectsDeleted} media file${result.objectsDeleted === 1 ? "" : "s"} removed. The show is back to its defaults: “${DEFAULT_EVENT_NAME}”, four judges, 50:50 weighting, default theme. Re-pair the projector and reissue judge links.`;
     setNotice(
       result.mediaCleanupComplete
-        ? `Show reset. ${result.clearedActs} act${result.clearedActs === 1 ? "" : "s"} and ${result.objectsDeleted} media file${result.objectsDeleted === 1 ? "" : "s"} removed. Event name, theme and judges kept.`
-        : `Show reset, but ${result.objectsPending} media file${result.objectsPending === 1 ? "" : "s"} could not be deleted from storage yet. Use RETRY MEDIA CLEANUP below.`,
+        ? `Show reset. ${summary}`
+        : `Show reset, but ${result.objectsPending} media file${result.objectsPending === 1 ? "" : "s"} could not be deleted from storage yet. Use RETRY MEDIA CLEANUP below. ${summary}`,
     );
   }
 
@@ -186,7 +213,9 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
     <section className="danger-zone" aria-labelledby="danger-zone-title">
       <div className="region-title">
         <p>04 / DANGER</p>
-        <h2 id="danger-zone-title">Reset and storage maintenance</h2>
+        <h2 id="danger-zone-title">
+          Reset, test shows and storage maintenance
+        </h2>
         <span>
           Between events, not during one. Every action here destroys data.
         </span>
@@ -196,10 +225,18 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
         <div className="danger-zone__copy">
           <h3>Reset entire show</h3>
           <p>
-            Clears every act, cue, uploaded file, vote, judge score and result,
-            and returns the projector to the lobby. <b>Keeps</b> the event name,
-            theme, typeface, public text and the judge panel with its links, so
-            the next event starts already set up.
+            Returns this event to the default show. Clears every act, cue,
+            uploaded and generated file, vote, judge score and result; the event
+            name, short name and tagline; the theme and typeface; the judge
+            panel and weighting; the GO behaviour; the public text; and the
+            projector pairing. Afterwards the show is{" "}
+            <b>“{DEFAULT_EVENT_NAME}”</b> with four judges named Judge 1–4,
+            50:50 weighting and the default theme, ready to set up from scratch.
+          </p>
+          <p>
+            <b>Not</b> a factory reset: your operator sign-in, deployment
+            secrets, Cloudflare configuration and cached typefaces are
+            untouched.
           </p>
         </div>
         {!open ? (
@@ -247,6 +284,16 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
         )}
       </div>
 
+      <TestShowPanel
+        current={testShow}
+        busy={busy}
+        setBusy={setBusy}
+        report={(message, isFailure) => {
+          setFailed(isFailure);
+          setNotice(message);
+        }}
+      />
+
       <div className="danger-zone__action">
         <div className="danger-zone__copy">
           <h3>Orphaned media</h3>
@@ -255,7 +302,7 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
             bytes left in storage with no record at all. Scanning is safe and
             changes nothing; cleaning deletes them from storage. Cached
             typefaces and platform assets live outside the show's storage
-            namespace and are never included.
+            namespaces and are never included.
           </p>
         </div>
         <div className="danger-zone__buttons">
@@ -310,5 +357,169 @@ export function DangerZone({ eventTitle }: DangerZoneProps) {
         </output>
       )}
     </section>
+  );
+}
+
+/**
+ * The procedural test-show generator. Every press produces a new seed and a
+ * new scenario unless the operator pins one; the seed is shown so a layout or
+ * scoring problem seen once can be reproduced exactly.
+ */
+function TestShowPanel({
+  current,
+  busy,
+  setBusy,
+  report,
+}: {
+  current: TestShowGeneration | null;
+  busy: boolean;
+  setBusy: (value: boolean) => void;
+  report: (message: string, failed: boolean) => void;
+}) {
+  const [status, setStatus] = useState<TestShowStatus | null>(null);
+  const [open, setOpen] = useState(false);
+  const [phrase, setPhrase] = useState("");
+  const [seed, setSeed] = useState("");
+  const [scenario, setScenario] = useState("");
+  const [last, setLast] = useState<TestShowSummary | null>(null);
+
+  useEffect(() => {
+    void request<TestShowStatus>("/api/admin/test-show").then((result) => {
+      if (!("error" in result)) setStatus(result);
+    });
+  }, [current?.testShowId]);
+
+  async function generate(): Promise<void> {
+    setBusy(true);
+    const result = await request<TestShowSummary>("/api/admin/test-show", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        confirm: "GENERATE TEST SHOW",
+        seed: seed.trim() || undefined,
+        scenario: scenario || undefined,
+      }),
+    });
+    setBusy(false);
+    setOpen(false);
+    setPhrase("");
+    if ("error" in result) {
+      report(result.error, true);
+      return;
+    }
+    setLast(result);
+    report(
+      `Test show generated. Seed ${result.seed} · ${result.scenarioLabel} · ${result.acts} acts, ${result.votes} votes, ${result.judgeSubmissions} judge scores, ${result.finalised} finalised, ${result.assets} media fixture${result.assets === 1 ? "" : "s"}${result.brokenAssets > 0 ? ` (${result.brokenAssets} deliberately broken)` : ""}.${result.objectsPending > 0 ? ` ${result.objectsPending} old file(s) still pending deletion.` : ""}`,
+      result.objectsPending > 0,
+    );
+  }
+
+  return (
+    <div className="danger-zone__action test-show">
+      <div className="danger-zone__copy">
+        <h3>Generate a test show</h3>
+        <p>
+          Replaces the current show data with a procedurally generated one:
+          acts, media fixtures, audience votes, judge scores and results, at a
+          random point in a random evening. Your event name, theme and GO
+          behaviour are kept; the judge panel is replaced by the scenario's.
+          Everything generated is tagged and lives under its own storage
+          namespace, so RESET ENTIRE SHOW removes it completely.
+        </p>
+        {current && (
+          <p className="test-show__current">
+            <b>Loaded test show</b> · seed <code>{current.seed}</code> ·{" "}
+            {current.scenarioLabel} · generated{" "}
+            {new Date(current.generatedAt).toLocaleString()}
+          </p>
+        )}
+        {last && !current && (
+          <p className="test-show__current">
+            Last generated: seed <code>{last.seed}</code> · {last.scenarioLabel}
+          </p>
+        )}
+      </div>
+      {!open ? (
+        <button
+          type="button"
+          className="danger-zone__arm"
+          disabled={busy}
+          onClick={() => setOpen(true)}
+        >
+          GENERATE TEST SHOW…
+        </button>
+      ) : (
+        <div className="danger-zone__confirm" role="alertdialog">
+          <strong>
+            {status?.showDataExists
+              ? "This replaces the show data that exists now. It cannot be undone."
+              : "This fills the empty show with generated data."}
+          </strong>
+          <div className="test-show__options">
+            <label>
+              Seed (optional, 8 hex characters)
+              <input
+                type="text"
+                autoComplete="off"
+                maxLength={8}
+                placeholder="random"
+                value={seed}
+                onChange={(event) =>
+                  setSeed(
+                    event.target.value.toUpperCase().replace(/[^0-9A-F]/gu, ""),
+                  )
+                }
+              />
+            </label>
+            <label>
+              Scenario
+              <select
+                value={scenario}
+                onChange={(event) => setScenario(event.target.value)}
+              >
+                <option value="">
+                  Chosen by the seed (weighted to late-show)
+                </option>
+                {(status?.scenarios ?? []).map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label htmlFor="test-show-phrase">
+            Type <b>GENERATE TEST SHOW</b> to confirm
+          </label>
+          <input
+            id="test-show-phrase"
+            type="text"
+            autoComplete="off"
+            value={phrase}
+            onChange={(event) => setPhrase(event.target.value)}
+          />
+          <div className="danger-zone__confirm-actions">
+            <button
+              type="button"
+              className="danger-zone__fire"
+              disabled={busy || phrase.trim() !== "GENERATE TEST SHOW"}
+              onClick={() => void generate()}
+            >
+              {busy ? "GENERATING…" : "GENERATE TEST SHOW"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setOpen(false);
+                setPhrase("");
+              }}
+            >
+              CANCEL
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }

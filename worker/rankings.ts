@@ -1,5 +1,6 @@
 import {
   actId,
+  INHERITED_APPEARANCE,
   type AdminRanking,
   type PublicResults,
   type RankingExclusionReason,
@@ -78,6 +79,7 @@ export function loadRanking(
             : row.act_type,
           publicDescription: row.public_description,
           withdrawn: row.withdrawn_at !== null,
+          appearance: INHERITED_APPEARANCE,
         },
         finalScore: row.final_score,
         ...(exclusion ?? {}),

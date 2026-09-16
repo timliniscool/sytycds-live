@@ -22,6 +22,7 @@ import {
   type PublicResults,
   type ResultRevealState,
   type ShowRevision,
+  type ShowFlowState,
 } from "./domain";
 import type { ReactionHistogram } from "./reactions";
 import { capReactionHistogram } from "./reactions";
@@ -149,6 +150,8 @@ export type ShowStatePatch =
       emergencyMessage: string;
       emergencyPresentation: EmergencyPresentation;
     }
+  /** Admin only: what GO would do next, recomputed after every accepted command. */
+  | { kind: "flow"; flow: ShowFlowState }
   | {
       kind: "media";
       preparedCueId: CueId | null;
@@ -173,6 +176,11 @@ export interface AggregateUpdateMessage extends RevisionedServerMessage {
 export interface VotingStateUpdateMessage extends RevisionedServerMessage {
   type: "voting_state_update";
   state: AudienceVoteState;
+  /**
+   * Set on CLOSED: the identifier a phone quotes when it submits the score it
+   * was holding at the moment voting closed. Null while voting is open.
+   */
+  closeRevision: string | null;
 }
 
 export interface JudgePermissionUpdateMessage extends RevisionedServerMessage {
@@ -257,10 +265,17 @@ export interface ProjectorTelemetryMessage extends RevisionedServerMessage {
   status: ProjectorPlaybackStatus;
 }
 
+/**
+ * Authoritative presence, derived from the coordinator's own sockets and
+ * sessions. "Paired" and "connected" are different facts and travel as such.
+ */
 export interface ConnectionCountMessage extends RevisionedServerMessage {
   type: "connection_count";
   audience: number;
   judgeIds: readonly string[];
+  projectors: number;
+  projectorPaired: boolean;
+  projectorArmed: boolean | null;
 }
 
 export interface ReactionSamplingMessage extends RevisionedServerMessage {

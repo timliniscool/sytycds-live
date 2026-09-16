@@ -25,6 +25,7 @@ const act: PublicAct = {
   actType: "Variety",
   publicDescription: "",
   withdrawn: false,
+  appearance: { themeId: null, fontFamily: null },
 };
 
 const imageCue: ProjectorCue = {

@@ -10,9 +10,12 @@ import {
 import {
   commandId,
   PROTOCOL_VERSION,
+  SHOW_STEPS,
   showRevision,
   type DisplayMode,
+  type ShowFlowState,
 } from "../../shared/domain";
+import { projectorStatusLabels } from "../admin/ProjectorPairingPanel";
 import type {
   AdminCommand,
   AdminCommandType,
@@ -226,7 +229,7 @@ const MODES: readonly DisplayMode[] = [
 ];
 const VIEWS: readonly { view: ConsoleView; label: string }[] = [
   { view: "show", label: "SHOW" },
-  { view: "acts", label: "ACTS & CUES" },
+  { view: "acts", label: "ACTS & MEDIA" },
   { view: "results", label: "RESULTS" },
   { view: "setup", label: "SETUP & PREFLIGHT" },
   { view: "history", label: "HISTORY" },
@@ -241,6 +244,20 @@ function isTyping(target: EventTarget | null): boolean {
     target instanceof HTMLTextAreaElement ||
     target instanceof HTMLSelectElement
   );
+}
+
+/** What GO will do, in the words on the button. */
+export function describeFlowNext(flow: ShowFlowState): string {
+  switch (flow.next.kind) {
+    case "step":
+      return flow.next.step.replaceAll("_", " ");
+    case "first_act":
+      return `FIRST ACT · ${flow.next.label}`;
+    case "next_act":
+      return `NEXT ACT · ${flow.next.label}`;
+    case "end":
+      return "END OF RUNNING ORDER";
+  }
 }
 
 function Console() {
@@ -288,9 +305,13 @@ function Console() {
     client,
     (state) => state.lastProjectorAcknowledgement,
   );
-  const projectorTelemetry = useRealtimeSelector(
+  const presence = useRealtimeSelector(client, (state) => state.presence);
+  // Live aggregates: the coordinator coalesces vote bursts into
+  // `aggregate_update` messages, which land here; the snapshot copy inside the
+  // projection is only the starting point.
+  const liveAggregates = useRealtimeSelector(
     client,
-    (state) => state.projectorTelemetry,
+    (state) => state.aggregates,
   );
   useEffect(() => {
     client.connect();
@@ -390,7 +411,8 @@ function Console() {
       (act) => !act.withdrawn && act.order > (active?.order ?? -1),
     ) ?? null;
   const aggregate = active
-    ? projection.audienceAggregates.find((entry) => entry.actId === active.id)
+    ? (liveAggregates.get(active.id) ??
+      projection.audienceAggregates.find((entry) => entry.actId === active.id))
     : null;
   const votingOpen = projection.show.audienceVoteState === "OPEN";
   const submittedScores = projection.judges.flatMap((judge) =>
@@ -415,6 +437,8 @@ function Console() {
       ? null
       : aggregate.weightedMean * projection.show.audienceWeight;
   const result = active ? projection.results[active.id] : undefined;
+  const projectorStatus = projectorStatusLabels(presence);
+  const flow = projection.runtime.flow;
   return (
     <main className="admin-console">
       <header className="admin-status">
@@ -441,13 +465,14 @@ function Console() {
             </button>
           ))}
         </nav>
-        {/* Standing readiness, not something the operator has to run a test
-            to discover. Audio can only be armed on the projector itself. */}
+        {/* Standing readiness from the coordinator's own sockets and sessions:
+            paired, connected and armed are three facts, never inferred from
+            telemetry. Audio can only be armed on the projector itself. */}
         <strong
-          className={`projector-readout${projectorTelemetry?.armed ? " is-ready" : ""}`}
+          className={`projector-readout${projectorStatus.ready ? " is-ready" : ""}`}
+          title="Live from the coordinator"
         >
-          PROJECTOR {projectorTelemetry ? "CONNECTED" : "NO SIGNAL"} · AUDIO{" "}
-          {projectorTelemetry?.armed ? "ARMED" : "NOT ARMED"}
+          PROJECTOR {projectorStatus.connection} · {projectorStatus.audio}
         </strong>
         {projection.runtime.blackScreen && (
           <strong className="admin-status__alarm">SCREEN BLACKED OUT</strong>
@@ -579,6 +604,7 @@ function Console() {
               projection={projection}
               client={client}
               judgeConnections={judgeConnections}
+              presence={presence}
               send={send}
             />
           </Suspense>
@@ -636,6 +662,41 @@ function Console() {
                   ? `${nextAct.actName} — ${nextAct.performerName}`
                   : "End of the running order"}
               </p>
+              {/*
+                The show flow: one GO advances an ordinary act through its
+                steps, and the button says what it is about to do. Voting
+                close, blackout, emergency and finalising stay explicit below.
+              */}
+              <div className="show-flow" aria-label="Show flow">
+                <p>
+                  SHOW FLOW ·{" "}
+                  {flow.step ? flow.step.replaceAll("_", " ") : "NOT STARTED"}
+                </p>
+                <button
+                  type="button"
+                  className="show-flow__go"
+                  disabled={flow.blocked !== null}
+                  title={flow.blocked ?? undefined}
+                  onClick={() => send("ADVANCE_SHOW")}
+                >
+                  GO
+                  <small>{flow.blocked ?? describeFlowNext(flow)}</small>
+                </button>
+                <div className="show-flow__steps">
+                  {SHOW_STEPS.map((step) => (
+                    <button
+                      key={step}
+                      type="button"
+                      className={flow.step === step ? "is-active" : ""}
+                      aria-pressed={flow.step === step}
+                      disabled={!active}
+                      onClick={() => send("SET_SHOW_STEP", { step })}
+                    >
+                      {step.replaceAll("_", " ")}
+                    </button>
+                  ))}
+                </div>
+              </div>
               <div className="display-controls">
                 <p>DISPLAY MODE</p>
                 {MODES.map((mode) => (
@@ -694,7 +755,8 @@ function Console() {
                   mean
                 </span>
                 <span>
-                  <b>{audienceConnections}</b> audience phones
+                  <b>{presence?.audience ?? audienceConnections}</b> audience
+                  phones
                 </span>
                 <span>
                   <b>{connection}</b> update health

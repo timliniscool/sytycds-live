@@ -262,6 +262,14 @@ export function showObjectPrefix(showIdentifier: string): string {
   return `${showIdentifier}/`;
 }
 
+/** Generated test fixtures live apart from real uploads so they cannot be confused. */
+export const TEST_SHOW_OBJECT_PREFIX = "test-shows/";
+
+/** Every prefix that holds show media (real or generated); never `fonts/`. */
+export function showMediaPrefixes(showIdentifier: string): readonly string[] {
+  return [showObjectPrefix(showIdentifier), TEST_SHOW_OBJECT_PREFIX];
+}
+
 /** One page of listing at a time; a show with thousands of files still works. */
 const LIST_PAGE = 1000;
 const MAX_LIST_PAGES = 20;
@@ -306,21 +314,23 @@ export async function findStrayObjects(
   ]);
 
   const objects: { key: string; sizeBytes: number }[] = [];
-  let cursor: string | undefined;
   let truncated = false;
-  for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
-    const listing = await bucket.list({
-      prefix: showObjectPrefix(showIdentifier),
-      limit: LIST_PAGE,
-      ...(cursor ? { cursor } : {}),
-    });
-    for (const object of listing.objects) {
-      if (!known.has(object.key))
-        objects.push({ key: object.key, sizeBytes: object.size });
+  for (const prefix of showMediaPrefixes(showIdentifier)) {
+    let cursor: string | undefined;
+    for (let page = 0; page < MAX_LIST_PAGES; page += 1) {
+      const listing = await bucket.list({
+        prefix,
+        limit: LIST_PAGE,
+        ...(cursor ? { cursor } : {}),
+      });
+      for (const object of listing.objects) {
+        if (!known.has(object.key))
+          objects.push({ key: object.key, sizeBytes: object.size });
+      }
+      if (!listing.truncated) break;
+      cursor = listing.cursor;
+      truncated = truncated || page === MAX_LIST_PAGES - 1;
     }
-    if (!listing.truncated) break;
-    cursor = listing.cursor;
-    truncated = page === MAX_LIST_PAGES - 1;
   }
   return {
     objects,

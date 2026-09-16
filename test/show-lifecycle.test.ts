@@ -133,12 +133,15 @@ describe("zero-act show lifecycle", () => {
         showDescriptionToAudience: false,
         showImageToAudience: false,
         presentation: {
+          actImageAssetId: null,
           performanceMode: "DEFAULT",
+          performanceVisualMode: "AUTOMATIC",
           performanceAssetId: null,
           performanceFit: "contain",
           backingAudioAssetId: null,
           backingAudioStart: "MANUAL",
         },
+        appearance: { themeId: null, fontFamily: null },
       });
       const secondAct = createAct(storage, PRIMARY_SHOW_ID, {
         performerName: "Stage Band",
@@ -150,12 +153,15 @@ describe("zero-act show lifecycle", () => {
         showDescriptionToAudience: false,
         showImageToAudience: false,
         presentation: {
+          actImageAssetId: null,
           performanceMode: "DEFAULT",
+          performanceVisualMode: "AUTOMATIC",
           performanceAssetId: null,
           performanceFit: "contain",
           backingAudioAssetId: null,
           backingAudioStart: "MANUAL",
         },
+        appearance: { themeId: null, fontFamily: null },
       });
       expect(act).not.toBeNull();
       expect(secondAct).not.toBeNull();

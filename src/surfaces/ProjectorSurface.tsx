@@ -27,7 +27,11 @@ import {
   useRealtimeSelector,
 } from "../realtime/RealtimeClient";
 import { PLATFORM_ATTRIBUTION, PLATFORM_NAME } from "../../shared/platform";
-import { useShowDocumentTitle, useShowTheme } from "../theme";
+import {
+  effectiveAppearance,
+  useShowDocumentTitle,
+  useShowTheme,
+} from "../theme";
 import { ReactionLane } from "../reactions/ReactionLane";
 
 const INITIAL_MEDIA: ProjectorMediaStatus = {
@@ -97,7 +101,11 @@ export default function ProjectorSurface() {
     client,
     (state) => state.lastReactionClear,
   );
-  useShowTheme(projection?.show.themeId, projection?.show.fontFamily, true);
+  // The hall draws the current act in its own appearance when it has one.
+  const appearance = projection
+    ? effectiveAppearance(projection.show, projection.activeAct)
+    : null;
+  useShowTheme(appearance?.themeId, appearance?.fontFamily, true);
   useShowDocumentTitle(projection?.show.title, "Projector");
 
   useEffect(() => {
@@ -159,13 +167,20 @@ export default function ProjectorSurface() {
     }
   }
 
+  /**
+   * Called directly from the click handler. `engine.arm()` issues both
+   * gesture-sensitive browser calls synchronously inside this call, before the
+   * first `await`; only the state updates below happen afterwards. Nothing
+   * here fakes success: the gate lifts only once the browser has said yes.
+   */
   async function enableAudioAndEnter(): Promise<void> {
     const engine = engineRef.current;
     if (!engine) {
       setArmError("The media engine is not ready yet. Try again in a moment.");
       return;
     }
-    const armed = await engine.arm();
+    const arming = engine.arm();
+    const armed = await arming;
     setArmError(
       armed ? null : "This browser refused to enable audio. Try again.",
     );

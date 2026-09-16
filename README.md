@@ -21,7 +21,7 @@ control is not described here, it does not exist.
 8. [Judge configuration](#judge-configuration)
 9. [Audience and judge weighting](#audience-and-judge-weighting)
 10. [Creating acts](#creating-acts)
-11. [Backing audio](#backing-audio)
+11. [The act media library](#the-act-media-library) and [Backing audio](#backing-audio)
 12. [The performance screen](#the-performance-screen)
 13. [Simple Show Flow and advanced cues](#simple-show-flow-and-advanced-cues)
 14. [Running an act](#running-an-act)
@@ -33,7 +33,7 @@ control is not described here, it does not exist.
 20. [Final Results and ties](#final-results-and-ties)
 21. [Deleting an act](#deleting-an-act)
 22. [Resetting the whole show](#resetting-the-whole-show)
-23. [Orphaned media](#orphaned-media)
+23. [Generating a test show](#generating-a-test-show) and [Orphaned media](#orphaned-media)
 24. [Help inside the console](#help-inside-the-console)
 25. [Common problems](#common-problems)
 26. [Emergency recovery](#emergency-recovery)
@@ -74,7 +74,8 @@ the one above it.
    (_02 / SCORING_).
 6. **Pair the projector** (_DISPLAY ACCESS_).
 7. **Hand out judge links** (_JUDGE LINKS_).
-8. **Build the running order** — acts, images, backing audio (_ACTS & CUES_).
+8. **Build the running order** — acts, their media libraries, backing audio
+   (_ACTS & MEDIA_).
 9. **Run Preflight** (_03 / SHOW READINESS_) and clear every failure.
 
 On the night, repeat steps 6, 7 (only if a judge lost their link) and 9.
@@ -147,6 +148,9 @@ back.
 Pair exactly one display. Preflight warns if more than one is connected,
 because a second display is a second public screen.
 
+The panel's status — `PAIRED`, `CONNECTED`, `AUDIO ARMED` — is pushed live from
+the coordinator the moment it changes; nothing here polls or guesses.
+
 ---
 
 ## Enable Audio
@@ -164,7 +168,8 @@ shows one panel over the output:
 Press it **on the projector machine**. The projector then genuinely unlocks
 its audio pipeline and tests it silently; it reports `AUDIO ARMED` to your
 console only if the test actually succeeded. A button press alone is never
-enough.
+enough. It works on the **first** press: both browser unlocks happen inside
+the click itself, before anything else, which is what browsers require.
 
 **Continue without audio** dismisses the panel and shows the picture
 immediately, leaving a small `AUDIO NOT ARMED — ENABLE` button in the corner.
@@ -258,7 +263,7 @@ not required to complete a result; at 0% audience, phone votes are not.
 
 ## Creating acts
 
-_ACTS & CUES._ Each act has:
+_ACTS & MEDIA._ Each act has:
 
 | Field              | Who sees it                                     |
 | ------------------ | ----------------------------------------------- |
@@ -270,10 +275,14 @@ _ACTS & CUES._ Each act has:
 | Act image          | Projector. Phones only if you switch it on.     |
 | Internal notes     | **You only.** Never sent to any public surface. |
 
+**MOVE UP / MOVE DOWN** set the running order. **SELECT FOR SHOW** makes an
+act current. **DELETE ACT** opens a summary of exactly what would be destroyed;
+see [Deleting an act](#deleting-an-act).
+
 ### On audience phones
 
-Phones always receive the act name, the performer and the year or group. Two
-switches control the rest:
+_Advanced settings → On audience phones._ Phones always receive the act name,
+the performer and the year or group. Two switches control the rest:
 
 - `Show description on audience phones` — off by default.
 - `Show act image on audience phones` — off by default.
@@ -282,33 +291,64 @@ When a switch is off, the server does not send that field at all; it is not
 hidden in the phone, it is absent. Stage media — performance visuals and
 backing audio — is never sent to phones under any setting.
 
-**MOVE UP / MOVE DOWN** set the running order. **SELECT FOR SHOW** makes an
-act current. **DELETE ACT** opens a summary of exactly what would be destroyed;
-see [Deleting an act](#deleting-an-act).
+### Appearance override
+
+_Advanced settings → Appearance._ An act can be drawn in another curated theme
+or typeface while it is current; the projector and the phones follow it, the
+console does not. Only curated themes and typefaces the show has already
+cached are offered, so an override can never produce an unreadable pairing.
+`Inherit` (the default) means the show's own setting.
+
+---
+
+## The act media library
+
+_ACTS & MEDIA → act → Act media library._
+
+Every act has **one** media library, and it is the only place files are
+uploaded. Drop images, audio or video on it — several at once if you like — or
+click it to choose files. Each file becomes a typed entry showing its kind,
+filename, duration or dimensions, size, a **READY** badge once its metadata
+has been read, and a badge for every place the act uses it (`ACT IMAGE`,
+`BACKING AUDIO`, `PERFORMANCE VISUAL`, `CUE`). Click an entry to preview it.
+
+Everything below points at entries in this library by name. Nothing is ever
+uploaded twice, and nothing has its own separate uploader:
+
+| Slot               | Chooses from                    |
+| ------------------ | ------------------------------- |
+| Act image          | images in the library           |
+| Performance visual | images or videos in the library |
+| Backing audio      | audio (or video) in the library |
+| Advanced cues      | any entry of the matching kind  |
+
+A file that another act also uses is marked `SHARED`; a file uploaded before
+libraries existed, or shared deliberately, is a `SHOW FILE` and appears in the
+library of every act that uses it. **DELETE** removes a file from storage and
+is only available while nothing uses it. Deleting an act removes the files
+only it used or owned; shared files stay.
+
+The library is created with the act, so a new act must be saved before files
+can be added to it.
 
 ---
 
 ## Backing audio
 
-_ACTS & CUES → act → Performance → BACKING AUDIO._
+_Act media library, then Presentation → Backing audio._
 
-Drop an MP3, WAV or other audio file on the drop zone, or click it to choose a
-file. You do not build a cue for this.
+Upload the track to the act's media library, then choose it in **Backing
+audio**. You do not build a cue for this. Then choose when it starts:
 
-After upload the panel shows the filename, duration, dimensions where they
-apply, file size, a **READY** badge and a player so you can check you uploaded
-the right track. **REMOVE** clears it. Dropping another file replaces it.
-
-Then choose when it starts:
-
-- **Manually, when the operator presses GO** — default. The track is loaded and
-  waiting; you press **GO** when the performer is ready.
-- **Automatically, when PERFORMANCE begins** — switching the projector to
-  PERFORMANCE starts the track.
+- **Automatically, when PERFORMANCE begins** — the GO into PERFORMANCE starts
+  the track. This is what most acts want.
+- **Manually, when the operator presses GO on the cue** — the track is loaded
+  and waiting; you press **GO** on the PERFORMANCE cue when the performer is
+  ready.
 
 The backing track is a channel of its own. Changing the visual, blacking the
-screen or stopping the visual never silences it. Only **STOP ALL MEDIA**, a
-cue that stops audio, or EMERGENCY does.
+screen or stopping the visual never silences it. Only **STOP ALL MEDIA**, the
+GO into SCORING (by default), a cue that stops audio, or EMERGENCY does.
 
 ---
 
@@ -317,13 +357,13 @@ cue that stops audio, or EMERGENCY does.
 Every act already has a finished performance screen. You do not have to supply
 anything for an act to look right on the projector.
 
-**Default** — the act's name, the performer and the year or group, centred and
-sized to read from the back of a hall. If the act has an image it appears
-behind the text as a restrained wash. The layout holds at 1920×1080 and
-1280×720.
+**Automatic** — the act's name, the performer and the year or group, centred
+and sized to read from the back of a hall. If the act has an image it appears
+behind the text as a restrained wash. The layout is proportional and holds at
+every projector shape.
 
-**Custom performance visual** — tick `Use custom performance visual` and drop
-an image or a video. It replaces the whole normal performance screen.
+**An image or a video from the library** — choose it under **Performance
+visual**. It replaces the whole automatic screen.
 
 - Images are shown **whole**. They keep their aspect ratio, are never
   stretched or distorted, and are letterboxed or pillarboxed against the
@@ -334,29 +374,36 @@ an image or a video. It replaces the whole normal performance screen.
   distortion.
 
 Backing audio is independent of all of this: an act can have a custom visual
-and no audio, audio and the default screen, both, or neither.
+and no audio, audio and the automatic screen, both, or neither.
 
 ---
 
 ## Simple Show Flow and advanced cues
 
-For an ordinary act the whole show is three steps:
+For an ordinary act the whole show is four steps, one **GO** each:
 
 1. **ACT CARD** — the performer is announced.
-2. **PERFORMANCE** — the performance screen (default or custom) and the
-   backing track.
-3. **SCOREBOARD** — the scores.
+2. **PERFORMANCE** — the performance screen (automatic or chosen) comes up and,
+   if the act asked for it, the backing track starts.
+3. **SCORING** — the performance media ends, the act card returns and the
+   judges are opened.
+4. **SCOREBOARD** — the scores.
 
-The software builds the media cue for step 2 from the act's Performance
+The next **GO** moves to the next act's card. See
+[Running an act](#running-an-act) for what GO does and does not do.
+
+The software builds the media cue for step 2 from the act's Presentation
 settings. It appears in the cue stack labelled `PERFORMANCE` with an `AUTO`
 badge, always first, and is rebuilt whenever you change those settings. You
 cannot edit or delete it from the cue editor — change the act instead.
 
-**Advanced cues and media library** (a disclosure at the bottom of the act) is
-the full engine, unchanged, for acts that need it: multi-step sequences, title
-cards, slide runs, separate visual and audio operations, pause, resume, replay,
-seek, stop, black and clear. Your own cues are never touched by the derivation
-and run after the derived one.
+**Advanced cues** (a disclosure at the bottom of the act) is the full engine,
+unchanged, for acts that need it: multi-step sequences, title cards, slide
+runs, separate visual and audio operations, pause, resume, replay, seek, stop,
+black and clear. Every cue chooses its media from the act's library; there is
+no second upload path. Your own cues are never touched by the derivation and
+run after the derived one. Tick images in the library and **ADD … AS
+SEQUENTIAL CUES** to make a slide run in one press.
 
 Most acts never need to open it.
 
@@ -372,16 +419,40 @@ Previous/Next but can still be selected deliberately. You cannot change the act
 while audience voting is open, and the console asks for confirmation if media
 is playing.
 
-**Display mode** — LOBBY, ACT CARD, PERFORMANCE, SCOREBOARD, INTERMISSION,
-FINAL RESULTS. `P` is a shortcut for PERFORMANCE, `H` for HOLD.
+**GO** — the one control for an ordinary act. The button always says what it is
+about to do (`PERFORMANCE`, `SCORING`, `NEXT ACT · …`) and, when it cannot,
+why (`Close audience voting before moving to the next act`). Pressing it
+performs the whole step:
 
-**Media transport** — one command at a time; the console waits for the
-projector to acknowledge before accepting another, so a double click cannot
-fire twice.
+| GO into         | What happens                                                                                                  |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| **ACT CARD**    | The act card is shown. From nothing selected, GO selects the first act.                                       |
+| **PERFORMANCE** | The performance visual comes up; the backing track starts if the act asked for it.                            |
+| **SCORING**     | Performance media stops, the act card returns, judges are opened. Audience voting opens only if you allow it. |
+| **SCOREBOARD**  | The scores are shown.                                                                                         |
+| **NEXT ACT**    | The next act's card. Refused while audience voting is open; refused at the end of the running order.          |
+
+The four step buttons beside GO jump straight to a step. _SETUP & PREFLIGHT →
+02b / SHOW FLOW_ decides what GO may do on its own: stopping media on SCORING,
+opening judges on SCORING, opening audience voting on SCORING (off by default,
+because it is public and cannot be undone for the act), and whether SCOREBOARD
+is a step of its own.
+
+**Always explicit, never done by GO:** OPEN and CLOSE AUDIENCE VOTING (unless
+you turned the policy on), BLACK, STOP ALL MEDIA, HOLD, EMERGENCY, FINALISE,
+REVEAL and FINAL RESULTS.
+
+**Display mode** — LOBBY, ACT CARD, PERFORMANCE, SCOREBOARD, INTERMISSION,
+FINAL RESULTS remain available for anything the flow does not cover. `P` is a
+shortcut for PERFORMANCE, `H` for HOLD.
+
+**Media transport** — the advanced and recovery controls, one command at a
+time; the console waits for the projector to acknowledge before accepting
+another, so a double click cannot fire twice.
 
 | Control                     | What it does                                                  |
 | --------------------------- | ------------------------------------------------------------- |
-| **GO**                      | Runs the selected cue: visual up, backing track from the top. |
+| **GO** (cue stack)          | Runs the selected cue: visual up, backing track from the top. |
 | **PREPARE**                 | Loads the cue's media without showing or playing anything.    |
 | **PAUSE**                   | Pauses everything that is playing.                            |
 | **RESUME**                  | Resumes what was paused.                                      |
@@ -397,37 +468,54 @@ Underneath the transport the console shows what the projector actually
 reports: its transports, playback position and duration, media cache progress,
 and any media error. If the projector did not execute a command, it says so.
 
+**Status bar** — `PROJECTOR CONNECTED · AUDIO ARMED` (or `PAIRED · NOT
+CONNECTED`, `NOT PAIRED`, `AUDIO NOT ARMED`) is live from the coordinator's own
+sockets and sessions. Paired means a display holds a credential; connected
+means its socket is open now; armed means that connected display has unlocked
+sound. They are three different facts and the console never infers one from
+another.
+
 ---
 
 ## Audience voting
 
 Phones reach the show by scanning the QR code on the LOBBY screen, or by
-opening `/vote`.
+opening `/vote`. The page is responsive: a phone, a tablet or a laptop each get
+a layout that fits.
 
 **OPEN AUDIENCE VOTING** (confirmed, because it is public) lets phones score
 the current act 0–10. **CLOSE AUDIENCE VOTING** ends it.
 
 How a phone vote works, exactly:
 
-1. The voter taps a number. **This is local. Nothing is sent.** The phone says
-   so: _"Selected 8 — not sent yet"_.
-2. They press **LOCK IN 8**, then confirm.
-3. Only then is a vote sent, and only the server decides whether it counts.
+1. The voter taps a number. The phone says _"Selected 8 — lock it in, or it is
+   sent when voting closes"_.
+2. They press **LOCK IN 8** and confirm, and the vote is sent immediately;
+   **or** they do nothing more, and the moment you close voting the phone
+   sends the 8 it was holding.
+3. Only the server decides whether a vote counts.
 4. The phone shows the score as locked only after the server accepts it.
 
-If the operator closes voting while a score was being sent, the phone says
-_"Voting closed before your score was submitted."_ — never a false success.
+**Closing voting counts what the hall had chosen.** A phone holding a selected
+score submits it automatically; a phone that never chose anything sends
+nothing; a score that was already locked in is never sent twice. Because your
+CLOSE reaches phones before their automatic submissions reach the server,
+each close carries an identifier and the server accepts submissions quoting it
+for a short, bounded grace interval (eight seconds) — for that act, for that
+close, one per phone, and never after the act changes or voting is reopened.
+An ordinary late LOCK IN after the close is still refused, and the phone says
+_"Voting closed before your score could be counted."_
 
-Closing voting never submits anything. A voter who chose a number but did not
-lock it in has their choice discarded and sees "Voting has closed"; no vote is
-recorded. If a lock-in and your close cross in flight, the server decides: a
-vote committed while voting was still open counts, and anything arriving after
-is refused.
+If a lock-in and your close cross in flight, the server decides: a vote
+committed while voting was still open counts, and anything arriving after the
+grace interval is refused.
 
 One vote per phone per act, and it cannot be changed. The console shows
 accepted votes, the weighted mean and how many phones are connected.
 
-Close voting before changing the act.
+Close voting before changing the act. Closing a thousand phones legitimately
+produces up to a thousand submissions in the following seconds; that is real
+votes being stored, not a fault.
 
 ---
 
@@ -567,7 +655,7 @@ Switch the projector to **FINAL RESULTS** to put the current stage on screen.
 
 ## Deleting an act
 
-_ACTS & CUES → act → **DELETE ACT**._
+_ACTS & MEDIA → act → **DELETE ACT**._
 
 Deleting is two steps. The first asks the server what deleting this act would
 really destroy, and shows it:
@@ -606,23 +694,27 @@ contained. Show history is append-only and is never rewritten.
 
 _SETUP & PREFLIGHT → 04 / DANGER → **RESET ENTIRE SHOW…**_
 
-This is the between-events control. It returns the event to a clean, ready state
-without making you set it up again.
+This returns the event to the **default show**, as if it had just been
+created.
 
-**It clears:** every act, every cue, every uploaded file, every audience vote and
-aggregate, every judge score, every finalised result and ranking snapshot, the
-current act, the display mode, the voting and reveal state, and the projector
-pairing code. The projector returns to the lobby with nothing playing and no
-blackout.
+**It clears:** every act and cue; every uploaded and generated media file
+(from storage too); every audience vote and aggregate, judge score, finalised
+result and ranking snapshot; the current act, display mode, show-flow step,
+voting and reveal state; the event name, short name and tagline; the theme and
+typeface; the judge panel and its links; the audience/judge weighting; the GO
+behaviour; the public intermission and emergency text; the projector pairing
+code **and** every paired projector session; and any generated test show and
+its seed.
 
-**It keeps:** the event name and tagline, the theme, the typeface, the public
-intermission and emergency text, the judge panel and the judges' links, and the
-audience/judge weighting. Paired displays stay paired — a screen already trusted
-in the hall should not need re-pairing because the running order changed. Your
-operator sign-in is untouched.
+**Afterwards the show is** “So You Think You Can Do Stuff”, four judges named
+Judge 1–4, 50:50 weighting, the default theme and the system typeface, with
+the projector back on its pairing screen. Re-pair the display and reissue
+judge links before the next event.
 
-**It never touches** the administrator account, deployment secrets, Cloudflare
-configuration or any platform asset. This is not a factory reset.
+**It never touches** the administrator account or your sign-in, deployment
+secrets, Cloudflare configuration, cached typefaces or any platform asset.
+`RESET ENTIRE SHOW` is a reset of the show, not a factory reset of the
+installation.
 
 The confirmation is deliberate: pressing **RESET ENTIRE SHOW…** opens a warning,
 and the destructive button stays disabled until you type either the event's own
@@ -632,6 +724,31 @@ Afterwards the console reports what actually happened, including whether every
 media file really left storage. If storage refused, the reset has still fully
 happened and the outstanding files are retryable work — the console says so
 rather than claiming a clean bucket.
+
+---
+
+## Generating a test show
+
+_SETUP & PREFLIGHT → 04 / DANGER → **GENERATE TEST SHOW…**_
+
+Fills the show with a procedurally generated evening — acts, tiny synthetic
+media fixtures, audience votes, judge scores and results, at a random point in
+a random scenario — so every screen can be checked with realistic data before
+doors, without typing anything in.
+
+Each press draws a new eight-character **seed** and a scenario; the console
+shows both, and typing the same seed later reproduces the same show exactly.
+Scenarios are weighted towards the end of an evening (completed show, near
+end, tie-heavy, a judge who has not scored) because that is where rankings,
+reveals and final results live; mid-show, early, sparse and heavy audiences,
+media-heavy, long text, edge scoring inputs and deliberately broken media are
+all in the pool and can be pinned from the list.
+
+Generation **replaces** the current show data and is confirmed by phrase; it
+never appends invented acts to a real running order. Your event name, theme,
+typeface and GO behaviour are kept; the judge panel is replaced by the
+scenario's. Everything generated is tagged and stored under its own namespace,
+so **RESET ENTIRE SHOW** removes all of it.
 
 ---
 
@@ -814,7 +931,27 @@ production they are Worker secrets. `docs/deployment.md` is the full runbook.
   colour; `test/themes.test.ts` asserts WCAG AA on every pairing a component is
   allowed to draw, for every theme, in both the web and projector palettes.
 - **Audio arming is a projector-side gesture.** It can never be triggered
-  remotely, and `armed` is set only after a real unlock succeeds.
+  remotely, and `armed` is set only after a real unlock succeeds. Both
+  gesture-sensitive calls (`AudioContext.resume()` and the audio element's
+  `play()`) are issued synchronously in the click's call stack, before the
+  first `await`; awaiting between them is what made the first click fail.
+- **The show flow is a derived, deterministic state machine**
+  (`computeFlow` in `worker/show-state.ts`). GO performs exactly what the
+  console said it would, or refuses with the reason the console already shows.
+  Dangerous actions are never implied by a step unless the show's stored GO
+  policy allows them.
+- **Voting close is bounded, not reopened.** CLOSE mints a close revision; a
+  phone's automatic submission quoting it is accepted for `VOTE_CLOSE_GRACE_MS`
+  after the close, for that act only, once per phone. Everything else after the
+  close is refused.
+- **Presence is authoritative.** Paired (a session row), connected (a socket
+  attachment) and armed (recorded on the projector's attachment from its own
+  report) are three facts computed from the coordinator's own state and pushed
+  as `connection_count`; the console never infers them from telemetry.
+- **Media has ownership and references.** `media_assets.act_id` says whose
+  library a file is in; `assetReferences()` says who uses it. Ownership decides
+  where a file appears, references decide whether it may be deleted, and
+  generated test fixtures carry `generated_test` and live under `test-shows/`.
 - **Media spans two systems that cannot commit together.** The rule is fixed and
   one-directional: SQLite is made correct first, and every object that must
   still leave R2 is recorded in `media_cleanup_queue` as retryable work. A row

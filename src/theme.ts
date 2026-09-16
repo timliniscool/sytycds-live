@@ -1,5 +1,11 @@
 import { useEffect } from "react";
-import { DEFAULT_THEME_ID, isThemeId, themeById } from "../shared/themes";
+import {
+  DEFAULT_THEME_ID,
+  isThemeId,
+  themeById,
+  type ThemeId,
+} from "../shared/themes";
+import type { ActAppearance } from "../shared/domain";
 
 export function applyShowTheme(
   themeId: unknown,
@@ -47,6 +53,22 @@ export function applyShowTheme(
   );
 }
 
+/**
+ * The theme and typeface a public surface draws the current act in: the act's
+ * own override where it has one, otherwise the show's. The operator console
+ * never follows an act override; it stays in the show's own theme so the
+ * console does not change colour under the operator mid-show.
+ */
+export function effectiveAppearance(
+  show: { themeId: ThemeId; fontFamily: string },
+  act: { appearance: ActAppearance } | null | undefined,
+): { themeId: ThemeId; fontFamily: string } {
+  return {
+    themeId: act?.appearance.themeId ?? show.themeId,
+    fontFamily: act?.appearance.fontFamily ?? show.fontFamily,
+  };
+}
+
 export function useShowTheme(
   themeId: unknown,
   fontFamily: string | undefined,
@@ -64,7 +86,7 @@ export function useShowTheme(
         fontLink.dataset.sytycdsFont = "";
         document.head.append(fontLink);
       }
-      fontLink.href = `/api/font/selected.css?v=${encodeURIComponent(fontFamily)}`;
+      fontLink.href = `/api/font/selected.css?family=${encodeURIComponent(fontFamily)}`;
     } else fontLink?.remove();
   }, [themeId, fontFamily, projector]);
 }

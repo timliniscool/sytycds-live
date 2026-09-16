@@ -13,6 +13,7 @@ function act(id: string, order: number, withdrawn = false): PublicAct {
     actType: "Music",
     publicDescription: "",
     withdrawn,
+    appearance: { themeId: null, fontFamily: null },
   };
 }
 

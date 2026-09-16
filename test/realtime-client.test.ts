@@ -55,6 +55,7 @@ const snapshotProjection: AudienceShowProjection = {
   activeAct: null,
   revealedResult: null,
   publicResults: null,
+  voteCloseRevision: null,
 };
 
 describe("browser realtime client", () => {
@@ -88,6 +89,7 @@ describe("browser realtime client", () => {
         protocolVersion: PROTOCOL_VERSION,
         revision: showRevision(0),
         state: "OPEN",
+        closeRevision: null,
       }),
     );
     expect(client.getState().audienceVoting).toBe("OPEN");
@@ -97,6 +99,7 @@ describe("browser realtime client", () => {
         protocolVersion: PROTOCOL_VERSION,
         revision: showRevision(2),
         state: "CLOSED",
+        closeRevision: "close-1",
       }),
     );
     expect(client.getState().connection).toBe("DEGRADED");
@@ -391,6 +394,9 @@ describe("browser realtime client", () => {
         revision: showRevision(0),
         audience: 0,
         judgeIds: [],
+        projectors: 0,
+        projectorPaired: false,
+        projectorArmed: null,
       }),
     );
     expect(client.getState().showUnavailable).toBe(true);

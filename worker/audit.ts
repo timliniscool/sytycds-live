@@ -100,6 +100,10 @@ export function auditEventForCommand(
       return command.mode === "EMERGENCY"
         ? { ...base, type: "emergency.activated", data: { presentation: null } }
         : { ...base, type: "display.changed", data: { mode: command.mode } };
+    case "ADVANCE_SHOW":
+      return { ...base, type: "flow.advanced", data: {} };
+    case "SET_SHOW_STEP":
+      return { ...base, type: "flow.step", data: { step: command.step } };
     case "ACTIVATE_EMERGENCY":
       return {
         ...base,

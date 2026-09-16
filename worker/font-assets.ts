@@ -74,16 +74,47 @@ export async function cacheSelectedFont(
   return true;
 }
 
+/** Whether a typeface has already been cached, and may therefore be selected. */
+export function isFontCached(sql: SqlStorage, family: string): boolean {
+  return (
+    family === "system-ui" ||
+    sql
+      .exec<{ present: number }>(
+        "SELECT 1 AS present FROM selected_font_css WHERE family = ?",
+        family,
+      )
+      .toArray().length > 0
+  );
+}
+
+/** Every cached family, so an act override can only choose what exists. */
+export function listCachedFonts(sql: SqlStorage): string[] {
+  return sql
+    .exec<{ family: string }>(
+      "SELECT family FROM selected_font_css ORDER BY family",
+    )
+    .toArray()
+    .map((row) => row.family);
+}
+
+/**
+ * Serves the CSS for one cached family: the requested one when a client names
+ * it (an act override), otherwise the show's own selection.
+ */
 export function serveSelectedFontCss(
   sql: SqlStorage,
   showIdentifier: string,
+  requestedFamily: string | null = null,
 ): Response {
-  const family = sql
-    .exec<{ font_family: string }>(
-      "SELECT font_family FROM shows WHERE id = ?",
-      showIdentifier,
-    )
-    .toArray()[0]?.font_family;
+  const family =
+    requestedFamily && requestedFamily.length <= 120
+      ? requestedFamily
+      : sql
+          .exec<{ font_family: string }>(
+            "SELECT font_family FROM shows WHERE id = ?",
+            showIdentifier,
+          )
+          .toArray()[0]?.font_family;
   const css = family
     ? sql
         .exec<{ css_text: string }>(

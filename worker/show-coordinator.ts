@@ -12,8 +12,10 @@ import {
   parseClientMessage,
   serialiseServerMessage,
   type ClientHello,
+  type ProjectorPlaybackStatus,
   type ServerMessage,
 } from "../shared/protocol";
+import { TEST_SCENARIOS } from "../shared/test-show";
 import { isRecord } from "../shared/trust";
 import {
   configuredAdminCredential,
@@ -63,7 +65,14 @@ import {
   drainMediaCleanupQueue,
   findOrphanedAssets,
   pendingCleanupCount,
+  showMediaPrefixes,
 } from "./media-cleanup";
+import type { ActInput } from "./acts";
+import {
+  generateTestShow,
+  parseTestShowRequest,
+  showDataExists,
+} from "./test-show";
 import {
   createCue,
   deleteCue,
@@ -99,16 +108,41 @@ import {
 import { searchGoogleFonts } from "./google-fonts";
 import {
   cacheSelectedFont,
+  isFontCached,
+  listCachedFonts,
   serveFontAsset,
   serveSelectedFontCss,
 } from "./font-assets";
 import { authenticateSocketRole } from "./socket-auth";
 import {
   executeAdminCommand,
+  loadFlowState,
+  loadTestShowGeneration,
   PRIMARY_SHOW_ID,
   projectShowState,
   type StateChange,
 } from "./show-state";
+
+/** How long cached storage metrics are served before R2 is listed again. */
+const INFRASTRUCTURE_METRICS_TTL_MS = 45_000;
+/** How many recent failures the diagnostics endpoint returns. */
+const RECENT_FAILURE_LIMIT = 10;
+
+interface InfrastructureMetrics {
+  sampledAt: string;
+  r2: {
+    showObjects: number;
+    showBytes: number;
+    testObjects: number;
+    testBytes: number;
+    fontObjects: number;
+    fontBytes: number;
+    listingTruncated: boolean;
+    error: string | null;
+  };
+  database: { sizeBytes: number | null; schemaVersion: number };
+  pendingMediaCleanup: number;
+}
 
 interface CoordinatorHealth {
   ok: true;
@@ -135,6 +169,12 @@ interface ReadyAttachment {
   lastReactionInterval: number;
   reactionViolations: number;
   reactionEligibleSlots: number;
+  /**
+   * Projector sockets only: whether this display has reported its audio as
+   * armed. Kept on the attachment so presence survives hibernation and is
+   * derived from the socket that actually exists, never from stale telemetry.
+   */
+  projectorArmed?: boolean;
 }
 
 type SocketAttachment = AwaitingHelloAttachment | ReadyAttachment;
@@ -180,6 +220,8 @@ function isSocketAttachment(value: unknown): value is SocketAttachment {
     typeof value.lastReactionInterval === "number" &&
     typeof value.reactionViolations === "number" &&
     typeof value.reactionEligibleSlots === "number" &&
+    (value.projectorArmed === undefined ||
+      typeof value.projectorArmed === "boolean") &&
     (value.role.kind === "admin" ||
       value.role.kind === "projector" ||
       value.role.kind === "audience")
@@ -191,6 +233,21 @@ export class ShowCoordinator extends DurableObject<Env> {
   private connectionCountTimer: number | null = null;
   /** Last projector media error seen, so the log records changes, not repeats. */
   private lastProjectorError: string | null = null;
+  /** The most recent projector telemetry; cleared when no projector is connected. */
+  private lastProjectorTelemetry: ProjectorPlaybackStatus | null = null;
+  /**
+   * Realtime counters for the diagnostics endpoint. They live in this instance
+   * and restart with it, which is stated in the response rather than hidden.
+   */
+  private readonly counters = {
+    startedAt: new Date().toISOString(),
+    hellos: { admin: 0, projector: 0, audience: 0, judge: 0 },
+    refusedHellos: 0,
+    resyncRequests: 0,
+    protocolErrors: 0,
+    socketErrors: 0,
+  };
+  private infrastructureMetrics: InfrastructureMetrics | null = null;
   private readonly pendingAggregateUpdates = new Map<
     string,
     Extract<ServerMessage, { type: "aggregate_update" }>
@@ -282,7 +339,11 @@ export class ShowCoordinator extends DurableObject<Env> {
       return this.handlePairProjector(request);
     }
     if (url.pathname === "/api/font/selected.css" && request.method === "GET")
-      return serveSelectedFontCss(this.ctx.storage.sql, PRIMARY_SHOW_ID);
+      return serveSelectedFontCss(
+        this.ctx.storage.sql,
+        PRIMARY_SHOW_ID,
+        url.searchParams.get("family"),
+      );
     const fontMatch = /^\/api\/font\/(font-[a-f0-9]{64})$/u.exec(url.pathname);
     if (fontMatch && request.method === "GET")
       return serveFontAsset(
@@ -303,6 +364,14 @@ export class ShowCoordinator extends DurableObject<Env> {
     if (url.pathname === "/api/admin/fonts" && request.method === "GET") {
       return this.handleFontSearch(request, url);
     }
+    if (url.pathname === "/api/admin/fonts/cached" && request.method === "GET")
+      return this.handleCachedFonts(request);
+    if (url.pathname === "/api/admin/diagnostics" && request.method === "GET")
+      return this.handleDiagnostics(request, url);
+    if (url.pathname === "/api/admin/test-show" && request.method === "GET")
+      return this.handleTestShowStatus(request);
+    if (url.pathname === "/api/admin/test-show" && request.method === "POST")
+      return this.handleGenerateTestShow(request);
     if (url.pathname === "/api/admin/show" && request.method === "PUT") {
       return this.handleUpsertShow(request);
     }
@@ -556,13 +625,11 @@ export class ShowCoordinator extends DurableObject<Env> {
   private async handleProjectorStatus(request: Request): Promise<Response> {
     if (!(await this.authenticatedAdmin(request, false)))
       return Response.json({ error: "Unauthorised" }, { status: 401 });
-    const paired = projectorPairingStatus(
-      this.ctx.storage.sql,
-      PRIMARY_SHOW_ID,
-    ).paired;
+    const presence = this.presence();
     return Response.json({
-      paired,
-      connected: this.socketInventory().projectors > 0,
+      paired: presence.projectorPaired,
+      connected: presence.projectors > 0,
+      armed: presence.projectorArmed,
     });
   }
 
@@ -773,6 +840,8 @@ export class ShowCoordinator extends DurableObject<Env> {
       PRIMARY_SHOW_ID,
     );
     this.lastProjectorError = null;
+    this.lastProjectorTelemetry = null;
+    this.infrastructureMetrics = null;
     recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
       type: "show.reset",
       actor: "admin",
@@ -780,15 +849,261 @@ export class ShowCoordinator extends DurableObject<Env> {
         acts: result.clearedActs,
         objectsDeleted: result.objectsDeleted,
         objectsPending: result.objectsPending,
+        projectorSessionsRevoked: result.projectorSessionsRevoked,
       },
     });
-    // The show still exists with its setup intact; every surface re-reads the
-    // cleared operational state rather than being told the show is gone.
+    // Projector sessions are gone with the pairing; a connected display goes
+    // back to its pairing screen rather than holding a revoked credential.
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (attachment?.phase === "ready" && attachment.role.kind === "projector")
+        ws.close(1008, "Show reset");
+    }
+    // The show still exists, now as the default show; every surface re-reads
+    // it rather than being told the show is gone. Judge links were replaced,
+    // so judge sockets are told their credential no longer holds.
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("audience");
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (attachment?.phase === "ready" && attachment.role.kind === "judge")
+        ws.close(1008, "Show reset");
+    }
+    this.sendConnectionCount();
+    return Response.json(result);
+  }
+
+  /** Every cached typeface, so an act override can only choose what exists. */
+  private async handleCachedFonts(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    return Response.json({
+      families: listCachedFonts(this.ctx.storage.sql),
+    });
+  }
+
+  /**
+   * An act may only name a typeface the coordinator has cached, because the
+   * hall's projector must never wait on a public font service mid-show. An
+   * uncached family is fetched here, once, exactly as the show's own is.
+   */
+  private async ensureActFont(input: ActInput): Promise<string | null> {
+    const family = input.appearance.fontFamily;
+    if (family === null || isFontCached(this.ctx.storage.sql, family))
+      return null;
+    const cached = await cacheSelectedFont(
+      this.ctx.storage,
+      this.env.MEDIA,
+      family,
+    ).catch(() => false);
+    return cached
+      ? null
+      : `${family} could not be downloaded, so it cannot be used for this act.`;
+  }
+
+  private async handleTestShowStatus(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    return Response.json({
+      current: loadTestShowGeneration(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+      scenarios: TEST_SCENARIOS.map((scenario) => ({
+        id: scenario.id,
+        label: scenario.label,
+        phase: scenario.phase,
+      })),
+      showDataExists: showDataExists(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+    });
+  }
+
+  /**
+   * Generates a test show. Always confirmed by phrase: generation replaces the
+   * current show data, and whether that data was "real" is not something the
+   * coordinator can know.
+   */
+  private async handleGenerateTestShow(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    if (!this.showExists())
+      return Response.json({ error: "Create the show first" }, { status: 409 });
+    const parsed = parseTestShowRequest(await this.adminBody(request));
+    if (!parsed.ok)
+      return Response.json({ error: parsed.reason }, { status: 400 });
+    const summary = await generateTestShow(
+      this.ctx.storage,
+      this.env.MEDIA,
+      PRIMARY_SHOW_ID,
+      parsed.request,
+    );
+    this.infrastructureMetrics = null;
     this.broadcastSnapshots("admin");
     this.broadcastSnapshots("projector");
     this.broadcastSnapshots("audience");
-    this.broadcastSnapshots("judge");
-    return Response.json(result);
+    // The judge panel was replaced; existing judge sockets no longer match it.
+    for (const ws of this.ctx.getWebSockets()) {
+      const attachment = this.socketAttachment(ws);
+      if (attachment?.phase === "ready" && attachment.role.kind === "judge")
+        ws.close(1008, "Judge panel replaced");
+    }
+    return Response.json(summary, { status: 201 });
+  }
+
+  /**
+   * Live application metrics come straight from this instance and its
+   * database; storage metrics are listed from R2 at most every 45 seconds, or
+   * on demand with `?refresh=1`.
+   */
+  private async handleDiagnostics(
+    request: Request,
+    url: URL,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, false)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const sql = this.ctx.storage.sql;
+    const show = sql
+      .exec<{
+        active_act_id: string | null;
+        display_mode: string;
+        audience_vote_state: string;
+        revision: number;
+      }>(
+        "SELECT active_act_id, display_mode, audience_vote_state, revision FROM shows WHERE id = ?",
+        PRIMARY_SHOW_ID,
+      )
+      .toArray()[0];
+    const currentActVotes = show?.active_act_id
+      ? (sql
+          .exec<{ vote_count: number }>(
+            "SELECT vote_count FROM audience_aggregates WHERE show_id = ? AND act_id = ?",
+            PRIMARY_SHOW_ID,
+            show.active_act_id,
+          )
+          .toArray()[0]?.vote_count ?? 0)
+      : 0;
+    const totalVotes = sql
+      .exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM audience_votes WHERE show_id = ?",
+        PRIMARY_SHOW_ID,
+      )
+      .one().count;
+    const recentFailures = sql
+      .exec<{
+        id: number;
+        event_type: string;
+        event_json: string;
+        occurred_at: string;
+      }>(
+        `SELECT id, event_type, event_json, occurred_at FROM audit_events
+         WHERE show_id = ? AND event_type IN ('command.refused', 'cue.failed', 'media.error')
+         ORDER BY id DESC LIMIT ?`,
+        PRIMARY_SHOW_ID,
+        RECENT_FAILURE_LIMIT,
+      )
+      .toArray()
+      .map((row) => ({
+        id: row.id,
+        type: row.event_type,
+        at: row.occurred_at,
+        detail: row.event_json.slice(0, 300),
+      }));
+    const refresh = url.searchParams.get("refresh") === "1";
+    const age = this.infrastructureMetrics
+      ? Date.now() - Date.parse(this.infrastructureMetrics.sampledAt)
+      : Number.POSITIVE_INFINITY;
+    if (refresh || age > INFRASTRUCTURE_METRICS_TTL_MS)
+      this.infrastructureMetrics = await this.sampleInfrastructure();
+    return Response.json({
+      realtime: {
+        sampledAt: new Date().toISOString(),
+        presence: this.presence(),
+        show: show
+          ? {
+              displayMode: show.display_mode,
+              audienceVoteState: show.audience_vote_state,
+              activeActId: show.active_act_id,
+              revision: show.revision,
+              flow: loadFlowState(sql, PRIMARY_SHOW_ID),
+            }
+          : null,
+        votes: { currentAct: currentActVotes, total: totalVotes },
+        projectorMedia: this.lastProjectorTelemetry,
+        recentFailures,
+        counters: this.counters,
+      },
+      infrastructure: this.infrastructureMetrics,
+      infrastructureCacheTtlMs: INFRASTRUCTURE_METRICS_TTL_MS,
+    });
+  }
+
+  private async sampleInfrastructure(): Promise<InfrastructureMetrics> {
+    const bucket = this.env.MEDIA;
+    const count = async (
+      prefix: string,
+    ): Promise<{ objects: number; bytes: number; truncated: boolean }> => {
+      let objects = 0;
+      let bytes = 0;
+      let cursor: string | undefined;
+      for (let page = 0; page < 10; page += 1) {
+        const listing = await bucket.list({
+          prefix,
+          limit: 1000,
+          ...(cursor ? { cursor } : {}),
+        });
+        objects += listing.objects.length;
+        for (const object of listing.objects) bytes += object.size;
+        if (!listing.truncated) return { objects, bytes, truncated: false };
+        cursor = listing.cursor;
+      }
+      return { objects, bytes, truncated: true };
+    };
+    const [showPrefix, testPrefix] = showMediaPrefixes(PRIMARY_SHOW_ID);
+    let r2: InfrastructureMetrics["r2"];
+    try {
+      const [show, test, fonts] = await Promise.all([
+        count(showPrefix ?? `${PRIMARY_SHOW_ID}/`),
+        count(testPrefix ?? "test-shows/"),
+        count("fonts/"),
+      ]);
+      r2 = {
+        showObjects: show.objects,
+        showBytes: show.bytes,
+        testObjects: test.objects,
+        testBytes: test.bytes,
+        fontObjects: fonts.objects,
+        fontBytes: fonts.bytes,
+        listingTruncated: show.truncated || test.truncated || fonts.truncated,
+        error: null,
+      };
+    } catch (error: unknown) {
+      r2 = {
+        showObjects: 0,
+        showBytes: 0,
+        testObjects: 0,
+        testBytes: 0,
+        fontObjects: 0,
+        fontBytes: 0,
+        listingTruncated: false,
+        error: error instanceof Error ? error.message : "R2 listing failed",
+      };
+    }
+    const sizeBytes = ((): number | null => {
+      try {
+        return this.ctx.storage.sql.databaseSize;
+      } catch {
+        return null;
+      }
+    })();
+    return {
+      sampledAt: new Date().toISOString(),
+      r2,
+      database: {
+        sizeBytes,
+        schemaVersion: readSchemaVersion(this.ctx.storage.sql),
+      },
+      pendingMediaCleanup: pendingCleanupCount(
+        this.ctx.storage.sql,
+        PRIMARY_SHOW_ID,
+      ),
+    };
   }
 
   private async handleScoringConfiguration(
@@ -986,10 +1301,17 @@ export class ShowCoordinator extends DurableObject<Env> {
     const input = parseActInput(await this.adminBody(request));
     if (!input)
       return Response.json({ error: "Invalid act fields" }, { status: 400 });
+    const fontProblem = await this.ensureActFont(input);
+    if (fontProblem)
+      return Response.json({ error: fontProblem }, { status: 400 });
     const act = createAct(this.ctx.storage, PRIMARY_SHOW_ID, input);
     if (!act)
-      return Response.json({ error: "Show unavailable" }, { status: 409 });
+      return Response.json(
+        { error: "Show unavailable or a chosen media file does not exist" },
+        { status: 409 },
+      );
     this.broadcastSnapshots("admin");
+    this.broadcastAdminFlow();
     return Response.json({ act }, { status: 201 });
   }
 
@@ -1002,8 +1324,14 @@ export class ShowCoordinator extends DurableObject<Env> {
     const input = parseActInput(await this.adminBody(request));
     if (!input)
       return Response.json({ error: "Invalid act fields" }, { status: 400 });
+    const fontProblem = await this.ensureActFont(input);
+    if (fontProblem)
+      return Response.json({ error: fontProblem }, { status: 400 });
     if (!editAct(this.ctx.storage, PRIMARY_SHOW_ID, requestedId, input))
-      return Response.json({ error: "Act not found" }, { status: 404 });
+      return Response.json(
+        { error: "Act not found, or a chosen media file does not exist" },
+        { status: 404 },
+      );
     this.broadcastSnapshots("admin");
     this.broadcastSnapshots("projector");
     this.broadcastSnapshots("audience");
@@ -1257,8 +1585,15 @@ export class ShowCoordinator extends DurableObject<Env> {
   private async handleListMedia(request: Request): Promise<Response> {
     if (!(await this.authenticatedAdmin(request, false)))
       return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const actIdentifier = new URL(request.url).searchParams.get("actId");
+    if (actIdentifier && !/^[A-Za-z0-9_-]{1,128}$/u.test(actIdentifier))
+      return Response.json({ error: "Invalid act" }, { status: 400 });
     return Response.json({
-      assets: listMediaAssets(this.ctx.storage.sql, PRIMARY_SHOW_ID),
+      assets: listMediaAssets(
+        this.ctx.storage.sql,
+        PRIMARY_SHOW_ID,
+        actIdentifier,
+      ),
     });
   }
 
@@ -1268,13 +1603,18 @@ export class ShowCoordinator extends DurableObject<Env> {
   ): Promise<Response> {
     if (!(await this.authenticatedAdmin(request, true)))
       return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const actIdentifier = url.searchParams.get("actId");
+    if (actIdentifier && !/^[A-Za-z0-9_-]{1,128}$/u.test(actIdentifier))
+      return Response.json({ error: "Invalid act" }, { status: 400 });
     const result = await uploadMediaAsset(
       this.ctx.storage,
       this.env.MEDIA,
       PRIMARY_SHOW_ID,
       request,
       url.searchParams.get("filename"),
+      { actId: actIdentifier },
     );
+    if (result.ok) this.infrastructureMetrics = null;
     return result.ok
       ? Response.json({ asset: result.asset }, { status: 201 })
       : Response.json({ error: result.error }, { status: result.status });
@@ -1461,6 +1801,7 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
 
     if (parsed.message.type === "resync_request") {
+      this.counters.resyncRequests += 1;
       this.sendSnapshot(ws, attachment.role);
       return;
     }
@@ -1560,6 +1901,17 @@ export class ShowCoordinator extends DurableObject<Env> {
       // Telemetry is ephemeral operator assistance: it is relayed to admin and
       // never written to SQLite, so hibernation simply drops it. Only a newly
       // appearing media error earns a line in the operational log.
+      this.lastProjectorTelemetry = parsed.message.status;
+      // Armed is presence, not telemetry: it is recorded on the socket that
+      // reported it so the console learns the moment it changes, and forgets
+      // it the moment that socket is gone.
+      if (attachment.projectorArmed !== parsed.message.status.armed) {
+        ws.serializeAttachment({
+          ...attachment,
+          projectorArmed: parsed.message.status.armed,
+        } satisfies ReadyAttachment);
+        this.sendConnectionCount();
+      }
       this.broadcastAdmin({
         type: "projector_telemetry",
         protocolVersion: PROTOCOL_VERSION,
@@ -1703,9 +2055,19 @@ export class ShowCoordinator extends DurableObject<Env> {
     );
   }
 
-  webSocketClose(): void {
-    // Hibernation-safe connections are discovered from attachments; no memory cleanup is required.
+  webSocketClose(ws: WebSocket): void {
+    // Hibernation-safe connections are discovered from attachments; no memory
+    // cleanup is required beyond forgetting telemetry that described a socket
+    // which no longer exists.
+    const attachment = this.socketAttachment(ws);
+    if (attachment?.phase === "ready" && attachment.role.kind === "projector")
+      this.lastProjectorTelemetry = null;
     this.broadcastConnectionCount();
+  }
+
+  webSocketError(ws: WebSocket): void {
+    this.counters.socketErrors += 1;
+    this.webSocketClose(ws);
   }
 
   private async handleHello(
@@ -1721,6 +2083,7 @@ export class ShowCoordinator extends DurableObject<Env> {
       attachment.projectorSessionHash,
     );
     if (!role) {
+      this.counters.refusedHellos += 1;
       this.sendProtocolError(
         ws,
         "unauthorised",
@@ -1730,6 +2093,7 @@ export class ShowCoordinator extends DurableObject<Env> {
       return;
     }
 
+    this.counters.hellos[role.kind] += 1;
     ws.serializeAttachment({
       phase: "ready",
       role,
@@ -1741,9 +2105,12 @@ export class ShowCoordinator extends DurableObject<Env> {
       lastReactionInterval: -1,
       reactionViolations: 0,
       reactionEligibleSlots: this.reactionEligibleSlots(),
+      ...(role.kind === "projector" ? { projectorArmed: false } : {}),
     } satisfies ReadyAttachment);
     this.sendSnapshot(ws, role);
     if (role.kind === "audience") this.refreshReactionSampling(ws);
+    // An operator must see the truth immediately, not after the next change.
+    if (role.kind === "admin") this.sendOne(ws, this.presenceMessage());
     this.broadcastConnectionCount();
   }
 
@@ -1884,6 +2251,7 @@ export class ShowCoordinator extends DurableObject<Env> {
         protocolVersion: PROTOCOL_VERSION,
         revision,
         state: audience.show.audienceVoteState,
+        closeRevision: audience.voteCloseRevision,
       };
       this.broadcastAdmin(message);
       this.broadcastAudience(message);
@@ -1924,7 +2292,27 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
     if (changes.includes("judge_permission")) {
       this.broadcastJudgePermissionUpdates(revision);
+      // The judge matrix on the console shows each judge's permission; it is
+      // part of the admin projection, so the console re-reads it too.
+      this.broadcastSnapshots("admin");
     }
+    // What GO does next depends on nearly everything above, so the operator's
+    // console is told after every accepted command rather than guessing.
+    this.broadcastAdminFlow(revision);
+  }
+
+  /** The recomputed show flow, as an admin-only patch. */
+  private broadcastAdminFlow(
+    revision: ReturnType<typeof showRevision> = this.currentRevision(),
+  ): void {
+    const flow = loadFlowState(this.ctx.storage.sql, PRIMARY_SHOW_ID);
+    if (!flow) return;
+    this.broadcastAdmin({
+      type: "state_patch",
+      protocolVersion: PROTOCOL_VERSION,
+      revision,
+      patches: [{ kind: "flow", flow }],
+    });
   }
 
   private mediaAction(
@@ -2046,23 +2434,53 @@ export class ShowCoordinator extends DurableObject<Env> {
     }, 250);
   }
 
-  private sendConnectionCount(): void {
+  /**
+   * Presence is read from the sockets that exist right now and the sessions
+   * table, never from remembered telemetry. "Paired" is a credential that
+   * exists; "connected" is a socket that exists; "armed" is what a connected
+   * projector last reported about itself.
+   */
+  private presence(): Extract<ServerMessage, { type: "connection_count" }> {
     let audience = 0;
+    let projectors = 0;
+    let projectorArmed: boolean | null = null;
     const judgeIds = new Set<string>();
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = this.socketAttachment(ws);
-      if (attachment?.phase === "ready" && attachment.role.kind === "audience")
-        audience += 1;
-      if (attachment?.phase === "ready" && attachment.role.kind === "judge")
+      if (attachment?.phase !== "ready") continue;
+      if (attachment.role.kind === "audience") audience += 1;
+      if (attachment.role.kind === "judge")
         judgeIds.add(attachment.role.judgeId);
+      if (attachment.role.kind === "projector") {
+        projectors += 1;
+        projectorArmed =
+          projectorArmed === true || attachment.projectorArmed === true;
+      }
     }
-    this.broadcastAdmin({
+    return {
       type: "connection_count",
       protocolVersion: PROTOCOL_VERSION,
       revision: this.currentRevision(),
       audience,
       judgeIds: [...judgeIds],
-    });
+      projectors,
+      projectorPaired: this.showExists()
+        ? projectorPairingStatus(this.ctx.storage.sql, PRIMARY_SHOW_ID).paired
+        : false,
+      projectorArmed,
+    };
+  }
+
+  private presenceMessage(): ServerMessage {
+    return this.presence();
+  }
+
+  private sendConnectionCount(): void {
+    if (this.connectionCountTimer !== null) {
+      clearTimeout(this.connectionCountTimer);
+      this.connectionCountTimer = null;
+    }
+    this.broadcastAdmin(this.presenceMessage());
   }
 
   private showExists(): boolean {
@@ -2106,6 +2524,7 @@ export class ShowCoordinator extends DurableObject<Env> {
     code: Extract<ServerMessage, { type: "protocol_error" }>["code"],
     detail: string,
   ): void {
+    if (code !== "show_unavailable") this.counters.protocolErrors += 1;
     this.sendOne(ws, {
       type: "protocol_error",
       protocolVersion: PROTOCOL_VERSION,

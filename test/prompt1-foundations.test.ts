@@ -10,7 +10,11 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-import { PROTOCOL_VERSION, showRevision } from "../shared/domain";
+import {
+  PROTOCOL_VERSION,
+  showRevision,
+  VOTE_CLOSE_GRACE_MS,
+} from "../shared/domain";
 import {
   MAX_JUDGES,
   MIN_JUDGES,
@@ -22,7 +26,7 @@ import {
   RealtimeClient,
   type WebSocketLike,
 } from "../src/realtime/RealtimeClient";
-import { discardUnlockedSelection } from "../src/vote/vote-view";
+import { resolveVotingClose } from "../src/vote/vote-view";
 import { createAct, editAct, parseActInput } from "../worker/acts";
 import { submitAudienceVote } from "../worker/audience-votes";
 import { applyScoringConfiguration } from "../worker/scoring-config";
@@ -346,41 +350,146 @@ describe("theme persistence", () => {
 });
 
 describe("audience vote consent", () => {
-  it("discards a selected but unlocked score when voting closes", () => {
-    expect(discardUnlockedSelection({ kind: "selected", score: 9 })).toEqual({
-      kind: "idle",
+  it("submits a selected but unlocked score automatically when voting closes", () => {
+    expect(resolveVotingClose({ kind: "selected", score: 9 })).toEqual({
+      submission: { kind: "submitting", score: 9 },
+      autoSubmit: 9,
     });
-    expect(discardUnlockedSelection({ kind: "confirming", score: 9 })).toEqual({
-      kind: "idle",
-    });
-  });
-
-  it("never discards a locked score or a submission the server already has", () => {
-    expect(discardUnlockedSelection({ kind: "locked", score: 7 })).toEqual({
-      kind: "locked",
-      score: 7,
-    });
-    expect(discardUnlockedSelection({ kind: "submitting", score: 7 })).toEqual({
-      kind: "submitting",
-      score: 7,
+    expect(resolveVotingClose({ kind: "confirming", score: 9 })).toEqual({
+      submission: { kind: "submitting", score: 9 },
+      autoSubmit: 9,
     });
   });
 
-  it("records zero votes when a phone selects a score and the operator closes voting", async () => {
-    await withShow("prompt1-vote-close", async (storage) => {
+  it("submits nothing when nothing was selected, and never duplicates a lock-in", () => {
+    expect(resolveVotingClose({ kind: "idle" })).toEqual({
+      submission: { kind: "idle" },
+      autoSubmit: null,
+    });
+    expect(resolveVotingClose({ kind: "locked", score: 7 })).toEqual({
+      submission: { kind: "locked", score: 7 },
+      autoSubmit: null,
+    });
+    expect(resolveVotingClose({ kind: "submitting", score: 7 })).toEqual({
+      submission: { kind: "submitting", score: 7 },
+      autoSubmit: null,
+    });
+  });
+
+  it("mints one close revision per CLOSE and forgets it when voting reopens", async () => {
+    await withShow("prompt1-close-revision", async (storage) => {
       await seedShowWithAct(storage);
+      command(storage, "OPEN_AUDIENCE_VOTING");
+      expect(closeRevision(storage)).toBeNull();
+      command(storage, "CLOSE_AUDIENCE_VOTING");
+      const first = closeRevision(storage);
+      expect(first).toMatch(/^close-/u);
+      // A second CLOSE is idempotent: the phones were told about this one.
+      command(storage, "CLOSE_AUDIENCE_VOTING");
+      expect(closeRevision(storage)).toBe(first);
+      command(storage, "OPEN_AUDIENCE_VOTING");
+      expect(closeRevision(storage)).toBeNull();
+      command(storage, "CLOSE_AUDIENCE_VOTING");
+      expect(closeRevision(storage)).not.toBe(first);
+    });
+  });
+
+  it("counts a delayed automatic submission inside the grace window, and only then", async () => {
+    await withShow("prompt1-vote-grace", async (storage) => {
+      await seedShowWithAct(storage);
+      command(storage, "OPEN_AUDIENCE_VOTING");
+      command(storage, "CLOSE_AUDIENCE_VOTING");
+      const revision = closeRevision(storage)!;
+      const closedAt = storage.sql
+        .exec<{ vote_closed_at: number }>(
+          "SELECT vote_closed_at FROM show_runtime WHERE show_id = ?",
+          PRIMARY_SHOW_ID,
+        )
+        .one().vote_closed_at;
+
+      // The phone's automatic submission reaches the server 3 s after CLOSE,
+      // quoting the close it is answering: accepted and counted.
       expect(
-        command(storage, "OPEN_AUDIENCE_VOTING").acknowledgement.status,
-      ).toBe("accepted");
-      // The phone has selected 9. Nothing has been sent: selection is local.
+        submitAudienceVote(
+          storage,
+          PRIMARY_SHOW_ID,
+          voterHash(1),
+          { actIdentifier: "act-1", score: 9, closeRevision: revision },
+          closedAt + 3_000,
+        ),
+      ).toMatchObject({ ok: true });
+      // The same phone again: one vote per phone still holds.
       expect(
-        command(storage, "CLOSE_AUDIENCE_VOTING").acknowledgement.status,
-      ).toBe("accepted");
+        submitAudienceVote(
+          storage,
+          PRIMARY_SHOW_ID,
+          voterHash(1),
+          { actIdentifier: "act-1", score: 3, closeRevision: revision },
+          closedAt + 3_500,
+        ),
+      ).toEqual({ ok: false, code: "ALREADY_VOTED" });
+      // An ordinary LOCK IN after CLOSE has no close revision: refused.
+      expect(
+        submitAudienceVote(
+          storage,
+          PRIMARY_SHOW_ID,
+          voterHash(2),
+          { actIdentifier: "act-1", score: 8 },
+          closedAt + 1_000,
+        ),
+      ).toEqual({ ok: false, code: "VOTING_CLOSED" });
+      // A stale or forged revision is refused.
+      expect(
+        submitAudienceVote(
+          storage,
+          PRIMARY_SHOW_ID,
+          voterHash(3),
+          { actIdentifier: "act-1", score: 8, closeRevision: "close-other" },
+          closedAt + 1_000,
+        ),
+      ).toEqual({ ok: false, code: "VOTING_CLOSED" });
+      // Past the grace window the revision no longer helps.
+      expect(
+        submitAudienceVote(
+          storage,
+          PRIMARY_SHOW_ID,
+          voterHash(4),
+          { actIdentifier: "act-1", score: 8, closeRevision: revision },
+          closedAt + VOTE_CLOSE_GRACE_MS + 1,
+        ),
+      ).toEqual({ ok: false, code: "VOTING_CLOSED" });
+      expect(voteCount(storage)).toBe(1);
+    });
+  });
+
+  it("supersedes the grace window when the act changes", async () => {
+    await withShow("prompt1-vote-grace-act", async (storage) => {
+      await seedShowWithAct(storage);
+      command(storage, "OPEN_AUDIENCE_VOTING");
+      command(storage, "CLOSE_AUDIENCE_VOTING");
+      const revision = closeRevision(storage)!;
+      const second = createAct(
+        storage,
+        PRIMARY_SHOW_ID,
+        actInput({ actName: "Act two" }),
+      )!;
+      command(storage, "SELECT_ACT", { actId: second.id });
+      // Selecting another act ends the previous act's close entirely.
+      expect(closeRevision(storage)).toBeNull();
+      expect(
+        submitAudienceVote(
+          storage,
+          PRIMARY_SHOW_ID,
+          voterHash(5),
+          { actIdentifier: "act-1", score: 8, closeRevision: revision },
+          Date.now(),
+        ),
+      ).toEqual({ ok: false, code: "VOTING_CLOSED" });
       expect(voteCount(storage)).toBe(0);
     });
   });
 
-  it("decides a lock/close race on authoritative order, and says VOTING_CLOSED after", async () => {
+  it("decides a lock/close race on authoritative order", async () => {
     await withShow("prompt1-vote-race", async (storage) => {
       await seedShowWithAct(storage);
       command(storage, "OPEN_AUDIENCE_VOTING");
@@ -392,7 +501,7 @@ describe("audience vote consent", () => {
         }),
       ).toMatchObject({ ok: true });
       command(storage, "CLOSE_AUDIENCE_VOTING");
-      // Arrived after the close transaction: refused, and never counted.
+      // Arrived after the close transaction with no close revision: refused.
       expect(
         submitAudienceVote(storage, PRIMARY_SHOW_ID, voterHash(2), {
           actIdentifier: "act-1",
@@ -1047,6 +1156,15 @@ function voteState(storage: DurableObjectStorage): string {
       PRIMARY_SHOW_ID,
     )
     .one().audience_vote_state;
+}
+
+function closeRevision(storage: DurableObjectStorage): string | null {
+  return storage.sql
+    .exec<{ vote_close_revision: string | null }>(
+      "SELECT vote_close_revision FROM show_runtime WHERE show_id = ?",
+      PRIMARY_SHOW_ID,
+    )
+    .one().vote_close_revision;
 }
 
 function voteCount(storage: DurableObjectStorage): number {

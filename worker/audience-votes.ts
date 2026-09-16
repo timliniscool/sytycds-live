@@ -3,6 +3,7 @@ import { isRecord } from "../shared/trust";
 import { isVoteMilestone, recordAuditEvent } from "./audit";
 import {
   actId,
+  VOTE_CLOSE_GRACE_MS,
   type AudienceAggregate,
   type AudienceScore,
   type ShowRevision,
@@ -24,6 +25,8 @@ interface ShowRow extends Record<string, SqlStorageValue> {
   active_act_id: string | null;
   audience_vote_state: string;
   revision: number;
+  vote_close_revision: string | null;
+  vote_closed_at: number | null;
 }
 
 interface AggregateRow extends Record<string, SqlStorageValue> {
@@ -48,6 +51,17 @@ export type VoteFailureCode =
 export type AudienceVoteResult =
   | { ok: true; revision: ShowRevision; aggregate: AudienceAggregate }
   | { ok: false; code: VoteFailureCode };
+
+export interface AudienceVoteRequest {
+  actIdentifier: string;
+  score: AudienceScore;
+  /**
+   * Present when this submission is the phone's automatic response to the
+   * operator closing voting: it names the close it is answering. Absent for
+   * an ordinary LOCK IN.
+   */
+  closeRevision?: string;
+}
 
 export async function resolveVoterIdentity(
   request: Request,
@@ -80,9 +94,7 @@ export async function existingVoterIdentityHash(
 
 export function parseAudienceVoteRequest(
   value: unknown,
-):
-  | { ok: true; actIdentifier: string; score: AudienceScore }
-  | { ok: false; code: VoteFailureCode } {
+): ({ ok: true } & AudienceVoteRequest) | { ok: false; code: VoteFailureCode } {
   if (
     !isRecord(value) ||
     typeof value.actId !== "string" ||
@@ -93,7 +105,21 @@ export function parseAudienceVoteRequest(
   if (!isValidAudienceScore(value.score)) {
     return { ok: false, code: "INVALID_SCORE" };
   }
-  return { ok: true, actIdentifier: value.actId, score: value.score };
+  if (
+    value.closeRevision !== undefined &&
+    (typeof value.closeRevision !== "string" ||
+      !IDENTIFIER.test(value.closeRevision))
+  ) {
+    return { ok: false, code: "BAD_REQUEST" };
+  }
+  return {
+    ok: true,
+    actIdentifier: value.actId,
+    score: value.score,
+    ...(typeof value.closeRevision === "string"
+      ? { closeRevision: value.closeRevision }
+      : {}),
+  };
 }
 
 function isUniqueViolation(error: unknown): boolean {
@@ -102,25 +128,52 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
+/**
+ * Whether a submission that arrived after CLOSE may still count. Only a phone
+ * answering *this* close, for *this* act, inside the grace window qualifies;
+ * an ordinary late LOCK IN never does, and a later act or a re-opened and
+ * re-closed vote supersedes the identifier entirely.
+ */
+export function withinCloseGrace(
+  show: Pick<ShowRow, "vote_close_revision" | "vote_closed_at">,
+  request: AudienceVoteRequest,
+  now: number,
+): boolean {
+  return (
+    request.closeRevision !== undefined &&
+    show.vote_close_revision !== null &&
+    show.vote_closed_at !== null &&
+    request.closeRevision === show.vote_close_revision &&
+    now - show.vote_closed_at >= 0 &&
+    now - show.vote_closed_at <= VOTE_CLOSE_GRACE_MS
+  );
+}
+
 /** The complete hot path: no historical vote scan and one durable transaction. */
 export function submitAudienceVote(
   storage: DurableObjectStorage,
   showIdentifier: string,
   voterHash: ArrayBuffer,
-  request: { actIdentifier: string; score: AudienceScore },
+  request: AudienceVoteRequest,
+  now: number = Date.now(),
 ): AudienceVoteResult {
   return storage.transactionSync(() => {
     const show = storage.sql
       .exec<ShowRow>(
-        `SELECT active_act_id, audience_vote_state, revision
-         FROM shows WHERE id = ?`,
+        `SELECT s.active_act_id, s.audience_vote_state, s.revision,
+                r.vote_close_revision, r.vote_closed_at
+         FROM shows s LEFT JOIN show_runtime r ON r.show_id = s.id
+         WHERE s.id = ?`,
         showIdentifier,
       )
       .toArray()[0];
     if (!show) {
       return { ok: false, code: "BAD_REQUEST" };
     }
-    if (show.audience_vote_state !== "OPEN") {
+    if (
+      show.audience_vote_state !== "OPEN" &&
+      !withinCloseGrace(show, request, now)
+    ) {
       return { ok: false, code: "VOTING_CLOSED" };
     }
     if (!show.active_act_id || show.active_act_id !== request.actIdentifier) {
@@ -138,7 +191,7 @@ export function submitAudienceVote(
         request.score,
         weight,
         request.score * weight,
-        new Date().toISOString(),
+        new Date(now).toISOString(),
       );
     } catch (error: unknown) {
       if (isUniqueViolation(error)) {
@@ -146,7 +199,7 @@ export function submitAudienceVote(
       }
       throw error;
     }
-    const timestamp = new Date().toISOString();
+    const timestamp = new Date(now).toISOString();
     // The upsert hands back the updated aggregate, so the hot path is one
     // insert, one upsert and one revision bump with no read-back.
     const aggregate = storage.sql

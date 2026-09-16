@@ -6,8 +6,11 @@ import type {
   AdminAct,
   CueOperation,
   MediaAsset,
+  MediaAssetReference,
+  PerformanceVisualMode,
   PersistedCue,
 } from "../../shared/domain";
+import { CURATED_THEMES, type ThemeId } from "../../shared/themes";
 
 interface ActDraft {
   performerName: string;
@@ -16,14 +19,16 @@ interface ActDraft {
   actType: string;
   publicDescription: string;
   internalNotes: string;
-  publicImageAssetId: string;
+  actImageAssetId: string;
   showDescriptionToAudience: boolean;
   showImageToAudience: boolean;
-  performanceMode: ActPresentation["performanceMode"];
+  performanceVisualMode: PerformanceVisualMode;
   performanceAssetId: string;
   performanceFit: ActPresentation["performanceFit"];
   backingAudioAssetId: string;
   backingAudioStart: ActPresentation["backingAudioStart"];
+  themeId: ThemeId | "";
+  fontFamily: string;
 }
 
 const EMPTY_ACT: ActDraft = {
@@ -33,14 +38,16 @@ const EMPTY_ACT: ActDraft = {
   actType: "",
   publicDescription: "",
   internalNotes: "",
-  publicImageAssetId: "",
+  actImageAssetId: "",
   showDescriptionToAudience: false,
   showImageToAudience: false,
-  performanceMode: "DEFAULT",
+  performanceVisualMode: "AUTOMATIC",
   performanceAssetId: "",
   performanceFit: "contain",
   backingAudioAssetId: "",
   backingAudioStart: "MANUAL",
+  themeId: "",
+  fontFamily: "",
 };
 
 type VisualChoice =
@@ -72,6 +79,10 @@ const EMPTY_CUE: CueDraft = {
   seekSeconds: "0",
 };
 
+/** Every media type the library accepts, in one place. */
+const LIBRARY_ACCEPT =
+  "image/jpeg,image/png,image/webp,audio/mpeg,audio/mp4,audio/ogg,audio/wav,video/mp4,video/webm";
+
 function actDraft(act: AdminAct | null): ActDraft {
   return act
     ? {
@@ -81,14 +92,17 @@ function actDraft(act: AdminAct | null): ActDraft {
         actType: act.actType,
         publicDescription: act.publicDescription,
         internalNotes: act.internalNotes,
-        publicImageAssetId: act.publicImageAssetId ?? "",
+        actImageAssetId:
+          act.presentation.actImageAssetId ?? act.publicImageAssetId ?? "",
         showDescriptionToAudience: act.showDescriptionToAudience,
         showImageToAudience: act.showImageToAudience,
-        performanceMode: act.presentation.performanceMode,
+        performanceVisualMode: act.presentation.performanceVisualMode,
         performanceAssetId: act.presentation.performanceAssetId ?? "",
         performanceFit: act.presentation.performanceFit,
         backingAudioAssetId: act.presentation.backingAudioAssetId ?? "",
         backingAudioStart: act.presentation.backingAudioStart,
+        themeId: act.appearance.themeId ?? "",
+        fontFamily: act.appearance.fontFamily ?? "",
       }
     : { ...EMPTY_ACT };
 }
@@ -102,8 +116,22 @@ function describeAsset(asset: MediaAsset): string {
           Math.round((asset.durationMs % 60_000) / 1000),
         ).padStart(2, "0")}`;
   const dimensions =
-    asset.width && asset.height ? `${asset.width}x${asset.height}` : null;
-  return [duration, dimensions, size].filter(Boolean).join(" · ");
+    asset.width && asset.height ? `${asset.width}×${asset.height}` : null;
+  return [asset.kind, duration, dimensions, size].filter(Boolean).join(" · ");
+}
+
+/** A reference in the words the operator used to create it. */
+function referenceLabel(reference: MediaAssetReference): string {
+  switch (reference.kind) {
+    case "act_image":
+      return "ACT IMAGE";
+    case "backing_audio":
+      return "BACKING AUDIO";
+    case "performance_visual":
+      return "PERFORMANCE VISUAL";
+    case "cue":
+      return "CUE";
+  }
 }
 
 function cueDraft(cue: PersistedCue | null): CueDraft {
@@ -208,9 +236,11 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
   const [creating, setCreating] = useState(acts.length === 0);
   const [draft, setDraft] = useState<ActDraft>(() => actDraft(selected));
   const [assets, setAssets] = useState<MediaAsset[]>([]);
+  const [cachedFonts, setCachedFonts] = useState<string[]>([]);
   const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
   const [imageSequence, setImageSequence] = useState<Set<string>>(new Set());
   const [uploading, setUploading] = useState<Record<string, number>>({});
+  const [dragging, setDragging] = useState(false);
   const [cueId, setCueId] = useState<string | null>(null);
   const currentCue = selected?.cues.find((cue) => cue.id === cueId) ?? null;
   const [cue, setCue] = useState<CueDraft>(() => cueDraft(currentCue));
@@ -230,44 +260,86 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     setDraft(actDraft(creating ? null : selected));
     setCueId(null);
     setCue({ ...EMPTY_CUE });
+    setSelectedAssetId(null);
+    setImageSequence(new Set());
   }, [selectedId, creating]);
 
   useEffect(() => {
     setCue(cueDraft(currentCue));
   }, [currentCue]);
 
-  async function refreshAssets(): Promise<void> {
-    const response = await fetch("/api/admin/media", {
+  /**
+   * The library is the act's own: what it owns plus what it references. The
+   * server decides membership from ownership and references, never from a
+   * filename, and the list is re-read whenever the act's references change.
+   */
+  const libraryActId = creating ? null : (selected?.id ?? null);
+  const referenceKey = selected
+    ? [
+        selected.presentation.actImageAssetId,
+        selected.presentation.performanceAssetId,
+        selected.presentation.backingAudioAssetId,
+        ...selected.cues.map((entry) => entry.id),
+      ].join("|")
+    : "";
+  useEffect(() => {
+    let cancelled = false;
+    if (!libraryActId) {
+      setAssets([]);
+      return;
+    }
+    void fetch(`/api/admin/media?actId=${encodeURIComponent(libraryActId)}`, {
       credentials: "same-origin",
-    });
+    })
+      .then(async (response) =>
+        response.ok
+          ? ((await response.json()) as { assets: MediaAsset[] }).assets
+          : [],
+      )
+      .then((list) => {
+        if (!cancelled) setAssets(list);
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [libraryActId, referenceKey]);
+
+  async function refreshAssets(): Promise<void> {
+    if (!libraryActId) return;
+    const response = await fetch(
+      `/api/admin/media?actId=${encodeURIComponent(libraryActId)}`,
+      { credentials: "same-origin" },
+    );
     if (response.ok) {
       const result = (await response.json()) as { assets: MediaAsset[] };
       setAssets(result.assets);
     }
   }
+
   useEffect(() => {
-    void refreshAssets();
+    void fetch("/api/admin/fonts/cached", { credentials: "same-origin" })
+      .then(async (response) =>
+        response.ok
+          ? ((await response.json()) as { families: string[] }).families
+          : [],
+      )
+      .then(setCachedFonts)
+      .catch(() => undefined);
   }, []);
 
   const images = useMemo(
-    () => assets.filter((asset) => asset.mimeType.startsWith("image/")),
+    () => assets.filter((asset) => asset.kind === "image"),
+    [assets],
+  );
+  const videos = useMemo(
+    () => assets.filter((asset) => asset.kind === "video"),
     [assets],
   );
   const audioAssets = useMemo(
     () =>
       assets.filter(
-        (asset) =>
-          asset.mimeType.startsWith("audio/") ||
-          asset.mimeType.startsWith("video/"),
-      ),
-    [assets],
-  );
-  const visualAssets = useMemo(
-    () =>
-      assets.filter(
-        (asset) =>
-          asset.mimeType.startsWith("image/") ||
-          asset.mimeType.startsWith("video/"),
+        (asset) => asset.kind === "audio" || asset.kind === "video",
       ),
     [assets],
   );
@@ -298,15 +370,23 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
         actType: draft.actType,
         publicDescription: draft.publicDescription,
         internalNotes: draft.internalNotes,
-        publicImageAssetId: draft.publicImageAssetId || null,
+        publicImageAssetId: draft.actImageAssetId || null,
         showDescriptionToAudience: draft.showDescriptionToAudience,
         showImageToAudience: draft.showImageToAudience,
         presentation: {
-          performanceMode: draft.performanceMode,
-          performanceAssetId: draft.performanceAssetId || null,
+          actImageAssetId: draft.actImageAssetId || null,
+          performanceVisualMode: draft.performanceVisualMode,
+          performanceAssetId:
+            draft.performanceVisualMode === "AUTOMATIC"
+              ? null
+              : draft.performanceAssetId || null,
           performanceFit: draft.performanceFit,
           backingAudioAssetId: draft.backingAudioAssetId || null,
           backingAudioStart: draft.backingAudioStart,
+        },
+        appearance: {
+          themeId: draft.themeId || null,
+          fontFamily: draft.fontFamily || null,
         },
       }),
     });
@@ -321,7 +401,11 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     }
     if (creating && result?.act) setSelectedId(result.act.id);
     setCreating(false);
-    setNotice(creating ? "Act added to the running order." : "Act saved.");
+    setNotice(
+      creating
+        ? "Act added to the running order. Its media library is ready below."
+        : "Act saved.",
+    );
   }
 
   /**
@@ -401,13 +485,22 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     );
   }
 
-  /** Resolves with the new asset's ID so a drop zone can select what it uploaded. */
+  /**
+   * One upload path for every kind of media. The file lands in this act's
+   * library, its metadata is read here in the browser and recorded, and the
+   * returned asset ID is what every slot and cue then refers to.
+   */
   function uploadFile(file: File): Promise<string | null> {
     return new Promise<string | null>((resolve) => {
+      if (!libraryActId) {
+        setNotice("Save the act first; its media library is created with it.");
+        resolve(null);
+        return;
+      }
       const xhr = new XMLHttpRequest();
       xhr.open(
         "POST",
-        `/api/admin/media?filename=${encodeURIComponent(file.name)}`,
+        `/api/admin/media?filename=${encodeURIComponent(file.name)}&actId=${encodeURIComponent(libraryActId)}`,
       );
       xhr.withCredentials = true;
       xhr.setRequestHeader("Content-Type", file.type);
@@ -425,7 +518,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
           return next;
         });
         if (xhr.status >= 200 && xhr.status < 300) {
-          setNotice(`${file.name} uploaded.`);
+          setNotice(`${file.name} added to the act's media library.`);
           let assetId: string | null = null;
           try {
             const result = JSON.parse(xhr.responseText) as {
@@ -452,7 +545,14 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
             await refreshAssets();
           })().finally(() => resolve(assetId));
         } else {
-          setNotice(`${file.name} failed (HTTP ${xhr.status}).`);
+          let detail = `HTTP ${xhr.status}`;
+          try {
+            const result = JSON.parse(xhr.responseText) as { error?: string };
+            if (result.error) detail = result.error;
+          } catch {
+            // Keep the status code.
+          }
+          setNotice(`${file.name} failed: ${detail}.`);
           resolve(null);
         }
       };
@@ -470,12 +570,19 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     });
   }
 
+  function uploadFiles(files: readonly File[]): void {
+    void Promise.all(files.map(uploadFile));
+  }
+
   async function deleteAsset(asset: MediaAsset): Promise<void> {
     if (asset.referenced) {
-      setNotice("Remove this asset from acts and cues before deleting it.");
+      setNotice(
+        "This file is in use. Remove it from the slots and cues that use it before deleting it.",
+      );
       return;
     }
-    if (!window.confirm(`Delete ${asset.originalFilename}?`)) return;
+    if (!window.confirm(`Delete ${asset.originalFilename} from storage?`))
+      return;
     const response = await fetch(
       `/api/admin/media/${encodeURIComponent(asset.id)}`,
       {
@@ -649,13 +756,20 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     );
   }
 
+  const performanceChoices =
+    draft.performanceVisualMode === "VIDEO" ? videos : images;
+  const fontChoices = [
+    ...new Set([...cachedFonts, draft.fontFamily].filter(Boolean)),
+  ].sort();
+
   return (
     <div className="act-editor">
       <header className="act-editor__head">
-        <p>ACTS & CUES</p>
+        <p>ACTS & MEDIA</p>
         <h2>Build the running order</h2>
         <span>
-          Public copy, private notes and independently layered media cues.
+          Each act has one media library. Its image, backing audio, performance
+          visual and any advanced cues all point at files in it.
         </span>
         <button
           type="button"
@@ -789,116 +903,290 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                     }
                   />
                 </label>
-                <label className="act-form__wide">
-                  Act image
-                  <select
-                    value={draft.publicImageAssetId}
-                    onChange={(event) =>
-                      updateAct("publicImageAssetId", event.target.value)
-                    }
-                  >
-                    <option value="">None</option>
-                    {images.map((asset) => (
-                      <option key={asset.id} value={asset.id}>
-                        {asset.originalFilename}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <fieldset className="act-form__wide audience-fields">
-                  <legend>On audience phones</legend>
-                  <p>
-                    Phones always receive the act name, the performer and the
-                    year or group. These two are opt-in, and when they are off
-                    the server does not send them at all.
-                  </p>
-                  <label className="switch-row">
-                    <input
-                      type="checkbox"
-                      checked={draft.showDescriptionToAudience}
-                      onChange={(event) =>
-                        updateAct(
-                          "showDescriptionToAudience",
-                          event.target.checked,
-                        )
-                      }
-                    />
-                    <span>Show description on audience phones</span>
-                  </label>
-                  <label className="switch-row">
-                    <input
-                      type="checkbox"
-                      checked={draft.showImageToAudience}
-                      onChange={(event) =>
-                        updateAct("showImageToAudience", event.target.checked)
-                      }
-                    />
-                    <span>Show act image on audience phones</span>
-                  </label>
-                </fieldset>
-                <fieldset className="act-form__wide performance-fields">
-                  <legend>Performance</legend>
-                  <p>
-                    Every act already has a finished performance screen: its
-                    name, performer and year, centred on the projector. Override
-                    it only when this act has its own visual.
-                  </p>
-                  <label className="switch-row">
-                    <input
-                      type="checkbox"
-                      checked={draft.performanceMode === "CUSTOM"}
-                      onChange={(event) =>
-                        updateAct(
-                          "performanceMode",
-                          event.target.checked ? "CUSTOM" : "DEFAULT",
-                        )
-                      }
-                    />
-                    <span>Use custom performance visual</span>
-                  </label>
-                  {draft.performanceMode === "CUSTOM" && (
+
+                {/*
+                  The one library. Every file for this act arrives here, once,
+                  and is then chosen by name in the slots below. There are no
+                  separate uploaders for image, audio or performance media.
+                */}
+                <fieldset className="act-form__wide media-library">
+                  <legend>Act media library</legend>
+                  {creating ? (
+                    <p>
+                      Save the act first. Its media library is created with it,
+                      and every file you add afterwards belongs to this act.
+                    </p>
+                  ) : (
                     <>
-                      <MediaDropZone
-                        label="PERFORMANCE VISUAL"
-                        hint="an image or video"
-                        accept="image/jpeg,image/png,image/webp,video/mp4,video/webm"
-                        assets={visualAssets}
-                        selectedId={draft.performanceAssetId}
-                        busy={busy}
-                        onSelect={(id) => updateAct("performanceAssetId", id)}
-                        onUpload={uploadFile}
-                      />
-                      <label>
-                        Image framing
-                        <select
-                          value={draft.performanceFit}
-                          onChange={(event) =>
-                            updateAct(
-                              "performanceFit",
-                              event.target.value === "cover"
-                                ? "cover"
-                                : "contain",
-                            )
-                          }
-                        >
-                          <option value="contain">
-                            Show the whole image (never cropped or stretched)
-                          </option>
-                          <option value="cover">Crop to fill the screen</option>
-                        </select>
+                      <label
+                        className={`drop-zone__target${dragging ? " is-dragging" : ""}`}
+                        onDragOver={(event) => {
+                          event.preventDefault();
+                          setDragging(true);
+                        }}
+                        onDragLeave={() => setDragging(false)}
+                        onDrop={(event) => {
+                          event.preventDefault();
+                          setDragging(false);
+                          uploadFiles([...event.dataTransfer.files]);
+                        }}
+                      >
+                        <span>
+                          {dragging
+                            ? "Release to add to this act's library"
+                            : "Drop images, audio or video here, or click to choose files"}
+                        </span>
+                        <input
+                          type="file"
+                          multiple
+                          accept={LIBRARY_ACCEPT}
+                          disabled={busy}
+                          onChange={(event) => {
+                            uploadFiles([...(event.target.files ?? [])]);
+                            event.target.value = "";
+                          }}
+                        />
                       </label>
+                      {Object.entries(uploading).map(([name, percent]) => (
+                        <p className="upload-progress" key={name}>
+                          <span>{name}</span>
+                          <progress value={percent} max={100} /> {percent}%
+                        </p>
+                      ))}
+                      {assets.length === 0 && (
+                        <p className="media-library__empty">
+                          No media yet. Without any, the act still has a
+                          finished performance screen drawn from its name.
+                        </p>
+                      )}
+                      <ul className="media-list">
+                        {assets.map((asset) => {
+                          const mine = asset.references.filter(
+                            (reference) => reference.actId === selected?.id,
+                          );
+                          const shared =
+                            asset.actId !== null &&
+                            asset.actId !== selected?.id;
+                          return (
+                            <li
+                              key={asset.id}
+                              className={`media-list__item media-list__item--${asset.kind}${selectedAssetId === asset.id ? " is-active" : ""}`}
+                            >
+                              <button
+                                type="button"
+                                className="media-list__main"
+                                onClick={() =>
+                                  setSelectedAssetId((current) =>
+                                    current === asset.id ? null : asset.id,
+                                  )
+                                }
+                              >
+                                <em className="media-list__kind">
+                                  {asset.kind.toUpperCase()}
+                                </em>
+                                <b>{asset.originalFilename}</b>
+                                <small>{describeAsset(asset)}</small>
+                              </button>
+                              <span className="media-list__flags">
+                                <em
+                                  className={`media-list__state${asset.readiness === "READY" ? " media-list__state--ready" : ""}`}
+                                >
+                                  {asset.readiness}
+                                </em>
+                                {asset.generatedTest && (
+                                  <em className="media-list__state">TEST</em>
+                                )}
+                                {shared && (
+                                  <em className="media-list__state">SHARED</em>
+                                )}
+                                {asset.actId === null && (
+                                  <em className="media-list__state">
+                                    SHOW FILE
+                                  </em>
+                                )}
+                                {mine.map((reference, index) => (
+                                  <em
+                                    key={`${reference.kind}-${index}`}
+                                    className="media-list__use"
+                                  >
+                                    {referenceLabel(reference)}
+                                  </em>
+                                ))}
+                                {asset.references.length > mine.length && (
+                                  <em className="media-list__use">
+                                    USED BY ANOTHER ACT
+                                  </em>
+                                )}
+                              </span>
+                              <span className="media-list__actions">
+                                {asset.kind === "image" && (
+                                  <label className="media-list__sequence">
+                                    <input
+                                      type="checkbox"
+                                      checked={imageSequence.has(asset.id)}
+                                      onChange={(event) =>
+                                        setImageSequence((current) => {
+                                          const next = new Set(current);
+                                          if (event.target.checked)
+                                            next.add(asset.id);
+                                          else next.delete(asset.id);
+                                          return next;
+                                        })
+                                      }
+                                    />
+                                    sequence
+                                  </label>
+                                )}
+                                <button
+                                  type="button"
+                                  disabled={asset.referenced}
+                                  title={
+                                    asset.referenced
+                                      ? "In use; remove it from the slots and cues first"
+                                      : "Delete from storage"
+                                  }
+                                  onClick={() => void deleteAsset(asset)}
+                                >
+                                  DELETE
+                                </button>
+                              </span>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                      {preview && (
+                        <div className="media-preview">
+                          <strong>PREVIEW · {preview.originalFilename}</strong>
+                          {preview.kind === "image" ? (
+                            <img src={assetUrl(preview)} alt="" />
+                          ) : preview.kind === "video" ? (
+                            <video src={assetUrl(preview)} controls />
+                          ) : (
+                            <audio src={assetUrl(preview)} controls />
+                          )}
+                        </div>
+                      )}
                     </>
                   )}
-                  <MediaDropZone
-                    label="BACKING AUDIO"
-                    hint="an MP3, WAV or other audio file"
-                    accept="audio/mpeg,audio/mp4,audio/ogg,audio/wav,video/mp4,video/webm"
-                    assets={audioAssets}
-                    selectedId={draft.backingAudioAssetId}
-                    busy={busy}
-                    onSelect={(id) => updateAct("backingAudioAssetId", id)}
-                    onUpload={uploadFile}
-                  />
+                </fieldset>
+
+                <fieldset className="act-form__wide performance-fields">
+                  <legend>Presentation</legend>
+                  <p>
+                    Every act already has a finished performance screen: its
+                    name, performer and year, centred on the projector. These
+                    slots point at files in the library above; the media cue for
+                    the performance is built from them automatically.
+                  </p>
+                  <label>
+                    Act image
+                    <select
+                      value={draft.actImageAssetId}
+                      disabled={creating}
+                      onChange={(event) =>
+                        updateAct("actImageAssetId", event.target.value)
+                      }
+                    >
+                      <option value="">None</option>
+                      {images.map((asset) => (
+                        <option key={asset.id} value={asset.id}>
+                          {asset.originalFilename}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Performance visual
+                    <select
+                      value={draft.performanceVisualMode}
+                      disabled={creating}
+                      onChange={(event) => {
+                        const mode = event.target
+                          .value as PerformanceVisualMode;
+                        setDraft((current) => ({
+                          ...current,
+                          performanceVisualMode: mode,
+                          performanceAssetId:
+                            mode === "AUTOMATIC"
+                              ? ""
+                              : current.performanceAssetId,
+                        }));
+                      }}
+                    >
+                      <option value="AUTOMATIC">
+                        Automatic — drawn from the act
+                      </option>
+                      <option value="IMAGE" disabled={images.length === 0}>
+                        An image from the library
+                      </option>
+                      <option value="VIDEO" disabled={videos.length === 0}>
+                        A video from the library
+                      </option>
+                    </select>
+                  </label>
+                  {draft.performanceVisualMode !== "AUTOMATIC" && (
+                    <>
+                      <label>
+                        {draft.performanceVisualMode === "VIDEO"
+                          ? "Performance video"
+                          : "Performance image"}
+                        <select
+                          required
+                          value={draft.performanceAssetId}
+                          onChange={(event) =>
+                            updateAct("performanceAssetId", event.target.value)
+                          }
+                        >
+                          <option value="">Choose from the library</option>
+                          {performanceChoices.map((asset) => (
+                            <option key={asset.id} value={asset.id}>
+                              {asset.originalFilename}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      {draft.performanceVisualMode === "IMAGE" && (
+                        <label>
+                          Image framing
+                          <select
+                            value={draft.performanceFit}
+                            onChange={(event) =>
+                              updateAct(
+                                "performanceFit",
+                                event.target.value === "cover"
+                                  ? "cover"
+                                  : "contain",
+                              )
+                            }
+                          >
+                            <option value="contain">
+                              Show the whole image (never cropped or stretched)
+                            </option>
+                            <option value="cover">
+                              Crop to fill the screen
+                            </option>
+                          </select>
+                        </label>
+                      )}
+                    </>
+                  )}
+                  <label>
+                    Backing audio
+                    <select
+                      value={draft.backingAudioAssetId}
+                      disabled={creating}
+                      onChange={(event) =>
+                        updateAct("backingAudioAssetId", event.target.value)
+                      }
+                    >
+                      <option value="">None</option>
+                      {audioAssets.map((asset) => (
+                        <option key={asset.id} value={asset.id}>
+                          {asset.originalFilename}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   {draft.backingAudioAssetId && (
                     <label>
                       Start backing audio
@@ -913,16 +1201,103 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                           )
                         }
                       >
-                        <option value="MANUAL">
-                          Manually, when the operator presses GO
-                        </option>
                         <option value="PERFORMANCE">
                           Automatically, when PERFORMANCE begins
+                        </option>
+                        <option value="MANUAL">
+                          Manually, when the operator presses GO on the cue
                         </option>
                       </select>
                     </label>
                   )}
                 </fieldset>
+
+                <details className="act-form__wide advanced-settings">
+                  <summary>
+                    Advanced settings
+                    <small>
+                      Appearance override, audience visibility. Rarely needed.
+                    </small>
+                  </summary>
+                  <fieldset className="appearance-fields">
+                    <legend>Appearance</legend>
+                    <p>
+                      The hall and the phones draw this act in these while it is
+                      current. Curated themes and cached typefaces only, so
+                      nothing can become unreadable.
+                    </p>
+                    <label>
+                      Theme
+                      <select
+                        value={draft.themeId}
+                        onChange={(event) =>
+                          updateAct(
+                            "themeId",
+                            event.target.value as ThemeId | "",
+                          )
+                        }
+                      >
+                        <option value="">Inherit the show theme</option>
+                        {CURATED_THEMES.map((theme) => (
+                          <option key={theme.id} value={theme.id}>
+                            {theme.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label>
+                      Typeface
+                      <select
+                        value={draft.fontFamily}
+                        onChange={(event) =>
+                          updateAct("fontFamily", event.target.value)
+                        }
+                      >
+                        <option value="">Inherit the show typeface</option>
+                        <option value="system-ui">System UI</option>
+                        {fontChoices
+                          .filter((family) => family !== "system-ui")
+                          .map((family) => (
+                            <option key={family} value={family}>
+                              {family}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                  </fieldset>
+                  <fieldset className="audience-fields">
+                    <legend>On audience phones</legend>
+                    <p>
+                      Phones always receive the act name, the performer and the
+                      year or group. These two are opt-in, and when they are off
+                      the server does not send them at all.
+                    </p>
+                    <label className="switch-row">
+                      <input
+                        type="checkbox"
+                        checked={draft.showDescriptionToAudience}
+                        onChange={(event) =>
+                          updateAct(
+                            "showDescriptionToAudience",
+                            event.target.checked,
+                          )
+                        }
+                      />
+                      <span>Show description on audience phones</span>
+                    </label>
+                    <label className="switch-row">
+                      <input
+                        type="checkbox"
+                        checked={draft.showImageToAudience}
+                        onChange={(event) =>
+                          updateAct("showImageToAudience", event.target.checked)
+                        }
+                      />
+                      <span>Show act image on audience phones</span>
+                    </label>
+                  </fieldset>
+                </details>
+
                 <div className="editor-actions act-form__wide">
                   <button type="submit" disabled={busy}>
                     {creating ? "ADD TO RUNNING ORDER" : "SAVE ACT"}
@@ -942,131 +1317,44 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
             </section>
 
             {!creating && selected && (
-              // Everything an ordinary act needs is above. The media library
-              // and the cue engine are still here in full, one disclosure away,
-              // for the acts that genuinely need hand-built sequences.
+              // The cue engine, in full, for acts that need hand-built
+              // sequences. Every cue picks its media from the library above;
+              // there is no second upload path here.
               <details className="advanced-cues">
                 <summary>
-                  Advanced cues and media library
+                  Advanced cues
                   <small>
                     {selected.cues.length} cue
                     {selected.cues.length === 1 ? "" : "s"} · the derived
-                    PERFORMANCE cue is managed for you
+                    PERFORMANCE cue is managed for you · media comes from the
+                    act's library
                   </small>
                 </summary>
-                <section className="editor-section media-library">
-                  <div className="editor-section__title">
-                    <h3>Media library</h3>
-                    <label className="upload-control">
-                      UPLOAD FILES
-                      <input
-                        type="file"
-                        multiple
-                        accept="image/jpeg,image/png,image/webp,audio/mpeg,audio/mp4,audio/ogg,audio/wav,video/mp4,video/webm"
-                        onChange={(event) => {
-                          const files = [...(event.target.files ?? [])];
-                          void Promise.all(files.map(uploadFile));
-                          event.target.value = "";
-                        }}
-                      />
-                    </label>
-                  </div>
-                  {Object.entries(uploading).map(([name, percent]) => (
-                    <p className="upload-progress" key={name}>
-                      <span>{name}</span>
-                      <progress value={percent} max={100} /> {percent}%
-                    </p>
-                  ))}
-                  <div className="media-grid">
-                    {assets.map((asset) => (
-                      <article
-                        key={asset.id}
-                        className={
-                          selectedAssetId === asset.id ? "is-active" : ""
-                        }
-                      >
-                        <button
-                          type="button"
-                          onClick={() => setSelectedAssetId(asset.id)}
-                        >
-                          <b>{asset.originalFilename}</b>
-                          <small>
-                            {asset.mimeType.replace(
-                              /^(image|audio|video)\//u,
-                              "",
-                            )}{" "}
-                            · {(asset.sizeBytes / 1_048_576).toFixed(1)} MB
-                            {asset.width && asset.height
-                              ? ` · ${asset.width}×${asset.height}`
-                              : ""}
-                            {asset.durationMs
-                              ? ` · ${(asset.durationMs / 1000).toFixed(1)}s`
-                              : ""}
-                          </small>
-                          <span>{asset.referenced ? "IN USE" : "UNUSED"}</span>
-                        </button>
-                        <button
-                          type="button"
-                          disabled={asset.referenced}
-                          onClick={() => void deleteAsset(asset)}
-                        >
-                          DELETE
-                        </button>
-                        {asset.mimeType.startsWith("image/") && (
-                          <label>
-                            <input
-                              type="checkbox"
-                              checked={imageSequence.has(asset.id)}
-                              onChange={(event) =>
-                                setImageSequence((current) => {
-                                  const next = new Set(current);
-                                  if (event.target.checked) next.add(asset.id);
-                                  else next.delete(asset.id);
-                                  return next;
-                                })
-                              }
-                            />{" "}
-                            sequence
-                          </label>
-                        )}
-                      </article>
-                    ))}
-                  </div>
-                  {preview && (
-                    <div className="media-preview">
-                      <strong>PREVIEW · {preview.originalFilename}</strong>
-                      {preview.mimeType.startsWith("image/") ? (
-                        <img src={assetUrl(preview)} alt="" />
-                      ) : preview.mimeType.startsWith("video/") ? (
-                        <video src={assetUrl(preview)} controls />
-                      ) : (
-                        <audio src={assetUrl(preview)} controls />
-                      )}
-                    </div>
-                  )}
-                  {imageSequence.size > 0 && (
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void addImageSequence()}
-                    >
-                      ADD {imageSequence.size} IMAGES AS SEQUENTIAL CUES
-                    </button>
-                  )}
-                </section>
-
                 <section className="editor-section cue-editor">
                   <div className="editor-section__title">
                     <h3>Cue stack</h3>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setCueId(null);
-                        setCue({ ...EMPTY_CUE });
-                      }}
-                    >
-                      + NEW CUE
-                    </button>
+                    <div>
+                      {imageSequence.size > 0 && (
+                        <button
+                          type="button"
+                          disabled={busy}
+                          onClick={() => void addImageSequence()}
+                        >
+                          ADD {imageSequence.size} IMAGE
+                          {imageSequence.size === 1 ? "" : "S"} AS SEQUENTIAL
+                          CUES
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCueId(null);
+                          setCue({ ...EMPTY_CUE });
+                        }}
+                      >
+                        + NEW CUE
+                      </button>
+                    </div>
                   </div>
                   <ol className="cue-list">
                     {selected.cues.map((item) => (
@@ -1170,7 +1458,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                     )}
                     {["IMAGE", "SLIDES", "VIDEO"].includes(cue.visualKind) && (
                       <label>
-                        Visual media
+                        Visual media (from the library)
                         <select
                           required
                           value={cue.visualAssetId}
@@ -1182,17 +1470,13 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                           }
                         >
                           <option value="">Choose media</option>
-                          {visualAssets
-                            .filter((asset) =>
-                              cue.visualKind === "VIDEO"
-                                ? asset.mimeType.startsWith("video/")
-                                : asset.mimeType.startsWith("image/"),
-                            )
-                            .map((asset) => (
+                          {(cue.visualKind === "VIDEO" ? videos : images).map(
+                            (asset) => (
                               <option key={asset.id} value={asset.id}>
                                 {asset.originalFilename}
                               </option>
-                            ))}
+                            ),
+                          )}
                         </select>
                       </label>
                     )}
@@ -1241,7 +1525,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                     {(cue.audioAction === "LOAD" ||
                       cue.audioAction === "PLAY") && (
                       <label>
-                        Audio media
+                        Audio media (from the library)
                         <select
                           required={cue.audioAction === "LOAD"}
                           value={cue.audioAssetId}
@@ -1299,7 +1583,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                     </button>
                     {currentCue?.origin === "SIMPLE" && (
                       <p className="cue-form__derived">
-                        This cue is derived from the act's Performance settings
+                        This cue is derived from the act's Presentation settings
                         above. Change it there and it is rebuilt.
                       </p>
                     )}
@@ -1436,120 +1720,4 @@ interface ActDeletionPreview {
   }[];
   sharedAssets: readonly { id: string; filename: string }[];
   blockers: readonly string[];
-}
-
-/**
- * The upload affordance an ordinary operator expects: drop a file on it, or
- * click to choose one. Nothing here knows about cues; it only produces an
- * asset ID for the act field it belongs to.
- */
-function MediaDropZone({
-  label,
-  hint,
-  accept,
-  assets,
-  selectedId,
-  busy,
-  onSelect,
-  onUpload,
-}: {
-  label: string;
-  hint: string;
-  accept: string;
-  assets: readonly MediaAsset[];
-  selectedId: string;
-  busy: boolean;
-  onSelect: (assetId: string) => void;
-  onUpload: (file: File) => Promise<string | null>;
-}) {
-  const [dragging, setDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const selected = assets.find((asset) => asset.id === selectedId) ?? null;
-
-  async function accept_(file: File | undefined): Promise<void> {
-    if (!file) return;
-    setUploading(true);
-    const id = await onUpload(file);
-    setUploading(false);
-    if (id) onSelect(id);
-  }
-
-  return (
-    <div className="drop-zone">
-      <p className="drop-zone__label">{label}</p>
-      <label
-        className={`drop-zone__target${dragging ? " is-dragging" : ""}`}
-        onDragOver={(event) => {
-          event.preventDefault();
-          setDragging(true);
-        }}
-        onDragLeave={() => setDragging(false)}
-        onDrop={(event) => {
-          event.preventDefault();
-          setDragging(false);
-          void accept_(event.dataTransfer.files[0]);
-        }}
-      >
-        <span>
-          {uploading
-            ? "Uploading…"
-            : dragging
-              ? "Release to upload"
-              : `Drop ${hint} here, or click to choose a file`}
-        </span>
-        <input
-          type="file"
-          accept={accept}
-          disabled={busy || uploading}
-          onChange={(event) => {
-            void accept_(event.target.files?.[0]);
-            event.target.value = "";
-          }}
-        />
-      </label>
-      {assets.length > 0 && (
-        <label className="drop-zone__pick">
-          or reuse an uploaded file
-          <select
-            value={selectedId}
-            onChange={(event) => onSelect(event.target.value)}
-          >
-            <option value="">None</option>
-            {assets.map((asset) => (
-              <option key={asset.id} value={asset.id}>
-                {asset.originalFilename}
-              </option>
-            ))}
-          </select>
-        </label>
-      )}
-      {selected && (
-        <div className="drop-zone__selected">
-          <b>{selected.originalFilename}</b>
-          <small>{describeAsset(selected)}</small>
-          <span
-            className={
-              selected.durationMs === null && !selected.width
-                ? "drop-zone__state"
-                : "drop-zone__state drop-zone__state--ready"
-            }
-          >
-            {selected.durationMs === null && !selected.width
-              ? "UPLOADED — metadata not read"
-              : "READY"}
-          </span>
-          {selected.mimeType.startsWith("audio/") ? (
-            <audio src={assetUrl(selected)} controls preload="metadata" />
-          ) : selected.mimeType.startsWith("video/") ? (
-            <video src={assetUrl(selected)} controls preload="metadata" />
-          ) : (
-            <img src={assetUrl(selected)} alt="" />
-          )}
-          <button type="button" onClick={() => onSelect("")}>
-            REMOVE
-          </button>
-        </div>
-      )}
-    </div>
-  );
 }

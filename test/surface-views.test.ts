@@ -21,6 +21,7 @@ const act: PublicAct = {
   actType: "Variety",
   publicDescription: "",
   withdrawn: false,
+  appearance: { themeId: null, fontFamily: null },
 };
 
 function audience(
@@ -46,6 +47,7 @@ function audience(
     activeAct,
     revealedResult: null,
     publicResults: null,
+    voteCloseRevision: null,
   };
 }
 

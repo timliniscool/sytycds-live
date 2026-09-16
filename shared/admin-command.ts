@@ -15,6 +15,7 @@ import {
   type ProtocolVersion,
   type ResultsStage,
   type ShowRevision,
+  type ShowStep,
 } from "./domain";
 import { isRecord } from "./trust";
 
@@ -52,7 +53,11 @@ export type AdminCommandType =
   | "REVEAL_NEXT_RESULT"
   | "RESET_RESULTS_REVEAL"
   | "WITHDRAW_ACT"
-  | "REINSTATE_ACT";
+  | "REINSTATE_ACT"
+  /** GO: perform the next high-level step of the show flow. */
+  | "ADVANCE_SHOW"
+  /** Jump straight to one high-level step for the current act. */
+  | "SET_SHOW_STEP";
 
 interface AdminCommandBase {
   protocolVersion: ProtocolVersion;
@@ -97,7 +102,9 @@ export type AdminCommand =
   | (AdminCommandBase & { type: "REVEAL_NEXT_RESULT" })
   | (AdminCommandBase & { type: "RESET_RESULTS_REVEAL" })
   | (AdminCommandBase & { type: "WITHDRAW_ACT"; actId: ActId })
-  | (AdminCommandBase & { type: "REINSTATE_ACT"; actId: ActId });
+  | (AdminCommandBase & { type: "REINSTATE_ACT"; actId: ActId })
+  | (AdminCommandBase & { type: "ADVANCE_SHOW" })
+  | (AdminCommandBase & { type: "SET_SHOW_STEP"; step: ShowStep });
 
 export type CommandStatus =
   "accepted" | "rejected" | "stale" | "invalid" | "unauthorised" | "conflict";
@@ -159,6 +166,15 @@ const COMMAND_TYPES: ReadonlySet<AdminCommandType> = new Set([
   "RESET_RESULTS_REVEAL",
   "WITHDRAW_ACT",
   "REINSTATE_ACT",
+  "ADVANCE_SHOW",
+  "SET_SHOW_STEP",
+]);
+
+const SHOW_STEPS_SET: ReadonlySet<ShowStep> = new Set([
+  "ACT_CARD",
+  "PERFORMANCE",
+  "SCORING",
+  "SCOREBOARD",
 ]);
 
 const RESULTS_STAGES: ReadonlySet<ResultsStage> = new Set([
@@ -333,6 +349,22 @@ export function parseAdminCommand(value: unknown): AdminCommandParseResult {
             reason: "Invalid results stage",
             commandId: base.base.commandId,
           };
+    case "SET_SHOW_STEP":
+      return typeof base.value.step === "string" &&
+        SHOW_STEPS_SET.has(base.value.step as ShowStep)
+        ? {
+            ok: true,
+            command: {
+              ...base.base,
+              type: "SET_SHOW_STEP",
+              step: base.value.step as ShowStep,
+            },
+          }
+        : {
+            ok: false,
+            reason: "Invalid show step",
+            commandId: base.base.commandId,
+          };
     case "SET_DISPLAY_MODE":
       return typeof base.value.mode === "string" &&
         DISPLAY_MODES.has(base.value.mode as DisplayMode)
@@ -425,6 +457,7 @@ export function parseAdminCommand(value: unknown): AdminCommandParseResult {
     case "BLACK_SCREEN":
     case "REVEAL_NEXT_RESULT":
     case "RESET_RESULTS_REVEAL":
+    case "ADVANCE_SHOW":
       return {
         ok: true,
         command: { ...base.base, type: base.base.type },

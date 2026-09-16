@@ -130,8 +130,37 @@ export type CueOperation =
     }
   | { kind: "delay"; durationMs: number };
 
+/** The typed family of an uploaded asset; derived from its MIME type once. */
+export type MediaKind = "image" | "audio" | "video" | "other";
+
+/**
+ * Whether the asset can be presented with confidence. `READY` means the file
+ * is stored and its dimensions or duration have been read; `UPLOADED` means the
+ * bytes are stored but nothing has inspected them yet. Neither implies the
+ * projector can decode it — preflight proves that.
+ */
+export type MediaReadiness = "READY" | "UPLOADED";
+
+/** Which act slot or cue names an asset. */
+export type MediaReferenceKind =
+  "act_image" | "backing_audio" | "performance_visual" | "cue";
+
+export interface MediaAssetReference {
+  kind: MediaReferenceKind;
+  actId: ActId;
+  /** Present for cue references only. */
+  cueId?: CueId;
+}
+
+/**
+ * One entry in an act's media library. Bytes live in R2 under `objectKey`; this
+ * is the single authoritative description of them. Every slot that can present
+ * media — act image, backing audio, performance visual, advanced cues — refers
+ * to an asset by `id`, never by uploading a second copy.
+ */
 export interface MediaAsset {
   id: string;
+  kind: MediaKind;
   objectKey: string;
   originalFilename: string;
   mimeType: string;
@@ -141,6 +170,17 @@ export interface MediaAsset {
   durationMs: number | null;
   width: number | null;
   height: number | null;
+  readiness: MediaReadiness;
+  /**
+   * The act whose library owns this upload, or null for a show-level asset
+   * (uploaded before ownership existed, or shared deliberately). Ownership
+   * decides which library the file appears in; references decide whether it
+   * may be deleted.
+   */
+  actId: ActId | null;
+  /** Fixtures created by the test-show generator; removed by a show reset. */
+  generatedTest: boolean;
+  references: readonly MediaAssetReference[];
   referenced: boolean;
 }
 
@@ -159,7 +199,26 @@ export interface PublicAct {
   publicImageAssetId?: string | null;
   /** A withdrawn act keeps its history but leaves the running order and rankings. */
   withdrawn: boolean;
+  /**
+   * Optional per-act appearance override. Public, because the hall and the
+   * phones draw the act in it; a null field inherits the show's setting.
+   */
+  appearance: ActAppearance;
 }
+
+/**
+ * Advanced per-act appearance. Only curated themes and cached typefaces are
+ * allowed, so an override can never produce an unreadable pairing.
+ */
+export interface ActAppearance {
+  themeId: ThemeId | null;
+  fontFamily: string | null;
+}
+
+export const INHERITED_APPEARANCE: ActAppearance = {
+  themeId: null,
+  fontFamily: null,
+};
 
 /** Whether the act's optional copy and artwork reach audience phones at all. */
 export interface ActAudienceVisibility {
@@ -169,6 +228,12 @@ export interface ActAudienceVisibility {
 
 /** The automatic performance screen, or a custom visual that replaces it. */
 export type PerformanceMode = "DEFAULT" | "CUSTOM";
+/**
+ * What the hall sees during the performance, in the operator's own terms: the
+ * automatic screen drawn from the act, or a chosen image or video from the
+ * act's media library.
+ */
+export type PerformanceVisualMode = "AUTOMATIC" | "IMAGE" | "VIDEO";
 /** Backing audio starts on the operator's GO, or with the performance itself. */
 export type BackingAudioStart = "MANUAL" | "PERFORMANCE";
 
@@ -177,7 +242,11 @@ export type BackingAudioStart = "MANUAL" | "PERFORMANCE";
  * cue engine underneath is derived from this, not replaced by it.
  */
 export interface ActPresentation {
+  /** The act's portrait or artwork, from its media library. */
+  actImageAssetId: string | null;
   performanceMode: PerformanceMode;
+  /** Derived from `performanceMode` and the chosen asset's kind. */
+  performanceVisualMode: PerformanceVisualMode;
   /** The image or video shown instead of the automatic screen. */
   performanceAssetId: string | null;
   /** `contain` by default: the whole frame, never stretched or cropped. */
@@ -192,6 +261,54 @@ export interface AdminAct extends PublicAct, ActAudienceVisibility {
   cues: readonly PersistedCue[];
 }
 
+/**
+ * The high-level steps of an ordinary act. Each step may perform several
+ * low-level actions when entered; the operator advances with one GO.
+ */
+export type ShowStep = "ACT_CARD" | "PERFORMANCE" | "SCORING" | "SCOREBOARD";
+
+export const SHOW_STEPS: readonly ShowStep[] = [
+  "ACT_CARD",
+  "PERFORMANCE",
+  "SCORING",
+  "SCOREBOARD",
+];
+
+/**
+ * What GO is allowed to do on its own. Opening audience voting stays off by
+ * default because it is public and irreversible for the act; judge scoring is
+ * safe to open because a judge can still be closed individually.
+ */
+export interface ShowFlowPolicy {
+  openJudgesOnScoring: boolean;
+  openVotingOnScoring: boolean;
+  /** Whether SCOREBOARD is a step of its own before the next act. */
+  scoreboardStep: boolean;
+  /** Stop performance media when entering SCORING. */
+  stopMediaOnScoring: boolean;
+}
+
+export const DEFAULT_SHOW_FLOW_POLICY: ShowFlowPolicy = {
+  openJudgesOnScoring: true,
+  openVotingOnScoring: false,
+  scoreboardStep: true,
+  stopMediaOnScoring: true,
+};
+
+/** What the next GO would do, so the console can say so before it is pressed. */
+export type ShowFlowNext =
+  | { kind: "step"; step: ShowStep }
+  | { kind: "next_act"; actId: ActId; label: string }
+  | { kind: "first_act"; actId: ActId; label: string }
+  | { kind: "end" };
+
+export interface ShowFlowState {
+  step: ShowStep | null;
+  next: ShowFlowNext;
+  /** Why GO would be refused right now; null when it would be accepted. */
+  blocked: string | null;
+}
+
 export interface PersistedShow {
   id: ShowId;
   title: string;
@@ -202,6 +319,7 @@ export interface PersistedShow {
   fontFamily: string;
   audienceWeight: number;
   reactionsEnabled: boolean;
+  flowPolicy: ShowFlowPolicy;
   /** Short operator-configured public text for the INTERMISSION graphic. */
   intermissionMessage: string;
   /** Short public text shown only in the TEXT emergency presentation. */
@@ -228,6 +346,37 @@ export interface ShowRuntimeState {
   resultsStage: ResultsStage;
   /** STAGED reveal: how many rank groups, counted from last place, are public. */
   resultsRevealedGroups: number;
+  flow: ShowFlowState;
+  /**
+   * Identifies the most recent CLOSE of audience voting. A phone that was
+   * holding a selection when voting closed may submit it against this
+   * identifier for a short, bounded grace interval.
+   */
+  voteCloseRevision: string | null;
+}
+
+/** How long after CLOSE a phone's automatic submission may still be accepted. */
+export const VOTE_CLOSE_GRACE_MS = 8_000;
+
+/** Live connection facts the coordinator knows for certain about its sockets. */
+export interface LivePresence {
+  audience: number;
+  judgeIds: readonly string[];
+  /** Projector sockets currently open. Distinct from being paired. */
+  projectors: number;
+  /** A projector session exists; the display may or may not be connected. */
+  projectorPaired: boolean;
+  /** Audio armed in a connected projector session; null when none is connected. */
+  projectorArmed: boolean | null;
+}
+
+/** The scenario a generated test show was built from, and how to rebuild it. */
+export interface TestShowGeneration {
+  testShowId: string;
+  seed: string;
+  scenario: string;
+  scenarioLabel: string;
+  generatedAt: string;
 }
 
 export type AudienceScore = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10;
@@ -403,6 +552,8 @@ export interface AdminShowProjection {
   results: Readonly<Record<string, OperationalResult>>;
   judges: readonly AdminJudgeState[];
   ranking: AdminRanking;
+  /** Present while the current show data was produced by the test generator. */
+  testShow: TestShowGeneration | null;
 }
 
 export interface ProjectorShowProjection {
@@ -464,6 +615,8 @@ export interface AudienceShowProjection {
   activeAct: PublicAct | null;
   revealedResult: number | null;
   publicResults: PublicResults | null;
+  /** The current close identifier while voting is closed; see `ShowRuntimeState`. */
+  voteCloseRevision: string | null;
 }
 
 export interface JudgeShowProjection {

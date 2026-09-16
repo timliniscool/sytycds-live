@@ -1,4 +1,12 @@
-import { actId, type ActPresentation, type AdminAct } from "../shared/domain";
+import {
+  actId,
+  INHERITED_APPEARANCE,
+  type ActAppearance,
+  type ActPresentation,
+  type AdminAct,
+  type PerformanceVisualMode,
+} from "../shared/domain";
+import { isThemeId } from "../shared/themes";
 import { isRecord } from "../shared/trust";
 import { retireUnreferencedAssets } from "./media-cleanup";
 import { syncSimpleCues } from "./simple-flow";
@@ -12,6 +20,8 @@ const TEXT_LIMITS = {
   internalNotes: 4_000,
 } as const;
 
+const MAX_FONT_FAMILY = 120;
+
 export interface ActInput {
   performerName: string;
   schoolYear: string;
@@ -23,6 +33,7 @@ export interface ActInput {
   showDescriptionToAudience: boolean;
   showImageToAudience: boolean;
   presentation: ActPresentation;
+  appearance: ActAppearance;
 }
 
 const ASSET_ID = /^asset-[A-Za-z0-9-]{1,128}$/u;
@@ -32,26 +43,82 @@ function optionalAssetId(value: unknown): string | null | undefined {
   return typeof value === "string" && ASSET_ID.test(value) ? value : undefined;
 }
 
-function parsePresentation(value: unknown): ActPresentation | null {
+/**
+ * Accepts both vocabularies: the operator-facing `performanceVisualMode`
+ * (AUTOMATIC / IMAGE / VIDEO) and the stored `performanceMode` (DEFAULT /
+ * CUSTOM). The visual mode is authoritative when both are present; the asset's
+ * real kind is checked against it before anything is saved.
+ */
+function parsePresentation(
+  value: unknown,
+  publicImageAssetId: string | null,
+): ActPresentation | null {
   const source = isRecord(value) ? value : {};
   const performanceAssetId = optionalAssetId(source.performanceAssetId);
   const backingAudioAssetId = optionalAssetId(source.backingAudioAssetId);
-  if (performanceAssetId === undefined || backingAudioAssetId === undefined)
+  const actImageAssetId =
+    source.actImageAssetId === undefined
+      ? publicImageAssetId
+      : optionalAssetId(source.actImageAssetId);
+  if (
+    performanceAssetId === undefined ||
+    backingAudioAssetId === undefined ||
+    actImageAssetId === undefined
+  )
     return null;
-  const performanceMode =
-    source.performanceMode === "CUSTOM" ? "CUSTOM" : "DEFAULT";
+  let visualMode: PerformanceVisualMode;
+  if (
+    source.performanceVisualMode === "AUTOMATIC" ||
+    source.performanceVisualMode === "IMAGE" ||
+    source.performanceVisualMode === "VIDEO"
+  ) {
+    visualMode = source.performanceVisualMode;
+  } else if (source.performanceVisualMode !== undefined) {
+    return null;
+  } else {
+    visualMode = source.performanceMode === "CUSTOM" ? "IMAGE" : "AUTOMATIC";
+  }
   // A custom performance visual without a file is the default screen; saying
   // so here keeps an impossible state out of the database entirely.
+  const custom = visualMode !== "AUTOMATIC" && performanceAssetId !== null;
   return {
-    performanceMode:
-      performanceMode === "CUSTOM" && performanceAssetId ? "CUSTOM" : "DEFAULT",
-    performanceAssetId:
-      performanceMode === "CUSTOM" ? performanceAssetId : null,
+    actImageAssetId,
+    performanceMode: custom ? "CUSTOM" : "DEFAULT",
+    performanceVisualMode: custom ? visualMode : "AUTOMATIC",
+    performanceAssetId: custom ? performanceAssetId : null,
     performanceFit: source.performanceFit === "cover" ? "cover" : "contain",
     backingAudioAssetId,
     backingAudioStart:
       source.backingAudioStart === "PERFORMANCE" ? "PERFORMANCE" : "MANUAL",
   };
+}
+
+function parseAppearance(value: unknown): ActAppearance | null {
+  if (value === undefined || value === null) return { ...INHERITED_APPEARANCE };
+  if (!isRecord(value)) return null;
+  const themeId =
+    value.themeId === null ||
+    value.themeId === undefined ||
+    value.themeId === ""
+      ? null
+      : isThemeId(value.themeId)
+        ? value.themeId
+        : undefined;
+  const fontRaw = value.fontFamily;
+  const fontFamily =
+    fontRaw === null || fontRaw === undefined || fontRaw === ""
+      ? null
+      : typeof fontRaw === "string"
+        ? fontRaw.replace(/\s+/gu, " ").trim()
+        : undefined;
+  if (
+    themeId === undefined ||
+    fontFamily === undefined ||
+    (fontFamily !== null &&
+      (fontFamily.length === 0 || fontFamily.length > MAX_FONT_FAMILY))
+  )
+    return null;
+  return { themeId, fontFamily };
 }
 
 export function parseActInput(value: unknown): ActInput | null {
@@ -60,8 +127,13 @@ export function parseActInput(value: unknown): ActInput | null {
   if (!fields.every((field) => typeof value[field] === "string")) return null;
   const publicImageAssetId = optionalAssetId(value.publicImageAssetId);
   if (publicImageAssetId === undefined) return null;
-  const presentation = parsePresentation(value.presentation);
+  const presentation = parsePresentation(
+    value.presentation,
+    publicImageAssetId,
+  );
   if (!presentation) return null;
+  const appearance = parseAppearance(value.appearance);
+  if (!appearance) return null;
   const candidate: ActInput = {
     performerName: (value.performerName as string).trim(),
     schoolYear: (value.schoolYear as string).trim(),
@@ -69,10 +141,12 @@ export function parseActInput(value: unknown): ActInput | null {
     actType: (value.actType as string).trim(),
     publicDescription: (value.publicDescription as string).trim(),
     internalNotes: (value.internalNotes as string).trim(),
-    publicImageAssetId,
+    // The act image is one field with two spellings; the presentation's wins.
+    publicImageAssetId: presentation.actImageAssetId,
     showDescriptionToAudience: value.showDescriptionToAudience === true,
     showImageToAudience: value.showImageToAudience === true,
     presentation,
+    appearance,
   };
   if (
     candidate.performerName.length === 0 ||
@@ -83,6 +157,31 @@ export function parseActInput(value: unknown): ActInput | null {
   return fields.every((field) => candidate[field].length <= TEXT_LIMITS[field])
     ? candidate
     : null;
+}
+
+/** The stored performance mode plus the asset's kind, as the operator sees it. */
+function visualModeFor(
+  sql: SqlStorage,
+  showIdentifier: string,
+  presentation: ActPresentation,
+): PerformanceVisualMode {
+  if (
+    presentation.performanceMode !== "CUSTOM" ||
+    !presentation.performanceAssetId
+  )
+    return "AUTOMATIC";
+  const mime = sql
+    .exec<{ mime_type: string }>(
+      "SELECT mime_type FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL",
+      showIdentifier,
+      presentation.performanceAssetId,
+    )
+    .toArray()[0]?.mime_type;
+  return mime?.startsWith("video/")
+    ? "VIDEO"
+    : mime?.startsWith("image/")
+      ? "IMAGE"
+      : "AUTOMATIC";
 }
 
 export function createAct(
@@ -112,8 +211,8 @@ export function createAct(
         act_name, act_type, public_description, internal_notes, public_image_asset_id,
         show_description_to_audience, show_image_to_audience, performance_mode,
         performance_asset_id, performance_fit, backing_audio_asset_id,
-        backing_audio_start, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        backing_audio_start, theme_id, font_family, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       showIdentifier,
       order,
@@ -131,6 +230,8 @@ export function createAct(
       input.presentation.performanceFit,
       input.presentation.backingAudioAssetId,
       input.presentation.backingAudioStart,
+      input.appearance.themeId,
+      input.appearance.fontFamily,
       timestamp,
       timestamp,
     );
@@ -140,7 +241,21 @@ export function createAct(
       timestamp,
       showIdentifier,
     );
-    return { id: actId(id), order, ...input, withdrawn: false, cues: [] };
+    return {
+      id: actId(id),
+      order,
+      ...input,
+      presentation: {
+        ...input.presentation,
+        performanceVisualMode: visualModeFor(
+          storage.sql,
+          showIdentifier,
+          input.presentation,
+        ),
+      },
+      withdrawn: false,
+      cues: [],
+    };
   });
 }
 
@@ -166,13 +281,19 @@ function referencedAssetsExist(
       .toArray().length > 0;
   if (input.publicImageAssetId && !usable(input.publicImageAssetId, "image/*"))
     return false;
-  const { performanceAssetId, backingAudioAssetId } = input.presentation;
-  if (
-    performanceAssetId &&
-    !usable(performanceAssetId, "image/*") &&
-    !usable(performanceAssetId, "video/*")
-  )
-    return false;
+  const { performanceAssetId, performanceVisualMode, backingAudioAssetId } =
+    input.presentation;
+  if (performanceAssetId) {
+    // The declared kind must match the file: a video chosen as IMAGE, or vice
+    // versa, is refused rather than silently reinterpreted.
+    const pattern =
+      performanceVisualMode === "VIDEO"
+        ? "video/*"
+        : performanceVisualMode === "IMAGE"
+          ? "image/*"
+          : null;
+    if (!pattern || !usable(performanceAssetId, pattern)) return false;
+  }
   if (
     backingAudioAssetId &&
     !usable(backingAudioAssetId, "audio/*") &&
@@ -197,7 +318,8 @@ export function editAct(
          public_description = ?, internal_notes = ?, public_image_asset_id = ?,
          show_description_to_audience = ?, show_image_to_audience = ?,
          performance_mode = ?, performance_asset_id = ?, performance_fit = ?,
-         backing_audio_asset_id = ?, backing_audio_start = ?, updated_at = ?
+         backing_audio_asset_id = ?, backing_audio_start = ?,
+         theme_id = ?, font_family = ?, updated_at = ?
        WHERE show_id = ? AND id = ?`,
       input.performerName,
       input.schoolYear,
@@ -213,6 +335,8 @@ export function editAct(
       input.presentation.performanceFit,
       input.presentation.backingAudioAssetId,
       input.presentation.backingAudioStart,
+      input.appearance.themeId,
+      input.appearance.fontFamily,
       timestamp,
       showIdentifier,
       requestedId,
@@ -238,7 +362,7 @@ export interface ActDeletionPreview {
   judgeSubmissions: number;
   finalisedResult: boolean;
   cues: number;
-  /** Files only this act uses; they leave R2 with it. */
+  /** Files only this act uses or owns; they leave R2 with it. */
   releasedAssets: readonly {
     id: string;
     filename: string;
@@ -296,7 +420,11 @@ function countRows(
     .one().count;
 }
 
-/** Every asset this act names directly or through one of its cues. */
+/**
+ * Every asset this act names directly, through one of its cues, or owns in its
+ * media library. Owned-but-unused files leave with the act too: a library that
+ * belongs to nobody is exactly the leak the orphan sweep exists to find.
+ */
 function actAssetIds(
   sql: SqlStorage,
   showIdentifier: string,
@@ -312,6 +440,14 @@ function actAssetIds(
     )
     .toArray()
     .map((row) => row.asset_id);
+  const owned = sql
+    .exec<{ id: string }>(
+      "SELECT id FROM media_assets WHERE show_id = ? AND act_id = ? AND deleted_at IS NULL",
+      showIdentifier,
+      act.id,
+    )
+    .toArray()
+    .map((row) => row.id);
   return [
     ...new Set(
       [
@@ -319,6 +455,7 @@ function actAssetIds(
         act.performance_asset_id,
         act.backing_audio_asset_id,
         ...fromCues,
+        ...owned,
       ].filter((value): value is string => typeof value === "string"),
     ),
   ];
@@ -438,7 +575,7 @@ export function previewActDeletion(
  * The act's scores are part of the act: leaving its votes, judge submissions or
  * frozen result behind would keep it in aggregates and rankings it no longer
  * belongs to. Assets shared with another act are kept; assets only this act
- * used are retired and their objects queued for removal from R2.
+ * used or owned are retired and their objects queued for removal from R2.
  *
  * Deleting the current act is allowed once nothing is live: the transaction
  * clears the current act rather than refusing, because an operator removing an
@@ -509,12 +646,20 @@ export function deleteAct(
       storage.sql.exec(
         `UPDATE show_runtime SET prepared_cue_id = NULL, active_visual_cue_id = NULL,
            active_audio_cue_id = NULL, visual_transport = 'STOPPED',
-           audio_transport = 'STOPPED', updated_at = ?
+           audio_transport = 'STOPPED', flow_step = NULL,
+           vote_close_revision = NULL, vote_closed_at = NULL, updated_at = ?
          WHERE show_id = ?`,
         timestamp,
         showIdentifier,
       );
     }
+    // A shared file the deleted act owned becomes a show-level asset rather
+    // than a dangling owner reference.
+    storage.sql.exec(
+      "UPDATE media_assets SET act_id = NULL WHERE show_id = ? AND act_id = ?",
+      showIdentifier,
+      requestedId,
+    );
     storage.sql.exec(
       "DELETE FROM acts WHERE show_id = ? AND id = ?",
       showIdentifier,

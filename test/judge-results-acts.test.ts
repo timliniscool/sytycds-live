@@ -140,12 +140,15 @@ describe("judge submission, results, and act ordering", () => {
           showDescriptionToAudience: false,
           showImageToAudience: false,
           presentation: {
+            actImageAssetId: null,
             performanceMode: "DEFAULT",
+            performanceVisualMode: "AUTOMATIC",
             performanceAssetId: null,
             performanceFit: "contain",
             backingAudioAssetId: null,
             backingAudioStart: "MANUAL",
           },
+          appearance: { themeId: null, fontFamily: null },
         })?.order,
       ).toBe(2);
     });

@@ -666,6 +666,102 @@ const MEDIA_CLEANUP_QUEUE_SCHEMA: SchemaMigration = {
   ],
 };
 
+/**
+ * The Act Media Library, the show flow engine and the test-show generator.
+ *
+ * Media gains ownership: every upload belongs to one act's library (or to the
+ * show, for files uploaded before ownership existed and for deliberately
+ * shared files). References are unchanged and still decide deletion safety;
+ * the reconcile step assigns ownership to any existing asset that exactly one
+ * act uses, so nothing has to be re-uploaded.
+ *
+ * Acts gain an optional appearance override; the show gains its GO policy; the
+ * runtime gains the current high-level step and the identifier of the most
+ * recent voting close; and one row records the seed and scenario of a
+ * generated test show so a global reset can remove everything it produced.
+ */
+const MEDIA_LIBRARY_SHOW_FLOW_AND_TEST_SHOWS_SCHEMA: SchemaMigration = {
+  version: 15,
+  name: "act_media_library_show_flow_and_test_shows",
+  // Every change is guarded on the real shape rather than on the recorded
+  // history, so a coordinator that already carries part of this migration
+  // (or is being repaired after a rewound history) receives only what it lacks.
+  statements: [],
+  reconcile(sql) {
+    const addColumn = (table: string, column: string, definition: string) => {
+      if (!columnExists(sql, table, column))
+        sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    };
+    addColumn("media_assets", "act_id", "TEXT");
+    addColumn(
+      "media_assets",
+      "generated_test",
+      "INTEGER NOT NULL DEFAULT 0 CHECK (generated_test IN (0, 1))",
+    );
+    addColumn("media_assets", "test_show_id", "TEXT");
+    sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_media_assets_show_act ON media_assets (show_id, act_id)",
+    );
+    addColumn("acts", "theme_id", "TEXT");
+    addColumn("acts", "font_family", "TEXT");
+    addColumn(
+      "shows",
+      "flow_open_judges_on_scoring",
+      "INTEGER NOT NULL DEFAULT 1 CHECK (flow_open_judges_on_scoring IN (0, 1))",
+    );
+    addColumn(
+      "shows",
+      "flow_open_voting_on_scoring",
+      "INTEGER NOT NULL DEFAULT 0 CHECK (flow_open_voting_on_scoring IN (0, 1))",
+    );
+    addColumn(
+      "shows",
+      "flow_scoreboard_step",
+      "INTEGER NOT NULL DEFAULT 1 CHECK (flow_scoreboard_step IN (0, 1))",
+    );
+    addColumn(
+      "shows",
+      "flow_stop_media_on_scoring",
+      "INTEGER NOT NULL DEFAULT 1 CHECK (flow_stop_media_on_scoring IN (0, 1))",
+    );
+    addColumn(
+      "show_runtime",
+      "flow_step",
+      "TEXT CHECK (flow_step IS NULL OR flow_step IN ('ACT_CARD', 'PERFORMANCE', 'SCORING', 'SCOREBOARD'))",
+    );
+    addColumn("show_runtime", "vote_close_revision", "TEXT");
+    addColumn("show_runtime", "vote_closed_at", "INTEGER");
+    if (!tableExists(sql, "test_show_generations")) {
+      sql.exec(`CREATE TABLE test_show_generations (
+        show_id TEXT PRIMARY KEY NOT NULL,
+        test_show_id TEXT NOT NULL,
+        seed TEXT NOT NULL,
+        scenario TEXT NOT NULL,
+        generated_at TEXT NOT NULL,
+        FOREIGN KEY (show_id) REFERENCES shows(id) ON DELETE RESTRICT
+      ) STRICT`);
+    }
+    // Existing uploads join the library of the one act that uses them. A file
+    // two acts share, or one nothing uses yet, stays a show-level asset.
+    sql.exec(
+      `UPDATE media_assets SET act_id = (
+         SELECT owner FROM (
+           SELECT m2.id AS asset, MIN(u.act_id) AS owner, COUNT(DISTINCT u.act_id) AS owners
+           FROM media_assets m2 JOIN (
+             SELECT a.show_id, a.id AS act_id, a.public_image_asset_id AS asset_id FROM acts a
+             UNION ALL SELECT a.show_id, a.id, a.performance_asset_id FROM acts a
+             UNION ALL SELECT a.show_id, a.id, a.backing_audio_asset_id FROM acts a
+             UNION ALL SELECT c.show_id, c.act_id, r.asset_id
+               FROM cue_asset_references r JOIN cues c ON c.show_id = r.show_id AND c.id = r.cue_id
+           ) u ON u.show_id = m2.show_id AND u.asset_id = m2.id
+           GROUP BY m2.id
+         ) WHERE asset = media_assets.id AND owners = 1
+       )
+       WHERE act_id IS NULL`,
+    );
+  },
+};
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -681,6 +777,7 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   ACT_PRESENTATION_AND_RESULT_IDENTITY_SCHEMA,
   CONFIGURATION_SCHEMA_RECONCILIATION,
   MEDIA_CLEANUP_QUEUE_SCHEMA,
+  MEDIA_LIBRARY_SHOW_FLOW_AND_TEST_SHOWS_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 

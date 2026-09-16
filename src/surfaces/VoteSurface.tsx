@@ -10,8 +10,8 @@ import {
   AUDIENCE_SCORES,
   connectionNotice,
   deriveVoteView,
-  discardUnlockedSelection,
   rejectionMessage,
+  resolveVotingClose,
   type VoteRejection,
   type VoteSubmission,
 } from "../vote/vote-view";
@@ -22,7 +22,11 @@ import {
 } from "../../shared/reactions";
 import { ReactionReporter } from "../vote/reaction-reporter";
 import { ReactionLane, reactionGlyph } from "../reactions/ReactionLane";
-import { useShowDocumentTitle, useShowTheme } from "../theme";
+import {
+  effectiveAppearance,
+  useShowDocumentTitle,
+  useShowTheme,
+} from "../theme";
 import { PLATFORM_ATTRIBUTION } from "../../shared/platform";
 
 interface VoteResponse {
@@ -71,7 +75,10 @@ export default function VoteSurface() {
     key: number;
     histogram: ReactionHistogram;
   } | null>(null);
-  useShowTheme(projection?.show.themeId, projection?.show.fontFamily);
+  const appearance = projection
+    ? effectiveAppearance(projection.show, projection.activeAct)
+    : null;
+  useShowTheme(appearance?.themeId, appearance?.fontFamily);
   useShowDocumentTitle(projection?.show.title, "Vote");
 
   const [submission, setSubmission] = useState<VoteSubmission>({
@@ -80,6 +87,9 @@ export default function VoteSurface() {
   const [sawVotingOpen, setSawVotingOpen] = useState(false);
   const actId = projection?.show.activeActId ?? null;
   const votingOpen = projection?.show.audienceVoteState === "OPEN";
+  // The latest submission is read inside effects without re-running them.
+  const submissionRef = useRef(submission);
+  submissionRef.current = submission;
 
   useEffect(() => () => client.destroy(), [client]);
 
@@ -150,18 +160,33 @@ export default function VoteSurface() {
     if (votingOpen) setSawVotingOpen(true);
   }, [votingOpen]);
 
-  // Voting closed underneath this phone. Anything chosen but not locked in is
-  // discarded here, so no pending selection can survive to be sent later, and
-  // the confirmation sheet closes with it.
+  // Voting closed underneath this phone. A score the voter had chosen but not
+  // yet locked in is submitted now, against the close the server announced,
+  // so it is counted inside the grace window; a phone holding nothing sends
+  // nothing, and a submission already in flight is left to the server.
   useEffect(() => {
-    if (votingOpen) return;
-    setSubmission(discardUnlockedSelection);
-  }, [votingOpen]);
+    if (votingOpen || !sawVotingOpen) return;
+    const resolved = resolveVotingClose(submissionRef.current);
+    if (resolved.submission !== submissionRef.current)
+      setSubmission(resolved.submission);
+    if (resolved.autoSubmit !== null) {
+      void submit(resolved.autoSubmit, {
+        closeRevision: client.getState().voteCloseRevision,
+      });
+    }
+    // `submit` reads only stable refs and the client; the close is the event.
+  }, [votingOpen, sawVotingOpen]);
 
-  async function submit(score: AudienceScore): Promise<void> {
+  async function submit(
+    score: AudienceScore,
+    options: { closeRevision?: string | null } = {},
+  ): Promise<void> {
+    const closing = options.closeRevision !== undefined;
     // The server is authoritative, but a phone that already knows voting has
-    // closed should not send at all.
-    if (!actId || !votingOpen) {
+    // closed should not send an ordinary LOCK IN at all. The automatic
+    // submission on close is the one deliberate exception, and it quotes the
+    // close it is answering so the server can bound it.
+    if (!actId || (!votingOpen && !closing)) {
       setSubmission({ kind: "idle" });
       return;
     }
@@ -171,7 +196,13 @@ export default function VoteSurface() {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ actId, score }),
+        body: JSON.stringify({
+          actId,
+          score,
+          ...(closing && options.closeRevision
+            ? { closeRevision: options.closeRevision }
+            : {}),
+        }),
       });
       const result = (await response.json()) as VoteResponse;
       if (response.ok && result.accepted) {
@@ -280,12 +311,14 @@ export default function VoteSurface() {
         <Message
           body="Voting has closed"
           detail={
-            // A score that was being sent when the operator closed voting is a
-            // lost race, not a silent failure: say exactly what happened.
-            submission.kind === "rejected" &&
-            submission.reason === "VOTING_CLOSED"
-              ? "Voting closed before your score was submitted."
-              : "Scores for this act are locked in."
+            // A score still travelling when voting closed is being counted
+            // inside the grace window; one that missed it is a lost race, not
+            // a silent failure. Say exactly which happened.
+            submission.kind === "submitting"
+              ? `Sending your score of ${submission.score}…`
+              : submission.kind === "rejected"
+                ? rejectionMessage(submission.reason)
+                : "Scores for this act are locked in."
           }
         />
       )}
@@ -376,13 +409,14 @@ export default function VoteSurface() {
               </p>
             )}
             {/*
-              Choosing is not sending, and the phone says so in as many words
-              until LOCK IN is pressed and the server has accepted it.
+              A chosen score counts: either when LOCK IN is pressed, or
+              automatically the moment the operator closes voting. The phone
+              says so, so nobody is surprised either way.
             */}
             <p className="vote__pending" aria-live="polite">
               {pendingScore === null
-                ? "Tap a score. Nothing is sent until you lock it in."
-                : `Selected ${pendingScore} — not sent yet`}
+                ? "Tap a score. It counts when you lock it in, or when voting closes."
+                : `Selected ${pendingScore} — lock it in, or it is sent when voting closes`}
             </p>
             <button
               type="button"

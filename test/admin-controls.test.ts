@@ -61,6 +61,8 @@ const IMPLEMENTED_COMMANDS: readonly AdminCommandType[] = [
   "RESET_RESULTS_REVEAL",
   "WITHDRAW_ACT",
   "REINSTATE_ACT",
+  "ADVANCE_SHOW",
+  "SET_SHOW_STEP",
 ];
 
 /** Admin and public routes the coordinator declares in its `fetch`. */
@@ -79,6 +81,8 @@ const ROUTED_ENDPOINTS: readonly string[] = [
   "/api/admin/cues",
   "/api/admin/media",
   "/api/admin/projector",
+  "/api/admin/test-show",
+  "/api/admin/diagnostics",
   "/api/projector/session",
   "/api/projector/pair",
   "/api/public/config",

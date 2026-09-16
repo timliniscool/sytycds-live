@@ -104,21 +104,25 @@ export function deriveVoteView(inputs: VoteInputs): VoteView {
 }
 
 /**
- * Closing audience voting must never submit anything. Selecting a score is a
- * purely local choice; only LOCK IN, confirmed, may start a submission. So when
- * the operator closes voting, a selected-but-not-locked score is discarded and
- * the phone moves to "voting closed" with nothing sent.
+ * What a phone does the moment it learns voting has closed.
  *
- * A submission already in flight is deliberately left alone: the server has it
- * and is the only thing that decides whether it counted, so this phone waits
- * for that answer rather than inventing one.
+ * A score the voter had chosen but not yet locked in counts: it is submitted
+ * automatically, against the close the server announced, and the phone shows
+ * it as sending. Nothing chosen means nothing sent. A submission already in
+ * flight, or already accepted, is left exactly as it is: the server holds it
+ * and decides, so a LOCK IN followed by a close can never produce two votes.
  */
-export function discardUnlockedSelection(
-  submission: VoteSubmission,
-): VoteSubmission {
-  return submission.kind === "selected" || submission.kind === "confirming"
-    ? { kind: "idle" }
-    : submission;
+export function resolveVotingClose(submission: VoteSubmission): {
+  submission: VoteSubmission;
+  autoSubmit: AudienceScore | null;
+} {
+  if (submission.kind === "selected" || submission.kind === "confirming") {
+    return {
+      submission: { kind: "submitting", score: submission.score },
+      autoSubmit: submission.score,
+    };
+  }
+  return { submission, autoSubmit: null };
 }
 
 /** The connection states worth interrupting a voter about. */
@@ -138,7 +142,7 @@ export function connectionNotice(
 export function rejectionMessage(reason: VoteRejection): string {
   switch (reason) {
     case "VOTING_CLOSED":
-      return "Voting closed before your score was submitted.";
+      return "Voting closed before your score could be counted.";
     case "WRONG_ACT":
       return "The act changed before your score arrived.";
     case "INVALID_SCORE":

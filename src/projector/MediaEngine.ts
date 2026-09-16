@@ -163,7 +163,7 @@ export class ProjectorMediaEngine {
    * per element, so replacing it on every cue would silently re-lock the show's
    * backing audio after arming; only its `src` ever changes.
    */
-  private readonly audio: HTMLAudioElement = new Audio();
+  private readonly audio: HTMLAudioElement;
   private audioContext: AudioContext | null = null;
   private audioAssetId: string | null = null;
   private frame: Frame | null = null;
@@ -192,14 +192,19 @@ export class ProjectorMediaEngine {
   private freshSession = true;
   private held = false;
 
-  constructor(private readonly options: MediaEngineOptions) {
+  constructor(
+    private readonly options: MediaEngineOptions,
+    /** Injectable so the arming sequence can be tested without a browser. */
+    audioElement: HTMLAudioElement = new Audio(),
+  ) {
+    this.audio = audioElement;
     this.bindAudio();
   }
 
   attach(host: HTMLElement): void {
     this.host = host;
     if (this.frame && !this.frame.element.isConnected)
-      host.append(this.frame.element);
+      host.appendChild(this.frame.element);
   }
 
   /**
@@ -213,10 +218,22 @@ export class ProjectorMediaEngine {
    * permission is granted per element, so unlocking a throwaway probe proves
    * nothing). The test plays unmuted at zero volume: muted playback is exempt
    * from the autoplay policy and would therefore always "succeed".
+   *
+   * Both gesture-sensitive calls — `AudioContext.resume()` and
+   * `HTMLMediaElement.play()` — are issued *synchronously, in the click's own
+   * call stack*, before anything is awaited. Awaiting the context first and
+   * then calling `play()` looked correct but left `play()` running after an
+   * asynchronous boundary; browsers that scope user activation to the gesture's
+   * task (Safari, and Chromium once activation has been consumed) then refused
+   * it, which is exactly the "works on the second click" symptom.
    */
   async arm(): Promise<boolean> {
-    const context = await this.resumeAudioContext();
-    const element = await this.unlockAudioElement();
+    const contextAttempt = this.resumeAudioContext();
+    const elementAttempt = this.unlockAudioElement();
+    const [context, element] = await Promise.all([
+      contextAttempt,
+      elementAttempt,
+    ]);
     if (!context.ok || !element.ok) {
       this.armed = false;
       this.error = context.ok
@@ -241,71 +258,106 @@ export class ProjectorMediaEngine {
     return this.armed;
   }
 
-  private async resumeAudioContext(): Promise<{
-    ok: boolean;
-    detail: string;
-  }> {
+  /**
+   * Starts resuming the context synchronously and returns the promise; the
+   * caller must not await anything before also calling `unlockAudioElement`.
+   */
+  private resumeAudioContext(): Promise<{ ok: boolean; detail: string }> {
     const Constructor = audioContextConstructor();
     // A browser with no Web Audio can still play media elements; the element
     // test below is then the whole of the proof.
-    if (!Constructor) return { ok: true, detail: "no Web Audio" };
+    if (!Constructor)
+      return Promise.resolve({ ok: true, detail: "no Web Audio" });
+    let resumed: Promise<void>;
     try {
       this.audioContext ??= new Constructor();
-      if (this.audioContext.state !== "running")
-        await this.audioContext.resume();
-      return this.audioContext.state === "running"
-        ? { ok: true, detail: "audio context running" }
-        : {
-            ok: false,
-            detail: `audio context is ${this.audioContext.state}`,
-          };
+      resumed =
+        this.audioContext.state === "running"
+          ? Promise.resolve()
+          : this.audioContext.resume();
     } catch (error: unknown) {
-      return {
+      return Promise.resolve({
         ok: false,
         detail:
           error instanceof Error
             ? error.message
             : "audio context could not start",
-      };
+      });
     }
+    const context = this.audioContext;
+    return resumed.then(
+      () =>
+        context.state === "running"
+          ? { ok: true, detail: "audio context running" }
+          : { ok: false, detail: `audio context is ${context.state}` },
+      (error: unknown) => ({
+        ok: false,
+        detail:
+          error instanceof Error
+            ? error.message
+            : "audio context could not start",
+      }),
+    );
   }
 
-  private async unlockAudioElement(): Promise<{
-    ok: boolean;
-    detail: string;
-  }> {
+  /**
+   * Calls `play()` on the show's own audio element synchronously — the call
+   * happens before this method returns — and resolves once the browser has
+   * answered. Everything that must follow the answer (pausing, restoring the
+   * position, detaching the probe source) happens after, where timing no
+   * longer matters.
+   */
+  private unlockAudioElement(): Promise<{ ok: boolean; detail: string }> {
     const element = this.audio;
     // Already audible: the pipeline is demonstrably unlocked and must not be
     // interrupted to prove it again.
     if (!element.paused && !element.ended)
-      return { ok: true, detail: "already playing" };
+      return Promise.resolve({ ok: true, detail: "already playing" });
     const loadedSource = this.audioAssetId !== null;
     const restoreTime = element.currentTime;
     const restoreVolume = element.volume;
     element.muted = false;
     element.volume = 0;
+    if (!loadedSource) element.src = SILENT_WAV;
+    let played: Promise<void>;
     try {
-      if (!loadedSource) element.src = SILENT_WAV;
-      await element.play();
-      element.pause();
-      if (loadedSource) {
-        element.currentTime = restoreTime;
-      } else {
-        element.removeAttribute("src");
-        element.load();
-      }
-      return { ok: true, detail: "media element unlocked" };
+      // `play()` may return undefined in very old engines; normalise.
+      played = Promise.resolve(element.play());
     } catch (error: unknown) {
-      return {
-        ok: false,
-        detail:
-          error instanceof Error
-            ? error.message
-            : "browser refused to enable audio",
-      };
-    } finally {
-      element.volume = restoreVolume;
+      played = Promise.reject(
+        error instanceof Error ? error : new Error(String(error)),
+      );
     }
+    const restore = () => {
+      element.volume = restoreVolume;
+    };
+    return played.then(
+      () => {
+        element.pause();
+        if (loadedSource) {
+          element.currentTime = restoreTime;
+        } else {
+          element.removeAttribute("src");
+          element.load();
+        }
+        restore();
+        return { ok: true, detail: "media element unlocked" };
+      },
+      (error: unknown) => {
+        if (!loadedSource) {
+          element.removeAttribute("src");
+          element.load();
+        }
+        restore();
+        return {
+          ok: false,
+          detail:
+            error instanceof Error
+              ? error.message
+              : "browser refused to enable audio",
+        };
+      },
+    );
   }
 
   dispose(): void {
@@ -653,7 +705,7 @@ export class ProjectorMediaEngine {
     const previous = this.frame;
     this.frame = { cueId: cue.id, assetId: visual.sourceKey, element };
     if (element instanceof HTMLVideoElement) this.bindVideo(element);
-    this.host?.append(element);
+    this.host?.appendChild(element);
     if (previous) {
       if (previous.element instanceof HTMLVideoElement)
         previous.element.pause();

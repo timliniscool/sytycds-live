@@ -1,28 +1,56 @@
 import { useEffect, useState } from "react";
 
-interface Status {
-  paired: boolean;
-  connected: boolean;
+import type { LivePresence } from "../../shared/domain";
+
+export interface ProjectorPairingPanelProps {
+  /**
+   * Authoritative presence from the coordinator, pushed over the control link
+   * the moment it changes. Null until the first message arrives.
+   */
+  presence: LivePresence | null;
 }
 
-export function ProjectorPairingPanel() {
-  const [status, setStatus] = useState<Status | null>(null);
+/** Paired, connected and armed are three different facts, shown as three. */
+export function projectorStatusLabels(presence: LivePresence | null): {
+  paired: string;
+  connection: string;
+  audio: string;
+  ready: boolean;
+} {
+  if (!presence)
+    return {
+      paired: "…",
+      connection: "…",
+      audio: "…",
+      ready: false,
+    };
+  const connected = presence.projectors > 0;
+  return {
+    paired: presence.projectorPaired ? "PAIRED" : "NOT PAIRED",
+    connection: connected
+      ? presence.projectors === 1
+        ? "CONNECTED"
+        : `${presence.projectors} CONNECTED`
+      : presence.projectorPaired
+        ? "PAIRED · NOT CONNECTED"
+        : "NOT CONNECTED",
+    audio: !connected
+      ? "AUDIO —"
+      : presence.projectorArmed
+        ? "AUDIO ARMED"
+        : "AUDIO NOT ARMED",
+    ready: connected && presence.projectorArmed === true,
+  };
+}
+
+export function ProjectorPairingPanel({
+  presence,
+}: ProjectorPairingPanelProps) {
   const [code, setCode] = useState<string | null>(null);
   const [expiresAt, setExpiresAt] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
 
-  async function refresh(): Promise<void> {
-    const response = await fetch("/api/admin/projector", {
-      credentials: "same-origin",
-    });
-    if (response.ok) setStatus((await response.json()) as Status);
-  }
-  useEffect(() => {
-    void refresh();
-    const statusTimer = window.setInterval(() => void refresh(), 5_000);
-    return () => window.clearInterval(statusTimer);
-  }, []);
   useEffect(() => {
     if (!expiresAt) return;
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
@@ -63,11 +91,14 @@ export function ProjectorPairingPanel() {
       headers: { "Content-Type": "application/json" },
       body: "{}",
     });
-    if (response.ok) {
-      setCode(null);
-      await refresh();
-    }
+    if (response.ok) setCode(null);
   }
+
+  const labels = projectorStatusLabels(presence);
+  const remaining =
+    expiresAt === null
+      ? null
+      : Math.max(0, Math.ceil((expiresAt - now) / 1000));
 
   return (
     <section
@@ -79,16 +110,17 @@ export function ProjectorPairingPanel() {
         <h2 id="projector-pairing-title">Projector pairing</h2>
         <span>
           One-time codes expire after ten minutes. Pair once; the secure display
-          session survives reloads.
+          session survives reloads. Status here is live from the coordinator.
         </span>
       </div>
       <p className="projector-pairing-admin__status">
-        <b className={status?.paired ? "is-ready" : ""}>
-          {status?.paired ? "PAIRED" : "NOT PAIRED"}
+        <b className={presence?.projectorPaired ? "is-ready" : ""}>
+          {labels.paired}
         </b>
-        <span className={status?.connected ? "is-ready" : ""}>
-          {status?.connected ? "LIVE CONNECTION" : "DISPLAY OFFLINE"}
+        <span className={presence && presence.projectors > 0 ? "is-ready" : ""}>
+          {labels.connection}
         </span>
+        <span className={labels.ready ? "is-ready" : ""}>{labels.audio}</span>
       </p>
       <button type="button" onClick={() => void generate()}>
         {code ? "REPLACE PAIRING CODE" : "GENERATE PROJECTOR CODE"}
@@ -96,15 +128,16 @@ export function ProjectorPairingPanel() {
       {code && (
         <output className="projector-pairing-admin__code">
           <strong>{code}</strong>
-          {expiresAt && (
+          {remaining !== null && (
             <span>
-              {Math.max(0, Math.ceil((expiresAt - now) / 1000))} seconds
-              remaining
+              {remaining === 0
+                ? "Code expired — generate another"
+                : `${remaining} seconds remaining`}
             </span>
           )}
         </output>
       )}
-      {status?.paired && (
+      {presence?.projectorPaired && (
         <button type="button" onClick={() => void revoke()}>
           REVOKE PROJECTOR SESSIONS
         </button>

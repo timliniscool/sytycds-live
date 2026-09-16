@@ -30,7 +30,7 @@
   // Currently OFF: the public URL is disabled while the show is between events.
   // Set this back to `true` and redeploy to bring the site back up — the Worker,
   // the show database, the R2 bucket and the secrets are all unaffected by it.
-  "workers_dev": false,
+  "workers_dev": true,
   "preview_urls": false,
   "r2_buckets": [
     {

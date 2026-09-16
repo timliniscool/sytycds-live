@@ -2,6 +2,9 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
+import { DEFAULT_SHOW_FLOW_POLICY } from "../shared/domain";
+import { DEFAULT_EVENT_NAME } from "../shared/platform";
+import { DEFAULT_THEME_ID } from "../shared/themes";
 import { isResetConfirmed, resetShow } from "../worker/show-reset";
 import { upsertShow } from "../worker/show-config";
 import { PRIMARY_SHOW_ID, projectShowState } from "../worker/show-state";
@@ -145,31 +148,68 @@ describe("show reset", () => {
     });
   });
 
-  it("keeps the setup an operator already did, and the platform it runs on", async () => {
+  it("returns the show to its defaults and keeps only the platform it runs on", async () => {
     await withCoordinator("show-reset-retention", async (storage) => {
       const bucket = {
         delete: async () => undefined,
       } as unknown as R2Bucket;
       seedShow(storage);
-      await resetShow(storage, bucket, PRIMARY_SHOW_ID);
+      storage.sql.exec(
+        `UPDATE shows SET audience_weight = 0.3, intermission_message = 'Back soon',
+           flow_open_voting_on_scoring = 1 WHERE id = ?`,
+        PRIMARY_SHOW_ID,
+      );
+      const result = await resetShow(storage, bucket, PRIMARY_SHOW_ID);
+      expect(result.projectorSessionsRevoked).toBe(0);
 
       const projection = projectShowState(storage, PRIMARY_SHOW_ID, {
         kind: "admin",
       });
       if (projection?.role !== "admin") throw new Error("expected admin");
-      // Documented retention policy: identity, appearance and the judge panel
-      // are setup, not performance data, and survive a show reset.
+      // RESET ENTIRE SHOW means the default show: identity, appearance, the
+      // judge panel, the weighting, the GO policy and the public text all go.
       expect(projection.show).toMatchObject({
-        title: "Ngaio Showcase",
-        tagline: "Term 3",
-        shortName: "Showcase",
-        themeId: "gold-white",
+        title: DEFAULT_EVENT_NAME,
+        tagline: "",
+        shortName: "",
+        themeId: DEFAULT_THEME_ID,
+        fontFamily: "system-ui",
+        audienceWeight: 0.5,
+        intermissionMessage: "",
+        emergencyMessage: "",
+        flowPolicy: DEFAULT_SHOW_FLOW_POLICY,
       });
       expect(projection.judges.map((judge) => judge.displayName)).toEqual([
-        "Alice",
+        "Judge 1",
+        "Judge 2",
+        "Judge 3",
+        "Judge 4",
       ]);
-      // The operator who pressed the button is still signed in.
+      expect(projection.testShow).toBeNull();
+      // The operator who pressed the button is still signed in: the account
+      // and its sessions are platform, not show.
       expect(count(storage, "admin_sessions")).toBe(1);
+    });
+  });
+
+  it("revokes projector sessions so a display in the hall re-pairs deliberately", async () => {
+    await withCoordinator("show-reset-projector", async (storage) => {
+      const bucket = {
+        delete: async () => undefined,
+      } as unknown as R2Bucket;
+      seedShow(storage);
+      storage.sql.exec(
+        `INSERT INTO projector_sessions (token_hash, show_id, created_at, last_seen_at, expires_at, revoked_at)
+         VALUES (?, ?, ?, ?, ?, NULL)`,
+        new Uint8Array(32).fill(9).buffer,
+        PRIMARY_SHOW_ID,
+        now,
+        now,
+        Date.now() + 60_000,
+      );
+      const result = await resetShow(storage, bucket, PRIMARY_SHOW_ID);
+      expect(result.projectorSessionsRevoked).toBe(1);
+      expect(count(storage, "projector_sessions")).toBe(0);
     });
   });
 

@@ -6,6 +6,7 @@ import {
   type AudienceVoteState,
   type ClientProjection,
   type JudgePermissionState,
+  type LivePresence,
   type ShowRevision,
 } from "../../shared/domain";
 import {
@@ -58,6 +59,16 @@ export interface RealtimeState {
   lastReactionClear: ReactionClearMessage | null;
   audienceConnections: number;
   judgeConnections: ReadonlySet<string>;
+  /**
+   * Admin only: authoritative presence from the coordinator. Null until the
+   * first presence message, so a console never shows a guess as a fact.
+   */
+  presence: LivePresence | null;
+  /**
+   * Audience only: the identifier of the current voting close, quoted by a
+   * phone that submits the score it was holding when voting closed.
+   */
+  voteCloseRevision: string | null;
   lastError: string | null;
   /**
    * The coordinator answered but no show exists yet. Sticky until a snapshot
@@ -108,6 +119,8 @@ const INITIAL_STATE: RealtimeState = {
   lastReactionClear: null,
   audienceConnections: 0,
   judgeConnections: new Set(),
+  presence: null,
+  voteCloseRevision: null,
   lastError: null,
   showUnavailable: false,
 };
@@ -274,6 +287,9 @@ function applyPatches(
         ...next,
         show: { ...next.show, resultRevealState: patch.state },
       };
+    }
+    if (patch.kind === "flow" && next.role === "admin") {
+      next = { ...next, runtime: { ...next.runtime, flow: patch.flow } };
     }
   }
   return next;
@@ -582,6 +598,10 @@ export class RealtimeClient {
           message.projection.role === "judge"
             ? message.projection.permission
             : null,
+        voteCloseRevision:
+          message.projection.role === "audience"
+            ? message.projection.voteCloseRevision
+            : this.state.voteCloseRevision,
         lastError: null,
         showUnavailable: false,
       });
@@ -635,6 +655,8 @@ export class RealtimeClient {
     let lastReactionClear = this.state.lastReactionClear;
     let audienceConnections = this.state.audienceConnections;
     let judgeConnections = this.state.judgeConnections;
+    let presence = this.state.presence;
+    let voteCloseRevision = this.state.voteCloseRevision;
 
     switch (message.type) {
       case "state_patch":
@@ -660,6 +682,7 @@ export class RealtimeClient {
       }
       case "voting_state_update":
         audienceVoting = message.state;
+        voteCloseRevision = message.closeRevision;
         if (projection?.role === "audience") {
           projection = {
             ...projection,
@@ -731,6 +754,16 @@ export class RealtimeClient {
       case "connection_count":
         audienceConnections = message.audience;
         judgeConnections = new Set(message.judgeIds);
+        presence = {
+          audience: message.audience,
+          judgeIds: message.judgeIds,
+          projectors: message.projectors,
+          projectorPaired: message.projectorPaired,
+          projectorArmed: message.projectorArmed,
+        };
+        // Telemetry describes a projector socket; with none connected it is
+        // history, and history must not read as a live transport.
+        if (message.projectors === 0) projectorTelemetry = null;
         break;
       case "reaction_sampling":
         reactionSampling = message;
@@ -769,6 +802,8 @@ export class RealtimeClient {
       lastReactionClear,
       audienceConnections,
       judgeConnections,
+      presence,
+      voteCloseRevision,
       lastError: message.type === "protocol_error" ? message.detail : null,
       showUnavailable:
         message.type === "protocol_error"

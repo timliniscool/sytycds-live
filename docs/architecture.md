@@ -181,7 +181,7 @@ changes are protected once any vote, judge score or final result exists; the
 explicit `RESET SCORING` path deletes only scoring facts, not acts or media.
 Judge credentials and projector pairing codes are one-time displays.
 
-The ACTS & CUES view owns running-order CRUD, public copy, operator-only notes,
+The ACTS & MEDIA view owns running-order CRUD, public copy, operator-only notes,
 public images, media uploads with progress and extracted metadata, reference-
 safe deletion, previews, sequential image cue creation, and cue reordering.
 Large media bodies stream to R2 and never enter React state. Public act images
@@ -261,3 +261,49 @@ Wrangler generates `worker-configuration.d.ts` from `wrangler.jsonc`; binding an
 **Rationale:** React supports the stateful operator and mobile interactions without imposing a full-stack framework. Vite and the Cloudflare plugin keep the frontend and Worker in one build while executing backend code in `workerd` during development. A single Durable Object gives the show one serialized write authority, preventing competing operator devices and concurrent submissions from creating split-brain state. SQLite provides transactions, uniqueness constraints, efficient aggregates, durable recovery, and inspectable relational data. Hibernatable WebSockets provide low-latency revisioned updates without polling or forcing the coordinator to remain resident. R2 is designed for large media objects and keeps those bytes out of SQLite, Worker bundles, and browser application state.
 
 **Consequences:** the coordinator is intentionally a consistency bottleneck and must keep hot paths short, update aggregates incrementally, and coalesce broadcasts. The Worker and coordinator require explicit role projections and protocol types. R2 object lifecycle and missing-asset handling require operational tooling later. Cloudflare bindings make Workers-runtime integration tests mandatory for infrastructure-sensitive code.
+
+## Show flow, presence, media ownership and test shows (Prompt 1)
+
+**Show flow.** `show_runtime.flow_step` records the high-level step of the
+current act; `computeFlow` in `worker/show-state.ts` derives what the next GO
+does (`next`) and why it would be refused (`blocked`) from the step, the
+show's stored GO policy (`shows.flow_*`), the running order and the voting
+state. `ADVANCE_SHOW` performs exactly that derivation; `SET_SHOW_STEP` jumps.
+Entering a step performs its implied low-level actions (display change,
+derived performance media, stopping media, opening judges, and opening voting
+only where policy allows). Closing voting, blackout, emergency, hold,
+finalising and results staging are never implied. The admin receives a `flow`
+patch after every accepted command so the GO label is always current.
+
+**Voting close.** `CLOSE_AUDIENCE_VOTING` mints `vote_close_revision` and
+`vote_closed_at`. Phones receive the revision in `voting_state_update` and in
+the audience snapshot; a phone holding a selected score submits it against
+that revision, and `submitAudienceVote` accepts such a submission for
+`VOTE_CLOSE_GRACE_MS` after the close, for the current act, once per voter.
+Act changes and reopening clear the revision.
+
+**Presence.** `connection_count` carries `projectors`, `projectorPaired` and
+`projectorArmed`, computed from socket attachments and the sessions table.
+Armed is written to the projector's attachment from its own `projector_status`
+report, so it survives hibernation and disappears with the socket. Clients
+drop projector telemetry when no projector is connected.
+
+**Media ownership.** `media_assets.act_id` places a file in one act's library;
+`assetReferences()` lists every act slot and cue that uses it. Ownership decides
+where a file is shown, references decide whether it may be deleted, and act
+deletion retires owned-but-unused files as well as unshared referenced ones.
+Generated fixtures carry `generated_test` / `test_show_id` and live under
+`test-shows/<id>/` in R2; stray sweeps and reset cover both namespaces.
+
+**Reset.** `clearShowData` removes show data; `resetShow` additionally restores
+the default configuration, judge panel and GO policy, revokes projector
+sessions and sweeps stray objects. Administrator sessions, secrets, Cloudflare
+configuration and cached typefaces are untouched.
+
+**Test shows.** `shared/test-show.ts` is a pure, seeded plan generator with a
+weighted scenario pool; `worker/test-show.ts` materialises a plan through the
+same code paths a real show uses. `GET/POST /api/admin/test-show` expose it,
+confirmed by phrase.
+
+**Diagnostics.** `GET /api/admin/diagnostics` returns realtime metrics from the
+instance and SQLite, and R2/database metrics cached for 45 seconds.

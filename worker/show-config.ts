@@ -1,6 +1,10 @@
 import { isRecord } from "../shared/trust";
 import { DEFAULT_EVENT_NAME } from "../shared/platform";
 import { DEFAULT_THEME_ID, isThemeId, type ThemeId } from "../shared/themes";
+import {
+  DEFAULT_SHOW_FLOW_POLICY,
+  type ShowFlowPolicy,
+} from "../shared/domain";
 
 export interface ShowInput {
   title: string;
@@ -9,12 +13,41 @@ export interface ShowInput {
   themeId: ThemeId;
   fontFamily: string;
   reactionsEnabled: boolean;
+  /**
+   * Absent when the caller did not send it: the stored policy is kept. A client
+   * that only knows about the title must never quietly reset how GO behaves.
+   */
+  flowPolicy?: ShowFlowPolicy;
 }
 
 const MAX_TITLE = 120;
 const MAX_TAGLINE = 160;
 const MAX_SHORT_NAME = 60;
 const MAX_FONT_FAMILY = 120;
+
+export function parseFlowPolicy(value: unknown): ShowFlowPolicy | null {
+  if (!isRecord(value)) return null;
+  const flag = (candidate: unknown, fallback: boolean): boolean =>
+    typeof candidate === "boolean" ? candidate : fallback;
+  return {
+    openJudgesOnScoring: flag(
+      value.openJudgesOnScoring,
+      DEFAULT_SHOW_FLOW_POLICY.openJudgesOnScoring,
+    ),
+    openVotingOnScoring: flag(
+      value.openVotingOnScoring,
+      DEFAULT_SHOW_FLOW_POLICY.openVotingOnScoring,
+    ),
+    scoreboardStep: flag(
+      value.scoreboardStep,
+      DEFAULT_SHOW_FLOW_POLICY.scoreboardStep,
+    ),
+    stopMediaOnScoring: flag(
+      value.stopMediaOnScoring,
+      DEFAULT_SHOW_FLOW_POLICY.stopMediaOnScoring,
+    ),
+  };
+}
 
 export function parseShowInput(value: unknown): ShowInput | null {
   if (
@@ -45,16 +78,26 @@ export function parseShowInput(value: unknown): ShowInput | null {
     fontFamily.length > MAX_FONT_FAMILY
   )
     return null;
-  return { title, tagline, shortName, themeId, fontFamily, reactionsEnabled };
+  const flowPolicy = parseFlowPolicy(value.flowPolicy);
+  return {
+    title,
+    tagline,
+    shortName,
+    themeId,
+    fontFamily,
+    reactionsEnabled,
+    ...(flowPolicy ? { flowPolicy } : {}),
+  };
 }
 
-export const defaultShowInput = (): ShowInput => ({
+export const defaultShowInput = (): Required<ShowInput> => ({
   title: DEFAULT_EVENT_NAME,
   tagline: "",
   shortName: "",
   themeId: DEFAULT_THEME_ID,
   fontFamily: "system-ui",
   reactionsEnabled: true,
+  flowPolicy: { ...DEFAULT_SHOW_FLOW_POLICY },
 });
 
 /**
@@ -71,6 +114,7 @@ export function upsertShow(
     ...defaultShowInput(),
     ...supplied,
   };
+  const policy = "flowPolicy" in supplied ? supplied.flowPolicy : undefined;
   return storage.transactionSync(() => {
     const timestamp = new Date().toISOString();
     const existing = storage.sql
@@ -94,6 +138,7 @@ export function upsertShow(
         timestamp,
         showIdentifier,
       );
+      if (policy) writeFlowPolicy(storage.sql, showIdentifier, policy);
       return { created: false };
     }
     storage.sql.exec(
@@ -112,6 +157,28 @@ export function upsertShow(
       timestamp,
       timestamp,
     );
+    writeFlowPolicy(
+      storage.sql,
+      showIdentifier,
+      policy ?? DEFAULT_SHOW_FLOW_POLICY,
+    );
     return { created: true };
   });
+}
+
+export function writeFlowPolicy(
+  sql: SqlStorage,
+  showIdentifier: string,
+  policy: ShowFlowPolicy,
+): void {
+  sql.exec(
+    `UPDATE shows SET flow_open_judges_on_scoring = ?, flow_open_voting_on_scoring = ?,
+       flow_scoreboard_step = ?, flow_stop_media_on_scoring = ?
+     WHERE id = ?`,
+    policy.openJudgesOnScoring ? 1 : 0,
+    policy.openVotingOnScoring ? 1 : 0,
+    policy.scoreboardStep ? 1 : 0,
+    policy.stopMediaOnScoring ? 1 : 0,
+    showIdentifier,
+  );
 }

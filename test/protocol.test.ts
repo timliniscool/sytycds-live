@@ -51,6 +51,7 @@ describe("realtime protocol", () => {
       activeAct: null,
       revealedResult: null,
       publicResults: null,
+      voteCloseRevision: null,
     };
     const wire = serialiseServerMessage({
       type: "snapshot",

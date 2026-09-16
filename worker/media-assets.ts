@@ -1,10 +1,19 @@
 import {
+  actId,
+  cueId,
   type CueOperation,
   type MediaAsset,
+  type MediaAssetReference,
+  type MediaKind,
   type MediaManifestEntry,
+  type MediaReadiness,
 } from "../shared/domain";
 import { isRecord } from "../shared/trust";
-import { isAssetReferenced, queueObjectForCleanup } from "./media-cleanup";
+import {
+  isAssetReferenced,
+  queueObjectForCleanup,
+  TEST_SHOW_OBJECT_PREFIX,
+} from "./media-cleanup";
 
 const MAX_MEDIA_BYTES = 2 * 1024 * 1024 * 1024;
 const ALLOWED_MIME_TYPES = new Set([
@@ -31,11 +40,35 @@ interface AssetRow extends Record<string, SqlStorageValue> {
   duration_ms: number | null;
   width: number | null;
   height: number | null;
+  act_id: string | null;
+  generated_test: number;
 }
 
-function rowToAsset(row: AssetRow, referenced: boolean): MediaAsset {
+const ASSET_COLUMNS = `id, object_key, original_filename, mime_type, size_bytes,
+  version_identifier, uploaded_at, duration_ms, width, height, act_id, generated_test`;
+
+export function mediaKind(mime: string): MediaKind {
+  if (mime.startsWith("image/")) return "image";
+  if (mime.startsWith("audio/")) return "audio";
+  if (mime.startsWith("video/")) return "video";
+  return "other";
+}
+
+function readiness(row: AssetRow): MediaReadiness {
+  const kind = mediaKind(row.mime_type);
+  if (kind === "image") return row.width && row.height ? "READY" : "UPLOADED";
+  if (kind === "audio" || kind === "video")
+    return row.duration_ms !== null ? "READY" : "UPLOADED";
+  return "UPLOADED";
+}
+
+function rowToAsset(
+  row: AssetRow,
+  references: readonly MediaAssetReference[],
+): MediaAsset {
   return {
     id: row.id,
+    kind: mediaKind(row.mime_type),
     objectKey: row.object_key,
     originalFilename: row.original_filename,
     mimeType: row.mime_type,
@@ -45,7 +78,11 @@ function rowToAsset(row: AssetRow, referenced: boolean): MediaAsset {
     durationMs: row.duration_ms,
     width: row.width,
     height: row.height,
-    referenced,
+    readiness: readiness(row),
+    actId: row.act_id ? actId(row.act_id) : null,
+    generatedTest: row.generated_test === 1,
+    references,
+    referenced: references.length > 0,
   };
 }
 
@@ -86,12 +123,82 @@ function rangeFromHeader(
     : undefined;
 }
 
+export interface UploadOptions {
+  /** The act whose media library receives the file; null for a show asset. */
+  actId?: string | null;
+}
+
+function actExists(
+  sql: SqlStorage,
+  showIdentifier: string,
+  actIdentifier: string,
+): boolean {
+  return (
+    sql
+      .exec<{ present: number }>(
+        "SELECT 1 AS present FROM acts WHERE show_id = ? AND id = ?",
+        showIdentifier,
+        actIdentifier,
+      )
+      .toArray().length > 0
+  );
+}
+
+export interface MediaAssetRecord {
+  id: string;
+  objectKey: string;
+  originalFilename: string;
+  mimeType: string;
+  sizeBytes: number;
+  versionIdentifier: string;
+  actId: string | null;
+  durationMs?: number | null;
+  width?: number | null;
+  height?: number | null;
+  generatedTest?: boolean;
+  testShowId?: string | null;
+}
+
+/**
+ * The one place a media row is written. Uploads and the test-show generator
+ * both come through here, so every asset carries the same ownership and test
+ * metadata whatever produced it. Call inside a transaction.
+ */
+export function insertMediaAssetRecord(
+  sql: SqlStorage,
+  showIdentifier: string,
+  record: MediaAssetRecord,
+  timestamp: string = new Date().toISOString(),
+): void {
+  sql.exec(
+    `INSERT INTO media_assets (id, show_id, object_key, original_filename, mime_type, size_bytes,
+       version_identifier, duration_ms, width, height, uploaded_at, deleted_at,
+       act_id, generated_test, test_show_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+    record.id,
+    showIdentifier,
+    record.objectKey,
+    record.originalFilename,
+    record.mimeType,
+    record.sizeBytes,
+    record.versionIdentifier,
+    record.durationMs ?? null,
+    record.width ?? null,
+    record.height ?? null,
+    timestamp,
+    record.actId,
+    record.generatedTest ? 1 : 0,
+    record.testShowId ?? null,
+  );
+}
+
 export async function uploadMediaAsset(
   storage: DurableObjectStorage,
   bucket: R2Bucket,
   showIdentifier: string,
   request: Request,
   filename: string | null,
+  options: UploadOptions = {},
 ): Promise<
   { ok: true; asset: MediaAsset } | { ok: false; status: number; error: string }
 > {
@@ -115,6 +222,9 @@ export async function uploadMediaAsset(
         "A valid filename, content length, and streaming body are required",
     };
   }
+  const owner = options.actId ?? null;
+  if (owner !== null && !actExists(storage.sql, showIdentifier, owner))
+    return { ok: false, status: 404, error: "Act not found" };
   const id = `asset-${crypto.randomUUID()}`;
   const objectKey = `${showIdentifier}/${id}`;
   const object = await bucket.put(objectKey, request.body, {
@@ -122,7 +232,7 @@ export async function uploadMediaAsset(
       contentType: mimeType,
       cacheControl: "private, max-age=31536000, immutable",
     },
-    customMetadata: { assetId: id },
+    customMetadata: { assetId: id, ...(owner ? { actId: owner } : {}) },
   });
   if (object.size !== contentLength) {
     await bucket.delete(objectKey);
@@ -135,16 +245,18 @@ export async function uploadMediaAsset(
   const timestamp = new Date().toISOString();
   try {
     storage.transactionSync(() => {
-      storage.sql.exec(
-        `INSERT INTO media_assets (id, show_id, object_key, original_filename, mime_type, size_bytes, version_identifier, duration_ms, width, height, uploaded_at, deleted_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, ?, NULL)`,
-        id,
+      insertMediaAssetRecord(
+        storage.sql,
         showIdentifier,
-        objectKey,
-        cleanFilename,
-        mimeType,
-        object.size,
-        object.version,
+        {
+          id,
+          objectKey,
+          originalFilename: cleanFilename,
+          mimeType,
+          sizeBytes: object.size,
+          versionIdentifier: object.version,
+          actId: owner,
+        },
         timestamp,
       );
       storage.sql.exec(
@@ -159,19 +271,23 @@ export async function uploadMediaAsset(
   }
   return {
     ok: true,
-    asset: {
-      id,
-      objectKey,
-      originalFilename: cleanFilename,
-      mimeType,
-      sizeBytes: object.size,
-      versionIdentifier: object.version,
-      uploadedAt: timestamp,
-      durationMs: null,
-      width: null,
-      height: null,
-      referenced: false,
-    },
+    asset: rowToAsset(
+      {
+        id,
+        object_key: objectKey,
+        original_filename: cleanFilename,
+        mime_type: mimeType,
+        size_bytes: object.size,
+        version_identifier: object.version,
+        uploaded_at: timestamp,
+        duration_ms: null,
+        width: null,
+        height: null,
+        act_id: owner,
+        generated_test: 0,
+      },
+      [],
+    ),
   };
 }
 
@@ -210,29 +326,84 @@ export function listReferencedAssets(
     }));
 }
 
+/**
+ * Who uses what: every act slot and every cue that names an asset, keyed by
+ * asset. This is the reference model the library, the deletion preview and
+ * the orphan sweep all read from; nothing infers a reference from a filename.
+ */
+export function assetReferences(
+  sql: SqlStorage,
+  showIdentifier: string,
+): Map<string, MediaAssetReference[]> {
+  const references = new Map<string, MediaAssetReference[]>();
+  const add = (assetId: string | null, reference: MediaAssetReference) => {
+    if (!assetId) return;
+    const list = references.get(assetId) ?? [];
+    list.push(reference);
+    references.set(assetId, list);
+  };
+  for (const act of sql
+    .exec<{
+      id: string;
+      public_image_asset_id: string | null;
+      performance_asset_id: string | null;
+      backing_audio_asset_id: string | null;
+    }>(
+      `SELECT id, public_image_asset_id, performance_asset_id, backing_audio_asset_id
+       FROM acts WHERE show_id = ? ORDER BY order_index`,
+      showIdentifier,
+    )
+    .toArray()) {
+    const owner = actId(act.id);
+    add(act.public_image_asset_id, { kind: "act_image", actId: owner });
+    add(act.performance_asset_id, {
+      kind: "performance_visual",
+      actId: owner,
+    });
+    add(act.backing_audio_asset_id, { kind: "backing_audio", actId: owner });
+  }
+  for (const row of sql
+    .exec<{ asset_id: string; cue_id: string; act_id: string }>(
+      `SELECT r.asset_id, r.cue_id, c.act_id FROM cue_asset_references r
+       JOIN cues c ON c.show_id = r.show_id AND c.id = r.cue_id
+       WHERE r.show_id = ? ORDER BY c.act_id, c.position`,
+      showIdentifier,
+    )
+    .toArray()) {
+    add(row.asset_id, {
+      kind: "cue",
+      actId: actId(row.act_id),
+      cueId: cueId(row.cue_id),
+    });
+  }
+  return references;
+}
+
+/**
+ * The library. With an act, returns that act's library: the files it owns plus
+ * any shared file it references. Without one, every live asset of the show.
+ */
 export function listMediaAssets(
   sql: SqlStorage,
   showIdentifier: string,
+  actIdentifier: string | null = null,
 ): MediaAsset[] {
+  const references = assetReferences(sql, showIdentifier);
   return sql
-    .exec<AssetRow & { referenced: number }>(
-      `SELECT m.id, m.object_key, m.original_filename, m.mime_type, m.size_bytes,
-              m.version_identifier, m.uploaded_at, m.duration_ms, m.width, m.height,
-              EXISTS (
-                SELECT 1 FROM cue_asset_references r WHERE r.asset_id = m.id
-              ) OR EXISTS (
-                SELECT 1 FROM acts a WHERE a.show_id = m.show_id AND (
-                  a.public_image_asset_id = m.id
-                  OR a.performance_asset_id = m.id
-                  OR a.backing_audio_asset_id = m.id)
-              ) AS referenced
-       FROM media_assets m
+    .exec<AssetRow>(
+      `SELECT ${ASSET_COLUMNS} FROM media_assets m
        WHERE m.show_id = ? AND m.deleted_at IS NULL
        ORDER BY m.uploaded_at DESC`,
       showIdentifier,
     )
     .toArray()
-    .map((row) => rowToAsset(row, row.referenced === 1));
+    .map((row) => rowToAsset(row, references.get(row.id) ?? []))
+    .filter(
+      (asset) =>
+        actIdentifier === null ||
+        asset.actId === actIdentifier ||
+        asset.references.some((reference) => reference.actId === actIdentifier),
+    );
 }
 
 export function updateMediaMetadata(
@@ -282,8 +453,8 @@ export async function deleteMediaAsset(
 ): Promise<"deleted" | "not_found" | "referenced"> {
   const row = storage.sql
     .exec<AssetRow>(
-      `SELECT id, object_key, original_filename, mime_type, size_bytes, version_identifier, uploaded_at, duration_ms, width, height
-     FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
+      `SELECT ${ASSET_COLUMNS} FROM media_assets m
+       WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
       showIdentifier,
       assetId,
     )
@@ -352,13 +523,6 @@ async function removeQueuedObject(
   }
 }
 
-function mediaKind(mime: string): "image" | "audio" | "video" | "other" {
-  if (mime.startsWith("image/")) return "image";
-  if (mime.startsWith("audio/")) return "audio";
-  if (mime.startsWith("video/")) return "video";
-  return "other";
-}
-
 /** Uploads first, then atomically retargets every reference; the old bytes leave last. */
 export async function replaceMediaAsset(
   storage: DurableObjectStorage,
@@ -372,9 +536,8 @@ export async function replaceMediaAsset(
 > {
   const old = storage.sql
     .exec<AssetRow>(
-      `SELECT id, object_key, original_filename, mime_type, size_bytes,
-      version_identifier, uploaded_at, duration_ms, width, height
-     FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
+      `SELECT ${ASSET_COLUMNS} FROM media_assets m
+       WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
       showIdentifier,
       oldAssetId,
     )
@@ -386,6 +549,7 @@ export async function replaceMediaAsset(
     showIdentifier,
     request,
     filename,
+    { actId: old.act_id },
   );
   if (!uploaded.ok) return uploaded;
   if (mediaKind(old.mime_type) !== mediaKind(uploaded.asset.mimeType)) {
@@ -486,6 +650,11 @@ export async function replaceMediaAsset(
   return uploaded;
 }
 
+/** Whether an object key belongs to the generated-test namespace. */
+export function isTestShowObjectKey(objectKey: string): boolean {
+  return objectKey.startsWith(TEST_SHOW_OBJECT_PREFIX);
+}
+
 export async function serveMediaAsset(
   sql: SqlStorage,
   bucket: R2Bucket,
@@ -496,8 +665,8 @@ export async function serveMediaAsset(
 ): Promise<Response> {
   const asset = sql
     .exec<AssetRow>(
-      `SELECT id, object_key, original_filename, mime_type, size_bytes, version_identifier, uploaded_at, duration_ms, width, height
-     FROM media_assets WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
+      `SELECT ${ASSET_COLUMNS} FROM media_assets m
+       WHERE show_id = ? AND id = ? AND deleted_at IS NULL`,
       showIdentifier,
       assetId,
     )

@@ -165,7 +165,7 @@ which is the current Wrangler shape and needs no migration block.
    exist. Its explicit reset permanently removes that scoring data.
 4. Generate an eight-digit projector code, pair `/projector`, and confirm the
    live status. Reissuing the code invalidates the unused previous code.
-5. In **ACTS & CUES**, add the running order, upload media, choose public act
+5. In **ACTS & MEDIA**, add the running order, upload media, choose public act
    images, and build the ordered cue stacks. Browser-extracted duration and
    dimensions appear in the media library; referenced files cannot be deleted.
 6. Set intermission and emergency text, then run **RUN PREFLIGHT**. Fix anything
