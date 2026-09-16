@@ -45,6 +45,17 @@ export function applyShowTheme(
   } as const;
   for (const [name, value] of Object.entries(properties))
     root.style.setProperty(name, value);
+  // The browser's own chrome (address bar, overscroll) follows the theme too.
+  root.style.colorScheme = isLightColour(palette.background) ? "light" : "dark";
+  let meta = document.querySelector<HTMLMetaElement>(
+    'meta[name="theme-color"]',
+  );
+  if (!meta) {
+    meta = document.createElement("meta");
+    meta.name = "theme-color";
+    document.head.appendChild(meta);
+  }
+  meta.content = palette.background;
   root.style.setProperty(
     "--theme-font",
     fontFamily && fontFamily !== "system-ui"
@@ -59,6 +70,17 @@ export function applyShowTheme(
  * never follows an act override; it stays in the show's own theme so the
  * console does not change colour under the operator mid-show.
  */
+/** Relative luminance of a #rrggbb colour, enough to pick a colour scheme. */
+function isLightColour(hex: string): boolean {
+  const match = /^#?([0-9a-f]{6})$/iu.exec(hex.trim());
+  if (!match) return false;
+  const value = Number.parseInt(match[1]!, 16);
+  const channel = (shift: number) => ((value >> shift) & 0xff) / 255;
+  const luminance =
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0);
+  return luminance > 0.5;
+}
+
 export function effectiveAppearance(
   show: { themeId: ThemeId; fontFamily: string },
   act: { appearance: ActAppearance } | null | undefined,

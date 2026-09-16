@@ -21,7 +21,10 @@
   --admin-motion: 140ms ease-out;
   --admin-z-status: 20;
   color: var(--theme-text);
-  background: var(--surface-theme, #101417);
+  /* The document itself wears the show theme, so nothing outside a surface —
+     overscroll, the area behind a phone's address bar, a short page — shows a
+     different colour from the surface drawn on it. */
+  background: var(--theme-background, var(--surface-theme, #101417));
   font-family:
     Inter,
     ui-sans-serif,
@@ -54,6 +57,7 @@ body {
   min-width: 320px;
   min-height: 100dvh;
   margin: 0;
+  background: var(--theme-background, var(--surface-theme, #101417));
 }
 
 button,
