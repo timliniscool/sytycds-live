@@ -279,6 +279,15 @@ export function DangerZone({ eventTitle, testShow }: DangerZoneProps) {
         )}
       </div>
 
+      <ScoringResetPanel
+        busy={busy}
+        setBusy={setBusy}
+        report={(message, isFailure) => {
+          setFailed(isFailure);
+          setNotice(message);
+        }}
+      />
+
       <TestShowPanel
         current={testShow}
         busy={busy}
@@ -352,6 +361,115 @@ export function DangerZone({ eventTitle, testShow }: DangerZoneProps) {
         </output>
       )}
     </section>
+  );
+}
+
+/**
+ * The hard reset of scoring alone: every audience vote, judge score and
+ * finalised result goes, the acts and their media stay. Typed confirmation is
+ * proportionate here — a whole evening's scores are destroyed — and the client
+ * then sends the server's separate fixed phrase.
+ */
+function ScoringResetPanel({
+  busy,
+  setBusy,
+  report,
+}: {
+  busy: boolean;
+  setBusy: (value: boolean) => void;
+  report: (message: string, failed: boolean) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [phrase, setPhrase] = useState("");
+  const confirmed = phrase.trim().toUpperCase() === "RESET VOTES";
+
+  async function reset(): Promise<void> {
+    setBusy(true);
+    const result = await request<{
+      audienceVotes: number;
+      judgeScores: number;
+      finalisedResults: number;
+    }>("/api/admin/scoring/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "RESET SCORING" }),
+    });
+    setBusy(false);
+    setOpen(false);
+    setPhrase("");
+    if ("error" in result) {
+      report(result.error, true);
+      return;
+    }
+    report(
+      `Scoring reset. ${result.audienceVotes} audience vote${result.audienceVotes === 1 ? "" : "s"}, ${result.judgeScores} judge score${result.judgeScores === 1 ? "" : "s"} and ${result.finalisedResults} finalised result${result.finalisedResults === 1 ? "" : "s"} removed. Acts, media, judges and the running order are untouched; voting and judge scoring are closed.`,
+      false,
+    );
+  }
+
+  return (
+    <div className="danger-zone__action">
+      <div className="danger-zone__copy">
+        <h3>Reset all votes and scores</h3>
+        <p>
+          Removes every audience vote, judge score, finalised result and results
+          reveal for every act, so scoring can start again from nothing — for a
+          rehearsal, or to revisit acts that were already finalised. Voting and
+          judge scoring close.
+        </p>
+        <p>
+          <b>Kept:</b> every act, performer, running order, media file, cue,
+          judge panel and link, and all show settings.
+        </p>
+      </div>
+      {!open ? (
+        <button
+          type="button"
+          className="danger-zone__arm"
+          disabled={busy}
+          onClick={() => setOpen(true)}
+        >
+          RESET ALL VOTES & SCORES…
+        </button>
+      ) : (
+        <div className="danger-zone__confirm" role="alertdialog">
+          <strong>
+            Every vote and score in the show is destroyed. This cannot be
+            undone.
+          </strong>
+          <label htmlFor="scoring-reset-phrase">
+            Type <b>RESET VOTES</b> to confirm
+          </label>
+          <input
+            id="scoring-reset-phrase"
+            type="text"
+            autoComplete="off"
+            value={phrase}
+            onChange={(event) => setPhrase(event.target.value)}
+          />
+          <div className="danger-zone__confirm-actions">
+            <button
+              type="button"
+              className="danger-zone__fire"
+              disabled={busy || !confirmed}
+              onClick={() => void reset()}
+            >
+              {busy ? "RESETTING…" : "RESET ALL VOTES & SCORES"}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => {
+                setOpen(false);
+                setPhrase("");
+              }}
+            >
+              CANCEL
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 

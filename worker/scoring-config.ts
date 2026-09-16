@@ -102,6 +102,76 @@ export type ScoringConfigurationResult =
   | { ok: true; issued: JudgeLinkIssue[]; scoringReset: boolean }
   | { ok: false; status: 400 | 409; reason: string };
 
+/** Every scoring table, children first. Acts, cues, media and judges stay. */
+const SCORING_TABLES = [
+  "result_snapshots",
+  "finalised_results_v2",
+  "finalised_results",
+  "audience_aggregates",
+  "audience_votes",
+  "show_judge_submissions",
+  "show_judge_permissions",
+  "judge_submissions",
+  "judge_permissions",
+] as const;
+
+/**
+ * Removes every vote, judge score, permission and finalised result for the
+ * show and returns the stage to a closed, hidden scoring state. The acts, the
+ * running order, media and the judge panel are untouched. Used both when the
+ * judge panel is reconfigured over existing scores and by the operator's
+ * explicit "reset all votes and scores".
+ */
+export function clearScoringData(
+  sql: SqlStorage,
+  showIdentifier: string,
+): { audienceVotes: number; judgeScores: number; finalisedResults: number } {
+  const count = (table: string) =>
+    sql
+      .exec<{ count: number }>(
+        `SELECT COUNT(*) AS count FROM ${table} WHERE show_id = ?`,
+        showIdentifier,
+      )
+      .one().count;
+  const summary = {
+    audienceVotes: count("audience_votes"),
+    judgeScores: count("show_judge_submissions"),
+    finalisedResults: count("finalised_results_v2"),
+  };
+  for (const table of SCORING_TABLES)
+    sql.exec(`DELETE FROM ${table} WHERE show_id = ?`, showIdentifier);
+  sql.exec(
+    "UPDATE shows SET result_reveal_state = 'HIDDEN', audience_vote_state = 'CLOSED' WHERE id = ?",
+    showIdentifier,
+  );
+  sql.exec(
+    `UPDATE show_runtime SET results_stage = 'HIDDEN', results_revealed_groups = 0,
+       global_judge_permission = 'CLOSED', vote_close_revision = NULL, vote_closed_at = NULL
+     WHERE show_id = ?`,
+    showIdentifier,
+  );
+  return summary;
+}
+
+/**
+ * The operator's hard reset of every vote and score, leaving the show itself
+ * as built. The revision moves so every connected surface re-derives.
+ */
+export function resetScoringData(
+  storage: DurableObjectStorage,
+  showIdentifier: string,
+): { audienceVotes: number; judgeScores: number; finalisedResults: number } {
+  return storage.transactionSync(() => {
+    const summary = clearScoringData(storage.sql, showIdentifier);
+    storage.sql.exec(
+      "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
+      new Date().toISOString(),
+      showIdentifier,
+    );
+    return summary;
+  });
+}
+
 /**
  * Applies the whole judge configuration and the audience weight atomically: the
  * panel size, every judge's name and the weighting land together or not at all,
@@ -144,27 +214,7 @@ export async function applyScoringConfiguration(
 
   return storage.transactionSync(() => {
     const timestamp = new Date().toISOString();
-    if (locked) {
-      for (const table of [
-        "result_snapshots",
-        "finalised_results_v2",
-        "finalised_results",
-        "audience_aggregates",
-        "audience_votes",
-        "show_judge_submissions",
-        "show_judge_permissions",
-        "judge_submissions",
-        "judge_permissions",
-      ])
-        storage.sql.exec(
-          `DELETE FROM ${table} WHERE show_id = ?`,
-          showIdentifier,
-        );
-      storage.sql.exec(
-        "UPDATE shows SET result_reveal_state = 'HIDDEN', audience_vote_state = 'CLOSED' WHERE id = ?",
-        showIdentifier,
-      );
-    }
+    if (locked) clearScoringData(storage.sql, showIdentifier);
     storage.sql.exec(
       "DELETE FROM show_judge_permissions WHERE show_id = ?",
       showIdentifier,

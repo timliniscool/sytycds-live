@@ -1,3 +1,4 @@
+import type React from "react";
 import { useEffect, useRef, useState } from "react";
 
 import type {
@@ -78,9 +79,20 @@ export function ScoreboardGraphic({
     .sort((left, right) => left.slot - right.slot)
     .map(judgeTile);
   const identity = act ? actIdentity(act) : null;
+  // Up to four judges sit beside the audience panel in one row. Five to eight
+  // need the whole width: the audience panel becomes a band above and the
+  // tiles form two rows of ceil(n/2) columns with type scaled to the count.
+  const dense = tiles.length > 4;
+  const columns = dense
+    ? Math.ceil(tiles.length / 2)
+    : Math.min(Math.max(tiles.length, 1), 4);
 
   return (
-    <section className="stage scoreboard" key={act?.id ?? "scoreboard"}>
+    <section
+      className={`stage scoreboard${dense ? " scoreboard--dense" : ""}`}
+      key={act?.id ?? "scoreboard"}
+      style={{ "--judges": tiles.length } as React.CSSProperties}
+    >
       <header className="scoreboard__act">
         <p className="stage__kicker">Scores</p>
         <h1 className="scoreboard__performer">
@@ -117,7 +129,7 @@ export function ScoreboardGraphic({
         <ul
           className="scoreboard__judges"
           style={{
-            gridTemplateColumns: `repeat(${Math.min(Math.max(tiles.length, 1), 4)}, minmax(0, 1fr))`,
+            gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))`,
           }}
         >
           {tiles.map((tile, index) => (

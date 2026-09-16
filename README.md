@@ -768,6 +768,35 @@ rather than claiming a clean bucket.
 
 ---
 
+## Resetting all votes and scores
+
+_SETUP & PREFLIGHT → 04 / DANGER → **RESET ALL VOTES & SCORES…**_
+
+Removes every audience vote, judge score, finalised result and results reveal
+for every act, and closes voting and judge scoring, while keeping every act,
+performer, media file, cue, judge link and setting. Use it to rerun scoring
+after a rehearsal, or to revisit acts that were already finalised. Type
+**RESET VOTES** to confirm.
+
+Changing the current act is always allowed, including to an act that has
+already been finalised; the one exception is while audience voting is open,
+which must be closed first so no phone can vote for the wrong act.
+
+---
+
+## Analytics
+
+At the very bottom of the SHOW view, **ANALYTICS** is a collapsed panel that
+reports on request: connected phones, judges and projectors (and whether the
+projector's audio is armed), votes for the current act and the show, the
+revision and display state, socket counters since the coordinator started,
+projector media and cache state, R2 storage by namespace, database size and
+schema version, and the most recent refused commands and media errors.
+Nothing is polled; press **REQUEST ANALYTICS** (or **RE-LIST STORAGE** to
+bypass the 45-second storage cache).
+
+---
+
 ## Generating a test show
 
 _SETUP & PREFLIGHT → 04 / DANGER → **GENERATE TEST SHOW…**_
@@ -824,9 +853,10 @@ is nothing outstanding.
 
 ## Help inside the console
 
-The last item in the console's navigation is **? HELP & OPERATOR GUIDE**. It
-renders this manual inside the app, with a contents rail and a search box, so
-the guide is available on the night without another device.
+The small round **? HELP** button in the bottom-left corner of the console
+opens this manual in an overlay, with a contents rail and a search box, so the
+guide is available on the night without another device and without leaving
+the view you are working in. **CLOSE** returns you exactly where you were.
 
 Opening it changes nothing: it sends no command and touches no show state.
 

@@ -104,6 +104,8 @@ import {
 import {
   applyScoringConfiguration,
   parseScoringConfiguration,
+  RESET_SCORING_CONFIRMATION,
+  resetScoringData,
 } from "./scoring-config";
 import { searchGoogleFonts } from "./google-fonts";
 import {
@@ -377,6 +379,12 @@ export class ShowCoordinator extends DurableObject<Env> {
     }
     if (url.pathname === "/api/admin/show/reset" && request.method === "POST") {
       return this.handleResetShow(request);
+    }
+    if (
+      url.pathname === "/api/admin/scoring/reset" &&
+      request.method === "POST"
+    ) {
+      return this.handleResetScoring(request);
     }
     if (
       url.pathname === "/api/admin/scoring-config" &&
@@ -863,6 +871,36 @@ export class ShowCoordinator extends DurableObject<Env> {
     this.broadcastSnapshots("judge");
     this.sendConnectionCount();
     return Response.json(result);
+  }
+
+  /**
+   * Hard reset of every audience vote, judge score and finalised result. Acts,
+   * media, judges and the venue are kept, so an operator can rerun scoring —
+   * for a rehearsal, or to revisit finalised acts — without rebuilding the
+   * show. Confirmed by the same fixed phrase the judge-panel reset uses.
+   */
+  private async handleResetScoring(request: Request): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true))) {
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    }
+    const body = await this.adminBody(request);
+    if (!isRecord(body) || body.confirm !== RESET_SCORING_CONFIRMATION) {
+      return Response.json(
+        { error: `Send confirm: "${RESET_SCORING_CONFIRMATION}"` },
+        { status: 400 },
+      );
+    }
+    const summary = resetScoringData(this.ctx.storage, PRIMARY_SHOW_ID);
+    recordAuditEvent(this.ctx.storage.sql, PRIMARY_SHOW_ID, {
+      type: "scoring.reset",
+      actor: "admin",
+      data: summary,
+    });
+    this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
+    this.broadcastSnapshots("audience");
+    this.broadcastSnapshots("judge");
+    return Response.json(summary);
   }
 
   /** Every cached typeface, so an act override can only choose what exists. */

@@ -58,6 +58,29 @@ export const ARM_REQUIRED = "ENABLE AUDIO & ENTER SHOW has not been pressed";
 const SILENT_WAV =
   "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
 
+let silentProbeUrl: string | null = null;
+
+/**
+ * The probe source as a blob URL where the browser offers them; some engines
+ * refuse to start a media element from a data: URI even inside a gesture.
+ */
+function silentProbeSource(): string {
+  if (silentProbeUrl) return silentProbeUrl;
+  try {
+    const base64 = SILENT_WAV.slice(SILENT_WAV.indexOf(",") + 1);
+    const binary = atob(base64);
+    const bytes = Uint8Array.from(binary, (character) =>
+      character.charCodeAt(0),
+    );
+    silentProbeUrl = URL.createObjectURL(
+      new Blob([bytes], { type: "audio/wav" }),
+    );
+  } catch {
+    silentProbeUrl = SILENT_WAV;
+  }
+  return silentProbeUrl;
+}
+
 type AudioContextConstructor = new () => AudioContext;
 
 function audioContextConstructor(): AudioContextConstructor | null {
@@ -344,7 +367,7 @@ export class ProjectorMediaEngine {
     this.probing = true;
     element.muted = false;
     element.volume = 0;
-    if (!loadedSource) element.src = SILENT_WAV;
+    if (!loadedSource) element.src = silentProbeSource();
     let played: Promise<void>;
     try {
       // `play()` may return undefined in very old engines; normalise.
@@ -390,13 +413,18 @@ export class ProjectorMediaEngine {
       (error: unknown) => {
         if (!loadedSource) detachProbeSource();
         restore();
-        return {
-          ok: false,
-          detail:
-            error instanceof Error
-              ? error.message
-              : "browser refused to enable audio",
-        };
+        const name = (error as { name?: string } | null)?.name ?? "";
+        const detail =
+          error instanceof Error
+            ? `${name ? `${name}: ` : ""}${error.message}`
+            : "browser refused to enable audio";
+        // Only NotAllowedError is the autoplay policy saying no. Anything else
+        // (the probe's own source not decodable, a load interrupted, an
+        // unsupported format) says nothing about whether the gesture unlocked
+        // playback, so it must not turn a genuine press into "refused".
+        if (name && name !== "NotAllowedError")
+          return { ok: true, detail: `element probe skipped (${detail})` };
+        return { ok: false, detail };
       },
     );
   }

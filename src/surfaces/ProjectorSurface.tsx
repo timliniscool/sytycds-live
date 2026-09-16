@@ -181,8 +181,13 @@ export default function ProjectorSurface() {
     }
     const arming = engine.arm();
     const armed = await arming;
+    // The browser's own reason is the only useful thing to show here; a
+    // generic "refused" hides whether it was policy, a codec or a bad load.
+    const reason = engine.telemetry().error;
     setArmError(
-      armed ? null : "This browser refused to enable audio. Try again.",
+      armed
+        ? null
+        : `This browser did not enable audio${reason ? ` (${reason})` : ""}. Press again, or continue without audio.`,
     );
     if (armed) setEnteredShow(true);
   }

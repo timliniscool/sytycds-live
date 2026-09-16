@@ -22,6 +22,7 @@ import type {
 } from "../../shared/admin-command";
 import { EmergencyPanel } from "../admin/EmergencyPanel";
 import { HistoryPanel } from "../admin/HistoryPanel";
+import { AnalyticsPanel } from "../admin/AnalyticsPanel";
 import { MediaConsole } from "../admin/MediaConsole";
 import { JudgeEntry } from "../math/MathExpression";
 import { ResultsPanel } from "../admin/ResultsPanel";
@@ -52,7 +53,7 @@ const HelpPanel = lazy(async () => {
 
 type AuthenticationState =
   "checking" | "submitting" | "signed-out" | "signed-in" | "failed";
-type ConsoleView = "show" | "acts" | "results" | "setup" | "history" | "help";
+type ConsoleView = "show" | "acts" | "results" | "setup" | "history";
 
 interface PublicConfig {
   title: string;
@@ -234,7 +235,6 @@ const VIEWS: readonly { view: ConsoleView; label: string }[] = [
   { view: "results", label: "RESULTS" },
   { view: "setup", label: "SETUP & PREFLIGHT" },
   { view: "history", label: "HISTORY" },
-  { view: "help", label: "? HELP & OPERATOR GUIDE" },
 ];
 function id(): string {
   return crypto.randomUUID().replaceAll("-", "");
@@ -265,6 +265,7 @@ function Console() {
   const clientRef = useRef<RealtimeClient | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [view, setView] = useState<ConsoleView>("show");
+  const [helpOpen, setHelpOpen] = useState(false);
   if (!clientRef.current)
     clientRef.current = new RealtimeClient({
       url: showWebSocketUrl(window.location),
@@ -580,13 +581,6 @@ function Console() {
           <HistoryPanel
             revision={revision === null ? null : Number(revision)}
           />
-        )}
-        {view === "help" && (
-          <Suspense
-            fallback={<p className="admin-loading">Loading the guide…</p>}
-          >
-            <HelpPanel />
-          </Suspense>
         )}
         {view === "acts" && (
           <Suspense
@@ -966,9 +960,49 @@ function Console() {
                 </button>
               </div>
             </section>
+            <AnalyticsPanel />
           </>
         )}
       </div>
+      {/*
+        The operator guide is one press away from every view, out of the way
+        in the corner, and never a destination the console has to switch to.
+      */}
+      <button
+        type="button"
+        className="admin-help-button"
+        aria-haspopup="dialog"
+        aria-expanded={helpOpen}
+        title="Help & operator guide"
+        onClick={() => setHelpOpen(true)}
+      >
+        <span aria-hidden="true">?</span>
+        <small>HELP</small>
+      </button>
+      {helpOpen && (
+        <div
+          className="admin-help"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Help and operator guide"
+        >
+          <div className="admin-help__sheet">
+            <header className="admin-help__head">
+              <p>HELP & OPERATOR GUIDE</p>
+              <button type="button" onClick={() => setHelpOpen(false)}>
+                CLOSE
+              </button>
+            </header>
+            <div className="admin-help__body">
+              <Suspense
+                fallback={<p className="admin-loading">Loading guide…</p>}
+              >
+                <HelpPanel />
+              </Suspense>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

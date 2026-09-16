@@ -797,7 +797,11 @@ class FakeAudio {
   refuse = false;
   play(): Promise<void> {
     this.plays += 1;
-    if (this.refuse) return Promise.reject(new Error("NotAllowedError"));
+    if (this.refuse) {
+      const error = new Error("play() failed because the user didn't interact");
+      error.name = "NotAllowedError";
+      return Promise.reject(error);
+    }
     this.paused = false;
     return Promise.resolve();
   }

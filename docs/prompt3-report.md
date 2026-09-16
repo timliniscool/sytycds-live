@@ -205,3 +205,43 @@ tests that pinned the old parser, tile and results shapes.
   calculator would; the old parser refused it.
 - Local dev data: the tie-heavy test show (seed `CAFE1234`) plus the acts
   created during verification are still in the local coordinator.
+
+---
+
+## Follow-up (same day)
+
+Six operator reports after the first hand-over, each addressed and verified:
+
+- **"This browser refused to enable audio" on real devices.** The arming probe
+  treated every `play()` rejection as a refusal, including a probe source the
+  device could not decode. Only `NotAllowedError` (the autoplay policy itself)
+  now fails arming; other errors are recorded but do not block. The silent
+  probe is a blob URL rather than a data: URI, and the gate now shows the
+  browser's actual reason instead of a generic message.
+- **Help & operator guide** is a small round **? HELP** button fixed to the
+  bottom-left of the console and opens the guide in an overlay sheet; it is no
+  longer a console view.
+- **More than four judges** broke the scoreboard: tiles clipped their values
+  and truncated names. With five to eight judges the audience panel becomes a
+  band and the tiles take the full width in two rows of `ceil(n/2)` columns,
+  with type scaled by judge count. Tile labels also lost the wide tracking
+  that made nine-letter names overflow four-column tiles. **Live** with seven
+  judges: every tile's content fits inside it.
+- **+ ADD ACT during a live performance.** Verified live: the new-act form,
+  its typed fields and queued file all survived an act change, a display-mode
+  change and audience voting opening, and the act was then created (with its
+  file uploaded) while voting was open.
+- **Switching between acts, including finalised ones,** is allowed by the
+  state machine; only open audience voting blocks a change, by design, and the
+  console says so. A hard **RESET ALL VOTES & SCORES…** action (Setup → Danger,
+  typed confirmation `RESET VOTES`, server phrase `RESET SCORING`) clears every
+  vote, judge score, permission and finalised result and returns the stage to
+  closed/hidden while keeping acts, media, judges and settings.
+  `POST /api/admin/scoring/reset`; `test/scoring-reset.test.ts`.
+- **Analytics** sit at the bottom of the SHOW view as a collapsed panel that
+  requests `GET /api/admin/diagnostics` on demand (never polled): audience
+  phones, judges connected, projector connection and armed state, votes,
+  revision, socket counters, refused/resync/error counts, projector media and
+  cache, R2 storage (show, test, fonts, total), database size and schema, and
+  the most recent refusals and media errors. **RE-LIST STORAGE** bypasses the
+  server's 45 s cache.

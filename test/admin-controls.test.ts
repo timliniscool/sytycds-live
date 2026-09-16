@@ -76,6 +76,7 @@ const ROUTED_ENDPOINTS: readonly string[] = [
   "/api/admin/fonts",
   "/api/admin/show",
   "/api/admin/scoring-config",
+  "/api/admin/scoring/reset",
   "/api/admin/judges",
   "/api/admin/acts",
   "/api/admin/cues",
