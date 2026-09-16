@@ -1,7 +1,3 @@
-import { DEFAULT_SHOW_FLOW_POLICY } from "../shared/domain";
-import { defaultJudgeName } from "../shared/judges";
-import { DEFAULT_EVENT_NAME } from "../shared/platform";
-import { DEFAULT_THEME_ID } from "../shared/themes";
 import { isRecord } from "../shared/trust";
 import {
   drainMediaCleanupQueue,
@@ -9,17 +5,11 @@ import {
   pendingCleanupCount,
   queueObjectForCleanup,
 } from "./media-cleanup";
-import { applyScoringConfiguration } from "./scoring-config";
-import { writeFlowPolicy } from "./show-config";
 
 /** The exact phrase an operator must type; nothing shorter is accepted. */
 export const RESET_CONFIRMATION = "RESET SHOW";
 /** Deleting a single act is destructive too, and is confirmed the same way. */
 export const DELETE_ACT_CONFIRMATION = "DELETE ACT";
-
-/** The default panel a reset restores: four judges, named by slot. */
-export const DEFAULT_JUDGE_COUNT = 4;
-export const DEFAULT_AUDIENCE_WEIGHT = 0.5;
 
 export function isResetConfirmed(value: unknown): boolean {
   return isRecord(value) && value.confirm === RESET_CONFIRMATION;
@@ -37,7 +27,7 @@ export interface ShowResetResult {
    * the truth rather than a clean-sounding summary.
    */
   mediaCleanupComplete: boolean;
-  /** Projector sessions revoked; the display returns to its pairing screen. */
+  /** Kept for API compatibility; venue projector sessions are retained. */
   projectorSessionsRevoked: number;
 }
 
@@ -46,8 +36,8 @@ export interface ShowResetResult {
  * itself in place: acts, cues, media (queued for R2 cleanup), votes, judge
  * submissions and permissions, frozen results, the current act, display,
  * voting and reveal state, the show-flow step, the pairing code, the command
- * log and any test-show record. Configuration is untouched here; `resetShow`
- * restores that separately and the test-show generator deliberately keeps it.
+ * log and any test-show record. Venue setup and event configuration are
+ * deliberately untouched.
  *
  * Call inside a transaction. Returns the number of acts removed.
  */
@@ -92,6 +82,7 @@ export function clearShowData(sql: SqlStorage, showIdentifier: string): number {
     "cues",
     "media_assets",
     "projector_pairing_codes",
+    "act_performers",
     "acts",
     "test_show_generations",
   ]) {
@@ -129,81 +120,38 @@ export function clearShowData(sql: SqlStorage, showIdentifier: string): number {
 }
 
 /**
- * Returns the event to the true default show.
+ * Returns the event to a safe, empty running state.
  *
- * **Policy — what RESET ENTIRE SHOW means.** Everything about *this event*
- * goes: the running order, cues, uploaded and generated media, votes, judge
- * scores, frozen results and rankings, the current act, display, voting and
- * reveal state, the show-flow step, the projector pairing (codes *and*
- * sessions, so a display in the hall re-pairs deliberately), the event name,
- * short name and tagline, the theme and typeface, the judge panel, the
- * audience/judge weighting, the GO policy, the public intermission and
- * emergency text and the test-show record. What comes back is the product's
- * default show: "So You Think You Can Do Stuff", four judges named Judge 1–4,
- * 50:50 weighting, the default theme and the system typeface.
+ * **Policy — what RESET ENTIRE SHOW means.** Operational event data goes: the
+ * running order, cues, uploaded and generated media, votes, judge scores,
+ * frozen results and rankings, the current act, display, voting and reveal
+ * state, the show-flow step, temporary projector pairing codes, the command
+ * log and the test-show record.
  *
- * **Deliberately untouched:** the administrator account and its sessions,
- * deployment secrets, Cloudflare configuration, cached typefaces (shared
- * platform cache, not show data) and the application itself. This is a reset
- * of the show, not a factory reset of the installation.
+ * **Deliberately retained:** event name, short name and tagline, theme and
+ * typeface, judge panel and credentials, audience/judge weighting, GO policy,
+ * public messages and reactions, paired projector sessions, administrator
+ * accounts and sessions, deployment configuration and cached typefaces. This
+ * is a between-events data reset, not a factory reset of the venue setup.
  *
  * **Failure safety.** The database and R2 cannot commit together, so the order
  * is fixed: make the database correct in one transaction (which also records
  * every object that must leave R2), restore the default judge panel, then work
  * the queue and sweep the show's own storage namespaces for objects nothing
  * describes. If R2 refuses, the objects stay queued and `mediaCleanupComplete`
- * is false — the reset itself has still fully happened.
+ * is false — the database reset itself has still fully happened.
  */
 export async function resetShow(
   storage: DurableObjectStorage,
   bucket: R2Bucket,
   showIdentifier: string,
 ): Promise<ShowResetResult> {
-  const { clearedActs, projectorSessionsRevoked } = storage.transactionSync(
-    () => {
-      const acts = clearShowData(storage.sql, showIdentifier);
-      const revoked = storage.sql.exec(
-        "DELETE FROM projector_sessions WHERE show_id = ?",
-        showIdentifier,
-      ).rowsWritten;
-      // The judge panel is show configuration: it goes, and the default panel
-      // is issued afresh below. Submissions and permissions are already gone.
-      storage.sql.exec(
-        "DELETE FROM show_judges WHERE show_id = ?",
-        showIdentifier,
-      );
-      storage.sql.exec("DELETE FROM judges WHERE show_id = ?", showIdentifier);
-      storage.sql.exec(
-        `UPDATE shows SET title = ?, tagline = '', short_name = '', theme_id = ?,
-           font_family = 'system-ui', audience_weight = ?, reactions_enabled = 1,
-           intermission_message = '', emergency_message = '', updated_at = ?
-         WHERE id = ?`,
-        DEFAULT_EVENT_NAME,
-        DEFAULT_THEME_ID,
-        DEFAULT_AUDIENCE_WEIGHT,
-        new Date().toISOString(),
-        showIdentifier,
-      );
-      writeFlowPolicy(storage.sql, showIdentifier, DEFAULT_SHOW_FLOW_POLICY);
-      return { clearedActs: acts, projectorSessionsRevoked: revoked };
-    },
+  const clearedActs = storage.transactionSync(() =>
+    clearShowData(storage.sql, showIdentifier),
   );
-
-  // Four judges, named by slot, with fresh credentials the operator issues
-  // from the console when needed. No scoring data exists, so this cannot lock.
-  const judges = await applyScoringConfiguration(storage, showIdentifier, {
-    judgeNames: Array.from({ length: DEFAULT_JUDGE_COUNT }, (_, index) =>
-      defaultJudgeName(index + 1),
-    ),
-    audienceWeight: DEFAULT_AUDIENCE_WEIGHT,
-    reset: false,
-    confirm: null,
-  });
-  if (!judges.ok) {
-    throw new Error(
-      `Default judge panel could not be restored: ${judges.reason}`,
-    );
-  }
+  // A paired display is part of the venue setup. Only one-use pairing codes
+  // are cleared by clearShowData; established projector sessions remain valid.
+  const projectorSessionsRevoked = 0;
 
   // Objects in the show's storage namespaces that no row describes (leaks from
   // interrupted deletes) are swept with the rest, so a reset is a clean slate

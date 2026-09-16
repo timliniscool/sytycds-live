@@ -30,16 +30,14 @@ describe("pure scoring engine", () => {
     expect(parseJudgeScore("-1.25e+2")).toMatchObject({ ok: true });
     expect(parseJudgeScore("π")).toMatchObject({ ok: true });
     expect(parseJudgeScore("-Infinity")).toMatchObject({ ok: true });
-    for (const invalid of [
-      "",
-      "   ",
-      "NaN",
-      "5+5",
-      "sqrt(2)",
-      "1e",
-      "alert(1)",
-      "x",
-    ]) {
+    // Arithmetic and whitelisted functions are part of the language now;
+    // anything that names code or an unknown symbol is still refused.
+    expect(parseJudgeScore("5+5")).toMatchObject({
+      ok: true,
+      parsed: { classification: "FINITE", finiteValue: 10 },
+    });
+    expect(parseJudgeScore("sqrt(2)")).toMatchObject({ ok: true });
+    for (const invalid of ["", "   ", "NaN", "alert(1)", "x", "8 5"]) {
       expect(parseJudgeScore(invalid)).toMatchObject({ ok: false });
     }
     expect(parseJudgeScore("1".repeat(129))).toMatchObject({

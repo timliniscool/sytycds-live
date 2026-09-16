@@ -1,5 +1,5 @@
 /**
- * Architecture consolidation: the show flow engine (GO), the true default
+ * Architecture consolidation: the show flow engine (GO), the between-events
  * reset, the Act Media Library, projector arming on the first click,
  * authoritative presence and the procedural test-show generator. Each test
  * names the behaviour a stage crew relies on, not the code that provides it.
@@ -14,7 +14,6 @@ import {
   PROTOCOL_VERSION,
   showRevision,
 } from "../shared/domain";
-import { DEFAULT_EVENT_NAME } from "../shared/platform";
 import { serialiseServerMessage } from "../shared/protocol";
 import {
   TEST_SCENARIOS,
@@ -710,7 +709,7 @@ describe("act media library", () => {
 // ---------------------------------------------------------------------------
 
 describe("RESET ENTIRE SHOW", () => {
-  it("resets configuration, media, test data and the typeface to the defaults", async () => {
+  it("clears event data and media while retaining venue configuration", async () => {
     await withShow("reset-defaults", async (storage) => {
       const r2 = fakeBucket({ "primary/asset-stranded": 99 });
       upsertShow(storage, PRIMARY_SHOW_ID, {
@@ -733,6 +732,10 @@ describe("RESET ENTIRE SHOW", () => {
       expect(
         [...r2.objects.keys()].some((key) => key.startsWith("test-shows/")),
       ).toBe(true);
+      const beforeReset = projectShowState(storage, PRIMARY_SHOW_ID, {
+        kind: "admin",
+      });
+      if (beforeReset?.role !== "admin") throw new Error("expected admin");
 
       const result = await resetShow(storage, r2.bucket, PRIMARY_SHOW_ID);
       expect(result.mediaCleanupComplete).toBe(true);
@@ -741,22 +744,26 @@ describe("RESET ENTIRE SHOW", () => {
       });
       if (projection?.role !== "admin") throw new Error("expected admin");
       expect(projection.show).toMatchObject({
-        title: DEFAULT_EVENT_NAME,
-        tagline: "",
-        shortName: "",
-        fontFamily: "system-ui",
-        reactionsEnabled: true,
-        audienceWeight: 0.5,
-        flowPolicy: DEFAULT_SHOW_FLOW_POLICY,
+        title: beforeReset.show.title,
+        tagline: beforeReset.show.tagline,
+        shortName: beforeReset.show.shortName,
+        fontFamily: beforeReset.show.fontFamily,
+        reactionsEnabled: beforeReset.show.reactionsEnabled,
+        audienceWeight: beforeReset.show.audienceWeight,
+        flowPolicy: beforeReset.show.flowPolicy,
       });
       expect(projection.acts).toEqual([]);
       expect(projection.testShow).toBeNull();
-      expect(projection.judges.map((judge) => judge.displayName)).toEqual([
-        "Judge 1",
-        "Judge 2",
-        "Judge 3",
-        "Judge 4",
-      ]);
+      const judgeConfiguration = (
+        judges: typeof projection.judges,
+      ): { id: string; slot: number; displayName: string }[] =>
+        judges.map(({ id, slot, displayName }) => ({ id, slot, displayName }));
+      expect(judgeConfiguration(projection.judges)).toEqual(
+        judgeConfiguration(beforeReset.judges),
+      );
+      expect(
+        projection.judges.every((judge) => judge.submission === null),
+      ).toBe(true);
       expect(
         storage.sql
           .exec<{ count: number }>("SELECT COUNT(*) AS count FROM media_assets")
@@ -1086,6 +1093,12 @@ describe("procedural test shows", () => {
       for (const act of plan.acts) {
         expect(act.actName.length).toBeGreaterThan(0);
         expect(act.performerName.length).toBeGreaterThan(0);
+        expect(act.performers.length).toBeGreaterThan(0);
+        for (const performer of act.performers)
+          expect(performer.length).toBeGreaterThan(0);
+        if (act.groupName === "" && act.performers.length === 1)
+          expect(act.performerName).toBe(act.performers[0]);
+        if (act.groupName !== "") expect(act.performerName).toBe(act.groupName);
         expect(act.judgeScores).toHaveLength(plan.judgeNames.length);
         // A finalised act has every input a final score needs.
         if (act.finalised) {
@@ -1101,6 +1114,32 @@ describe("procedural test shows", () => {
         expect(plan.acts[plan.currentActIndex]).toBeDefined();
     },
   );
+
+  it("generates soloists, named groups and unnamed groups", () => {
+    const shapes = new Set<string>();
+    for (const seed of [
+      "CAFE1234",
+      "0BADF00D",
+      "12345678",
+      "FFFFFFFF",
+      "ABCDEF01",
+    ]) {
+      for (const act of generateTestShowPlan(seed, "near-end").acts) {
+        shapes.add(
+          act.performers.length === 1
+            ? "solo"
+            : act.groupName
+              ? "named-group"
+              : "unnamed-group",
+        );
+      }
+    }
+    expect([...shapes].sort()).toEqual([
+      "named-group",
+      "solo",
+      "unnamed-group",
+    ]);
+  });
 
   it("generates real rows and tagged fixtures the show can run, rank and reset", async () => {
     await withShow("test-show-generate", async (storage) => {

@@ -306,6 +306,7 @@ describe("final results and ranking", () => {
           entries: [],
           pendingGroups: 2,
           totalGroups: 2,
+          totalEntries: 3,
         },
       );
 

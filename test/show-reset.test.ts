@@ -2,9 +2,6 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-import { DEFAULT_SHOW_FLOW_POLICY } from "../shared/domain";
-import { DEFAULT_EVENT_NAME } from "../shared/platform";
-import { DEFAULT_THEME_ID } from "../shared/themes";
 import { isResetConfirmed, resetShow } from "../worker/show-reset";
 import { upsertShow } from "../worker/show-config";
 import { PRIMARY_SHOW_ID, projectShowState } from "../worker/show-state";
@@ -148,7 +145,7 @@ describe("show reset", () => {
     });
   });
 
-  it("returns the show to its defaults and keeps only the platform it runs on", async () => {
+  it("clears operational data while retaining event and venue configuration", async () => {
     await withCoordinator("show-reset-retention", async (storage) => {
       const bucket = {
         delete: async () => undefined,
@@ -166,24 +163,19 @@ describe("show reset", () => {
         kind: "admin",
       });
       if (projection?.role !== "admin") throw new Error("expected admin");
-      // RESET ENTIRE SHOW means the default show: identity, appearance, the
-      // judge panel, the weighting, the GO policy and the public text all go.
+      // A between-events reset keeps setup preferences that are expensive and
+      // error-prone to recreate under venue pressure.
       expect(projection.show).toMatchObject({
-        title: DEFAULT_EVENT_NAME,
-        tagline: "",
-        shortName: "",
-        themeId: DEFAULT_THEME_ID,
+        title: "Ngaio Showcase",
+        tagline: "Term 3",
+        shortName: "Showcase",
+        themeId: "gold-white",
         fontFamily: "system-ui",
-        audienceWeight: 0.5,
-        intermissionMessage: "",
-        emergencyMessage: "",
-        flowPolicy: DEFAULT_SHOW_FLOW_POLICY,
+        audienceWeight: 0.3,
+        intermissionMessage: "Back soon",
       });
       expect(projection.judges.map((judge) => judge.displayName)).toEqual([
-        "Judge 1",
-        "Judge 2",
-        "Judge 3",
-        "Judge 4",
+        "Alice",
       ]);
       expect(projection.testShow).toBeNull();
       // The operator who pressed the button is still signed in: the account
@@ -192,7 +184,7 @@ describe("show reset", () => {
     });
   });
 
-  it("revokes projector sessions so a display in the hall re-pairs deliberately", async () => {
+  it("retains paired projector sessions while clearing temporary pairing codes", async () => {
     await withCoordinator("show-reset-projector", async (storage) => {
       const bucket = {
         delete: async () => undefined,
@@ -208,8 +200,9 @@ describe("show reset", () => {
         Date.now() + 60_000,
       );
       const result = await resetShow(storage, bucket, PRIMARY_SHOW_ID);
-      expect(result.projectorSessionsRevoked).toBe(1);
-      expect(count(storage, "projector_sessions")).toBe(0);
+      expect(result.projectorSessionsRevoked).toBe(0);
+      expect(count(storage, "projector_sessions")).toBe(1);
+      expect(count(storage, "projector_pairing_codes")).toBe(0);
     });
   });
 

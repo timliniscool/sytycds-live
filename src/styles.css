@@ -956,6 +956,17 @@ input:focus-visible {
   font-weight: 600;
   line-height: 1.05;
 }
+.act-card__members,
+.performance__members,
+.scoreboard__members {
+  max-width: 56ch;
+  margin: calc(var(--unit) * 0.8) 0 0;
+  color: var(--theme-muted);
+  font-size: calc(var(--unit) * 1.8);
+  font-weight: 600;
+  line-height: 1.25;
+  text-wrap: balance;
+}
 .act-card__meta {
   display: flex;
   align-items: center;
@@ -1118,6 +1129,22 @@ input:focus-visible {
   margin: 0.15rem 0 0;
   color: var(--theme-muted);
   font-size: 0.85rem;
+}
+.vote__members {
+  margin: 0.1rem 0 0;
+  color: var(--theme-muted);
+  font-size: 0.72rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.vote__full-members {
+  max-height: 4.5rem;
+  margin: 0.25rem 0 0;
+  overflow-y: auto;
+  color: var(--theme-muted);
+  font-size: 0.7rem;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
 }
 .vote__notice {
   margin: 0.4rem 0 0;
@@ -1995,12 +2022,19 @@ input:focus-visible {
   letter-spacing: 0.24em;
   text-transform: uppercase;
 }
+/*
+ * The audience panel fills the middle band, so its three lines are spread
+ * across it rather than clustered in the centre. Centring them left the rest
+ * of the surface as a tall flat void — the dark slab operators reported across
+ * the scorecard — even though the panel was sized correctly.
+ */
 .scoreboard__audience {
   display: grid;
-  align-content: center;
+  align-content: space-between;
+  justify-items: start;
   gap: calc(var(--unit) * 0.6);
   min-height: 0;
-  padding: calc(var(--unit) * 2);
+  padding: calc(var(--unit) * 2.4) calc(var(--unit) * 2);
   border-left: calc(var(--unit) * 0.7) solid var(--theme-accent);
   background: var(--theme-surface);
 }
@@ -2019,10 +2053,17 @@ input:focus-visible {
   font-size: calc(var(--unit) * 1.7);
   font-weight: 600;
 }
+/*
+ * Judge tiles fill the same band as the audience panel, so the middle of the
+ * scorecard is two balanced blocks instead of small cards floating in a large
+ * dark area. Rows share the height evenly, so five to eight judges simply make
+ * two shorter rows.
+ */
 .scoreboard__judges {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-content: center;
+  grid-auto-rows: minmax(0, 1fr);
+  align-content: stretch;
   gap: calc(var(--unit) * 1.2);
   min-height: 0;
   margin: 0;
@@ -2144,12 +2185,19 @@ input:focus-visible {
  * Rows shrink as the running order grows, so a twenty-act leaderboard fills the
  * screen instead of spilling off the bottom of it.
  */
+/*
+ * The board is sized from the number of ranked acts, revealed or not: every
+ * row is one equal grid track of the space under the kicker, and the type
+ * scales with the row count. A staged reveal therefore never moves or resizes
+ * a row that is already on screen, and a full leaderboard never runs past the
+ * bottom of the projector — it gets smaller instead.
+ */
 .results__list {
   --rows: 6;
-  --row-scale: max(0.55, min(1, 7 / var(--rows)));
+  --row-scale: max(0.4, min(1, 5.2 / var(--rows)));
   display: grid;
-  align-content: center;
-  gap: calc(var(--unit) * 0.8 * var(--row-scale));
+  grid-template-rows: repeat(var(--rows), minmax(0, 1fr));
+  gap: calc(var(--unit) * 0.6 * var(--row-scale));
   min-height: 0;
   margin: 0;
   padding: 0;
@@ -2162,10 +2210,20 @@ input:focus-visible {
   align-items: center;
   gap: calc(var(--unit) * 2);
   min-height: 0;
-  padding: calc(var(--unit) * 1.2 * var(--row-scale)) calc(var(--unit) * 1.8);
+  padding: 0 calc(var(--unit) * 1.8);
   border: 1px solid var(--theme-border);
   background: var(--theme-surface);
-  animation: stage-enter 420ms cubic-bezier(0.2, 0.7, 0.2, 1) both;
+  /* Opacity only: a revealed row fades in exactly where it will stay, so the
+     entrance can never nudge the board's geometry or overflow. */
+  animation: results-enter 420ms ease-out both;
+}
+@keyframes results-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 .results__row--pending {
   background: transparent;
@@ -2182,14 +2240,24 @@ input:focus-visible {
   color: inherit;
 }
 .results__who {
+  display: grid;
+  align-content: center;
   min-width: 0;
+  min-height: 0;
+  line-height: 1.12;
 }
 .results__who b,
+.results__who em,
 .results__who small {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.results__who em {
+  color: var(--theme-muted);
+  font-size: calc(var(--unit) * 1.2 * var(--row-scale));
+  font-style: normal;
 }
 .results__who b {
   font-size: calc(var(--unit) * 2.5 * var(--row-scale));
@@ -2220,9 +2288,14 @@ input:focus-visible {
   gap: calc(var(--unit) * 1.6);
   min-height: 0;
 }
+/*
+ * The place label sits at the top of the step and the names fill the rest of
+ * it. Packing both at the top left the lower two thirds of each step as an
+ * empty dark panel, which read as a fault rather than as a podium.
+ */
 .podium__step {
   display: grid;
-  align-content: start;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: calc(var(--unit) * 0.9);
   min-height: 0;
   max-height: 100%;
@@ -2292,6 +2365,12 @@ input:focus-visible {
   font-size: calc(var(--unit) * 1.7 * var(--member-scale));
   overflow-wrap: break-word;
 }
+.podium__entry em {
+  color: var(--theme-muted);
+  font-size: calc(var(--unit) * 1.25 * var(--member-scale));
+  font-style: normal;
+  overflow-wrap: break-word;
+}
 .podium__entry span {
   color: var(--theme-accent);
   font-size: calc(var(--unit) * 2.6 * var(--member-scale));
@@ -2324,6 +2403,12 @@ input:focus-visible {
   color: var(--theme-muted);
   font-size: calc(var(--unit) * 3.4);
   font-weight: 600;
+}
+.winner__members {
+  max-width: 40ch;
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: calc(var(--unit) * 2.2);
 }
 .winner__score {
   margin: calc(var(--unit) * 1) 0 0;
@@ -3197,6 +3282,86 @@ body {
 .cue-form__wide {
   grid-column: 1 / -1;
 }
+.performer-editor,
+.display-options {
+  margin: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--theme-border);
+}
+.performer-editor > p,
+.performer-editor > small {
+  margin: 0.35rem 0;
+  color: var(--theme-muted);
+  font-size: 0.76rem;
+}
+.performer-editor__list {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0.7rem 0;
+  padding: 0;
+  list-style: none;
+}
+.performer-editor__list li {
+  display: grid;
+  grid-template-columns: 1.8rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.45rem;
+}
+.performer-editor__list li > span {
+  color: var(--theme-muted);
+  font-size: 0.75rem;
+  text-align: center;
+}
+.performer-editor__list button {
+  min-height: 40px;
+}
+.display-options > summary {
+  cursor: pointer;
+  color: var(--theme-text);
+  font-size: 0.82rem;
+  font-weight: 850;
+}
+.display-options[open] {
+  display: grid;
+  gap: 0.8rem;
+}
+.identity-preview {
+  display: grid;
+  gap: 0.25rem;
+  padding: 0.8rem;
+  border-left: 3px solid var(--theme-accent);
+  background: color-mix(in srgb, var(--theme-background) 82%, black);
+}
+.identity-preview small,
+.identity-preview span {
+  color: var(--theme-muted);
+}
+.identity-preview b {
+  overflow-wrap: anywhere;
+}
+.backing-audio {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid var(--theme-border);
+}
+.backing-audio__selected {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(12rem, 1fr) auto;
+  align-items: center;
+  gap: 0.7rem;
+}
+.backing-audio__selected span,
+.backing-audio__selected small {
+  display: block;
+  min-width: 0;
+}
+.backing-audio__selected small {
+  color: var(--theme-muted);
+}
+.backing-audio__selected audio {
+  width: 100%;
+}
 .theme-picker {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(8.5rem, 1fr));
@@ -3702,6 +3867,9 @@ body {
   }
   .cue-list li,
   .cue-list li > button {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .backing-audio__selected {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -4671,4 +4839,275 @@ body {
   color: var(--theme-muted);
   font-size: 0.8rem;
   line-height: 1.4;
+}
+
+/* ============================ mathematics ============================ */
+
+/*
+ * Typeset judge entries. MathML Core is rendered natively; the element only
+ * inherits the surrounding type so an integral on the projector, the console
+ * and a judge's phone all match their neighbours in size and colour.
+ */
+.math-entry {
+  font-family:
+    "Cambria Math", "STIX Two Math", "Latin Modern Math", "Noto Sans Math",
+    math, serif;
+  font-size: 1em;
+  color: inherit;
+  line-height: 1.25;
+}
+.math-entry mo,
+.math-entry mn,
+.math-entry mi {
+  color: inherit;
+}
+.scoreboard__value--expression {
+  font-size: calc(var(--unit) * 3.6);
+  line-height: 1.15;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.judge-row p > b .math-entry {
+  font-size: 1.05em;
+}
+
+/* Judge entry: hint, effective score, keypad. */
+.judge__hint {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+.judge__hint code {
+  padding: 0 0.25em;
+  border-radius: 4px;
+  background: var(--theme-elevated);
+  color: var(--theme-text);
+  font-family: ui-monospace, "Cascadia Mono", Menlo, Consolas, monospace;
+  font-size: 0.95em;
+}
+.judge__feedback {
+  display: grid;
+  gap: 0.25rem;
+  justify-items: center;
+  text-align: center;
+}
+.judge__typeset {
+  font-size: 1.6rem;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.judge__effective b,
+.judge__counts b {
+  font-variant-numeric: tabular-nums;
+}
+.judge__counts {
+  color: var(--theme-muted);
+  font-weight: 600;
+}
+.judge__keypad {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.4rem;
+}
+.judge__key {
+  min-height: 46px;
+  padding: 0;
+  border: 1px solid var(--theme-border);
+  border-radius: 10px;
+  background: var(--theme-elevated);
+  color: var(--theme-text);
+  font-size: 1.05rem;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  touch-action: manipulation;
+}
+.judge__key--function {
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+.judge__key--operator {
+  background: color-mix(
+    in srgb,
+    var(--theme-elevated) 70%,
+    var(--theme-accent)
+  );
+}
+.judge__key--edit {
+  background: color-mix(
+    in srgb,
+    var(--theme-elevated) 70%,
+    var(--theme-danger)
+  );
+}
+.judge__key--wide {
+  grid-column: span 2;
+}
+.judge__key:active:not(:disabled) {
+  transform: translateY(1px);
+  filter: brightness(1.12);
+}
+.judge__key:disabled {
+  opacity: 0.5;
+}
+.judge__confirm-detail .judge__counts {
+  display: block;
+}
+
+/* ====================== scrolling and native controls ====================== */
+
+/*
+ * Every scrollable region draws the same thin, theme-coloured scrollbar, and
+ * the modern standard properties take precedence where they exist. The track
+ * is transparent so content, not chrome, carries the panel; the thumb keeps
+ * enough contrast that a long list is visibly longer than its viewport.
+ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--theme-muted) 60%, transparent)
+    transparent;
+}
+*:hover {
+  scrollbar-color: color-mix(in srgb, var(--theme-muted) 85%, transparent)
+    transparent;
+}
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--theme-muted) 60%, transparent);
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--theme-muted) 85%, transparent);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+/* The hall never shows a scrollbar; the projector composes to its viewport. */
+.projector,
+.projector * {
+  scrollbar-width: none;
+}
+
+/*
+ * Selects keep the native popup — it is the accessible one on every platform —
+ * and lose only the default frame. The chevron is drawn from currentColor so
+ * it follows the theme rather than a hard-coded grey.
+ */
+select {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 2.4rem !important;
+  border: 1px solid var(--theme-border);
+  border-radius: var(--admin-radius);
+  background-color: color-mix(in srgb, var(--theme-background) 86%, black);
+  background-image:
+    linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position:
+    calc(100% - 1.05rem) 50%,
+    calc(100% - 0.7rem) 50%;
+  background-size:
+    0.35rem 0.35rem,
+    0.35rem 0.35rem;
+  background-repeat: no-repeat;
+  color: var(--theme-text);
+  font: inherit;
+  cursor: pointer;
+}
+select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+select option,
+select optgroup {
+  color: var(--theme-text);
+  background: var(--theme-surface);
+}
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+[tabindex]:focus-visible {
+  outline: 3px solid var(--admin-accent);
+  outline-offset: 2px;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--theme-accent);
+  width: 1.05rem;
+  height: 1.05rem;
+}
+
+/* Upload progress: a slim themed bar instead of the platform widget. */
+progress {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 6px;
+  border: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--theme-muted) 30%, transparent);
+  overflow: hidden;
+}
+progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: transparent;
+}
+progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: var(--theme-accent);
+  transition: width var(--admin-motion);
+}
+progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: var(--theme-accent);
+}
+
+/* Disclosure widgets: the marker follows the accent and the row is clickable. */
+summary {
+  cursor: pointer;
+}
+summary::marker,
+summary::-webkit-details-marker {
+  color: var(--theme-accent);
+}
+
+/* Long lists inside the act editor scroll on their own instead of pushing the
+   form off the screen. */
+.media-list {
+  max-height: 24rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.media-list--queued {
+  max-height: 16rem;
+}
+.media-list__error {
+  grid-column: 1 / -1;
+  padding: 0 0.6rem 0.5rem;
+  color: var(--theme-danger);
+  font-size: 0.72rem;
+}
+.backing-audio__hint {
+  color: var(--theme-muted);
+  font-size: 0.74rem;
+}
+.danger-zone__explain {
+  margin: 0;
+  color: var(--theme-muted);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+.cue-list {
+  max-height: 22rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }

@@ -707,12 +707,26 @@ export async function serveMediaAsset(
       : "private, max-age=31536000, immutable",
     ETag: `"${asset.version_identifier}"`,
   });
-  if (object.range) {
+  // Partial only when the client asked for a range. The local R2 runtime
+  // returns an empty `range` object for a whole-object read, which used to
+  // produce a 206 with "bytes NaN-NaN/size"; a browser (and the projector's
+  // service worker, which forwards the response) treats a 206 to a non-range
+  // request as a network failure, so the hall could not load any media.
+  // The offsets come from the range the client asked for, not from the
+  // object's echo of it, which the local runtime leaves undefined.
+  const partial = range !== undefined;
+  if (partial) {
     const offset =
-      "suffix" in object.range
-        ? asset.size_bytes - object.range.suffix
-        : (object.range.offset ?? 0);
-    const length = "length" in object.range ? object.range.length : object.size;
+      "suffix" in range
+        ? asset.size_bytes - Math.min(range.suffix, asset.size_bytes)
+        : (range.offset ?? 0);
+    const length =
+      "suffix" in range
+        ? Math.min(range.suffix, asset.size_bytes)
+        : Math.min(
+            range.length ?? asset.size_bytes - offset,
+            asset.size_bytes - offset,
+          );
     headers.set(
       "Content-Range",
       `bytes ${offset}-${offset + length - 1}/${asset.size_bytes}`,
@@ -722,7 +736,7 @@ export async function serveMediaAsset(
   const response = new Response(
     request.method === "HEAD" ? null : object.body,
     {
-      status: object.range ? 206 : 200,
+      status: partial ? 206 : 200,
       headers,
     },
   );

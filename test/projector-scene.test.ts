@@ -239,6 +239,7 @@ describe("scoreboard presentation", () => {
     ).toEqual({
       name: "Sam",
       primary: "WAITING",
+      expression: null,
       secondary: null,
       waiting: true,
     });
@@ -289,6 +290,34 @@ describe("scoreboard presentation", () => {
         },
       }),
     ).toMatchObject({ primary: "1.00e9", secondary: "counts as 12.10" });
+  });
+
+  it("typesets an expression entry and shows what it evaluated to", () => {
+    expect(
+      judgeTile({
+        slot: 1,
+        displayName: "Sam",
+        submission: {
+          raw: "sqrt(81)",
+          parsed: { classification: "FINITE", finiteValue: 9 },
+          effectiveScore: 9,
+        },
+      }),
+    ).toMatchObject({ expression: "sqrt(81)", primary: "9", secondary: "= 9" });
+    expect(
+      judgeTile({
+        slot: 2,
+        displayName: "Lee",
+        submission: {
+          raw: "integral from 0 to pi of sin(x) dx * 10",
+          parsed: { classification: "FINITE", finiteValue: 20 },
+          effectiveScore: 11,
+        },
+      }),
+    ).toMatchObject({
+      expression: "integral from 0 to pi of sin(x) dx * 10",
+      secondary: "= 20 · counts as 11.00",
+    });
   });
 
   it("reads the audience aggregate without inventing a score", () => {

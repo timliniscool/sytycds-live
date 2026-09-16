@@ -11,6 +11,8 @@ import {
   judgeTile,
   stepTowards,
 } from "./scoreboard-view";
+import { actIdentity } from "../../shared/act-identity";
+import { JudgeEntry } from "../math/MathExpression";
 
 const AUDIENCE_TWEEN_MS = 450;
 const REVEAL_COUNT_MS = 1_400;
@@ -75,14 +77,18 @@ export function ScoreboardGraphic({
   const tiles = [...judges]
     .sort((left, right) => left.slot - right.slot)
     .map(judgeTile);
+  const identity = act ? actIdentity(act) : null;
 
   return (
     <section className="stage scoreboard" key={act?.id ?? "scoreboard"}>
       <header className="scoreboard__act">
         <p className="stage__kicker">Scores</p>
         <h1 className="scoreboard__performer">
-          {act?.performerName ?? "Stand by"}
+          {identity?.primary ?? "Stand by"}
         </h1>
+        {identity?.secondary && (
+          <p className="scoreboard__members">{identity.secondary}</p>
+        )}
         {act && <p className="scoreboard__name">{act.actName}</p>}
       </header>
 
@@ -120,7 +126,13 @@ export function ScoreboardGraphic({
               className={`scoreboard__judge${tile.waiting ? " scoreboard__judge--waiting" : ""}`}
             >
               <p className="scoreboard__label">{tile.name}</p>
-              <p className="scoreboard__value">{tile.primary}</p>
+              {tile.expression ? (
+                <p className="scoreboard__value scoreboard__value--expression">
+                  <JudgeEntry raw={tile.expression} />
+                </p>
+              ) : (
+                <p className="scoreboard__value">{tile.primary}</p>
+              )}
               <p className="scoreboard__secondary">{tile.secondary ?? " "}</p>
             </li>
           ))}

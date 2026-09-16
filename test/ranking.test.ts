@@ -139,6 +139,7 @@ describe("completed-show ranking", () => {
       entries: [],
       pendingGroups: 0,
       totalGroups: 0,
+      totalEntries: 0,
     });
   });
 });

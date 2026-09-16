@@ -3,6 +3,7 @@ import type {
   ParsedJudgeScore,
   ScoreboardJudge,
 } from "../../shared/domain";
+import { describeJudgeEntry } from "../../shared/scoring";
 
 /** Raw text longer than this is replaced by a formatted value on the wall. */
 const MAX_RAW_LENGTH = 7;
@@ -11,6 +12,12 @@ export interface JudgeTile {
   name: string;
   /** The value the hall reads; `WAITING` while nothing has been submitted. */
   primary: string;
+  /**
+   * The judge's entry exactly as typed when it is an expression worth
+   * typesetting (a root, a fraction, an integral); null for plain values,
+   * which read best as text.
+   */
+  expression: string | null;
   /** The tapered score, shown only when it differs from what was typed. */
   secondary: string | null;
   waiting: boolean;
@@ -47,21 +54,36 @@ export function judgeTile(judge: ScoreboardJudge): JudgeTile {
     return {
       name: judge.displayName,
       primary: "WAITING",
+      expression: null,
       secondary: null,
       waiting: true,
     };
   }
   const { raw, parsed, effectiveScore } = judge.submission;
   const trimmed = raw.trim();
+  const entry = describeJudgeEntry(trimmed);
   const primary =
-    trimmed.length <= MAX_RAW_LENGTH ? trimmed : formatParsed(parsed);
+    entry.kind === "plain" && trimmed.length <= MAX_RAW_LENGTH
+      ? trimmed
+      : formatParsed(parsed);
   const differs =
     parsed.classification !== "FINITE" ||
     Math.abs(parsed.finiteValue - effectiveScore) > 0.0005;
+  // An expression tile shows the typeset entry with its evaluated value; the
+  // taper note follows only when the value that counts differs again.
+  const evaluated = entry.kind === "expression" ? formatParsed(parsed) : null;
   return {
     name: judge.displayName,
     primary,
-    secondary: differs ? `counts as ${formatScore(effectiveScore)}` : null,
+    expression: entry.kind === "expression" ? trimmed : null,
+    secondary:
+      entry.kind === "expression"
+        ? differs
+          ? `= ${evaluated} · counts as ${formatScore(effectiveScore)}`
+          : `= ${evaluated}`
+        : differs
+          ? `counts as ${formatScore(effectiveScore)}`
+          : null,
     waiting: false,
   };
 }

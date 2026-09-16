@@ -762,6 +762,59 @@ const MEDIA_LIBRARY_SHOW_FLOW_AND_TEST_SHOWS_SCHEMA: SchemaMigration = {
   },
 };
 
+/**
+ * Explicit solo/group modelling. The old `performer_name` column remains as a
+ * compatibility label for old Workers and existing result snapshots, while
+ * every live act gets an ordered list of stable performer records. Existing
+ * single-performer acts are migrated losslessly into position zero.
+ */
+const GROUP_PERFORMERS_SCHEMA: SchemaMigration = {
+  version: 16,
+  name: "group_performers_and_shared_presentation_identity",
+  statements: [],
+  reconcile(sql) {
+    const addColumn = (table: string, column: string, definition: string) => {
+      if (!columnExists(sql, table, column))
+        sql.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+    };
+    addColumn("acts", "group_name", "TEXT NOT NULL DEFAULT ''");
+    addColumn(
+      "acts",
+      "performer_display_mode",
+      `TEXT NOT NULL DEFAULT 'AUTOMATIC' CHECK (performer_display_mode IN
+        ('AUTOMATIC', 'GROUP_NAME_ONLY', 'GROUP_NAME_AND_MEMBERS',
+         'MEMBER_NAMES', 'PERFORMER_COUNT'))`,
+    );
+    addColumn(
+      "acts",
+      "show_full_member_list_to_audience",
+      "INTEGER NOT NULL DEFAULT 0 CHECK (show_full_member_list_to_audience IN (0, 1))",
+    );
+    addColumn("finalised_results_v2", "performer_subtitle", "TEXT");
+    if (!tableExists(sql, "act_performers")) {
+      sql.exec(`CREATE TABLE act_performers (
+        show_id TEXT NOT NULL,
+        act_id TEXT NOT NULL,
+        id TEXT NOT NULL,
+        position INTEGER NOT NULL CHECK (position >= 0),
+        display_name TEXT NOT NULL CHECK (length(display_name) > 0),
+        PRIMARY KEY (show_id, act_id, id),
+        UNIQUE (show_id, act_id, position),
+        FOREIGN KEY (show_id, act_id) REFERENCES acts(show_id, id)
+          ON UPDATE CASCADE ON DELETE RESTRICT
+      ) STRICT`);
+      sql.exec(
+        `INSERT INTO act_performers (show_id, act_id, id, position, display_name)
+         SELECT show_id, id, 'legacy-' || id, 0, performer_name
+         FROM acts WHERE length(trim(performer_name)) > 0`,
+      );
+    }
+    sql.exec(
+      "CREATE INDEX IF NOT EXISTS idx_act_performers_act ON act_performers (show_id, act_id, position)",
+    );
+  },
+};
+
 const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   INITIAL_SCHEMA,
   SHOW_RUNTIME_SCHEMA,
@@ -778,6 +831,7 @@ const SCHEMA_MIGRATIONS: readonly SchemaMigration[] = [
   CONFIGURATION_SCHEMA_RECONCILIATION,
   MEDIA_CLEANUP_QUEUE_SCHEMA,
   MEDIA_LIBRARY_SHOW_FLOW_AND_TEST_SHOWS_SCHEMA,
+  GROUP_PERFORMERS_SCHEMA,
 ];
 export const LATEST_SCHEMA_VERSION = SCHEMA_MIGRATIONS.length;
 
@@ -840,6 +894,19 @@ export function initialiseSchema(storage: DurableObjectStorage): void {
       );
     });
   }
+}
+
+/**
+ * Whether a write failed because it collided with a unique key.
+ *
+ * Both vote intake and judge intake rely on a unique primary key as their
+ * immutability barrier: a duplicate delivery must report the score already
+ * stored rather than replace it, and that is the only way SQLite says so.
+ */
+export function isUniqueViolation(error: unknown): boolean {
+  return (
+    error instanceof Error && /UNIQUE constraint failed/u.test(error.message)
+  );
 }
 
 export function readSchemaVersion(sql: SqlStorage): number {

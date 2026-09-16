@@ -217,24 +217,33 @@ describe("adjudicator input preview", () => {
   it("stays silent when the typed number is the number that counts", () => {
     expect(previewJudgeInput("8")).toEqual({
       status: "valid",
+      evaluated: 8,
       effectiveScore: 8,
       transform: null,
+      detail: null,
     });
     expect(previewJudgeInput("8.5").transform).toBeNull();
   });
 
   it("shows the tapered value when the transform changes the score", () => {
-    expect(previewJudgeInput("20").transform).toBe("effective 11.000");
-    expect(previewJudgeInput("Infinity").transform).toBe("effective 15.000");
-    expect(previewJudgeInput("-inf").transform).toBe("effective -5.000");
+    expect(previewJudgeInput("20").transform).toBe("counts as 11.000");
+    expect(previewJudgeInput("Infinity").transform).toBe("counts as 15.000");
+    expect(previewJudgeInput("-inf").transform).toBe("counts as -5.000");
   });
 
   it("resolves a symbol to its value without claiming a transform", () => {
     expect(previewJudgeInput("π").transform).toBe("3.14159");
   });
 
-  it("rejects expressions and anything else the server would refuse", () => {
-    expect(previewJudgeInput("5+5").status).toBe("invalid");
+  it("accepts expressions and rejects what the server would refuse", () => {
+    expect(previewJudgeInput("5+5")).toMatchObject({
+      status: "valid",
+      evaluated: 10,
+    });
+    expect(previewJudgeInput("alert(1)")).toMatchObject({
+      status: "invalid",
+      detail: expect.stringMatching(/not a function/u),
+    });
     expect(previewJudgeInput("").status).toBe("empty");
     expect(previewJudgeInput("9".repeat(200)).status).toBe("too_long");
   });

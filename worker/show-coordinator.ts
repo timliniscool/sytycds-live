@@ -407,12 +407,15 @@ export class ShowCoordinator extends DurableObject<Env> {
       return this.handleCreateAct(request);
     if (url.pathname === "/api/admin/acts/reorder" && request.method === "POST")
       return this.handleReorderActs(request);
-    const actMatch = /^\/api\/admin\/acts\/([A-Za-z0-9_-]{1,128})$/u.exec(
-      url.pathname,
-    );
-    if (actMatch && request.method === "PATCH")
+    const actMatch =
+      /^\/api\/admin\/acts\/([A-Za-z0-9_-]{1,128})(?:\/(duplicate))?$/u.exec(
+        url.pathname,
+      );
+    if (actMatch && actMatch[2] === "duplicate" && request.method === "POST")
+      return this.handleDuplicateAct(request, actMatch[1] ?? "");
+    if (actMatch && !actMatch[2] && request.method === "PATCH")
       return this.handleEditAct(request, actMatch[1] ?? "");
-    if (actMatch && request.method === "DELETE")
+    if (actMatch && !actMatch[2] && request.method === "DELETE")
       return this.handleDeleteAct(request, actMatch[1] ?? "");
     const actDeletionMatch =
       /^\/api\/admin\/acts\/([A-Za-z0-9_-]{1,128})\/deletion$/u.exec(
@@ -852,23 +855,12 @@ export class ShowCoordinator extends DurableObject<Env> {
         projectorSessionsRevoked: result.projectorSessionsRevoked,
       },
     });
-    // Projector sessions are gone with the pairing; a connected display goes
-    // back to its pairing screen rather than holding a revoked credential.
-    for (const ws of this.ctx.getWebSockets()) {
-      const attachment = this.socketAttachment(ws);
-      if (attachment?.phase === "ready" && attachment.role.kind === "projector")
-        ws.close(1008, "Show reset");
-    }
-    // The show still exists, now as the default show; every surface re-reads
-    // it rather than being told the show is gone. Judge links were replaced,
-    // so judge sockets are told their credential no longer holds.
+    // The show still exists with its venue setup and credentials retained.
+    // Every connected surface receives the clean operational snapshot.
     this.broadcastSnapshots("admin");
+    this.broadcastSnapshots("projector");
     this.broadcastSnapshots("audience");
-    for (const ws of this.ctx.getWebSockets()) {
-      const attachment = this.socketAttachment(ws);
-      if (attachment?.phase === "ready" && attachment.role.kind === "judge")
-        ws.close(1008, "Show reset");
-    }
+    this.broadcastSnapshots("judge");
     this.sendConnectionCount();
     return Response.json(result);
   }
@@ -1337,6 +1329,66 @@ export class ShowCoordinator extends DurableObject<Env> {
     this.broadcastSnapshots("audience");
     this.broadcastSnapshots("judge");
     return Response.json({ updated: true });
+  }
+
+  /**
+   * Copies safe act configuration only. Scores, votes, results and manual cues
+   * are show history and never follow a duplicate; referenced media becomes a
+   * shared reference and therefore remains protected from either act's delete.
+   */
+  private async handleDuplicateAct(
+    request: Request,
+    requestedId: string,
+  ): Promise<Response> {
+    if (!(await this.authenticatedAdmin(request, true)))
+      return Response.json({ error: "Unauthorised" }, { status: 401 });
+    const projection = projectShowState(
+      this.ctx.storage,
+      PRIMARY_SHOW_ID,
+      { kind: "admin" },
+      { publicOrigin: null },
+    );
+    const source =
+      projection?.role === "admin"
+        ? projection.acts.find((act) => act.id === requestedId)
+        : null;
+    if (!source)
+      return Response.json({ error: "Act not found" }, { status: 404 });
+    const input = parseActInput({
+      performers: (source.performers ?? []).map((performer) => ({
+        id: `performer-${crypto.randomUUID()}`,
+        name: performer.name,
+      })),
+      performerName: source.performerName,
+      groupName: source.groupName ?? "",
+      performerDisplayMode: source.performerDisplayMode ?? "AUTOMATIC",
+      schoolYear: source.schoolYear,
+      actName: `${source.actName} copy`.slice(0, 160),
+      actType: source.actType,
+      publicDescription: source.publicDescription,
+      internalNotes: source.internalNotes,
+      publicImageAssetId: source.presentation.actImageAssetId,
+      showDescriptionToAudience: source.showDescriptionToAudience,
+      showImageToAudience: source.showImageToAudience,
+      showFullMemberListToAudience:
+        source.showFullMemberListToAudience ?? false,
+      presentation: source.presentation,
+      appearance: source.appearance,
+    });
+    if (!input)
+      return Response.json(
+        { error: "Act could not be duplicated" },
+        { status: 409 },
+      );
+    const duplicate = createAct(this.ctx.storage, PRIMARY_SHOW_ID, input);
+    if (!duplicate)
+      return Response.json(
+        { error: "Act could not be duplicated" },
+        { status: 409 },
+      );
+    this.broadcastSnapshots("admin");
+    this.broadcastAdminFlow();
+    return Response.json({ act: duplicate }, { status: 201 });
   }
 
   /** What deleting this act would destroy, so the operator confirms the truth. */
@@ -2177,7 +2229,12 @@ export class ShowCoordinator extends DurableObject<Env> {
       const stageAct =
         projector?.role === "projector" ? projector.activeAct : null;
       this.broadcastAdmin(patchFor(stageAct));
-      this.broadcastProjector(patchFor(stageAct));
+      // The projector's cue stack and media manifest belong to the current
+      // act, and a patch carries neither. Sending only the act left the hall
+      // holding the previous act's cues, so the first PREPARE or GO after an
+      // act change failed with "cue is unavailable" until some unrelated
+      // snapshot happened to arrive. The projector gets the whole picture.
+      this.broadcastSnapshots("projector");
       this.broadcastAudience(patchFor(audience.activeAct));
       this.broadcastJudges(patchFor(stageAct));
     }

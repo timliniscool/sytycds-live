@@ -23,18 +23,31 @@ function ordinal(rank: number): string {
   return `${rank}${suffix}`;
 }
 
-function ResultRow({ entry }: { entry: RankingEntry }) {
+function ResultRow({
+  entry,
+  dense,
+}: {
+  entry: RankingEntry;
+  /** Above ten rows the member line is dropped so every row keeps two lines. */
+  dense: boolean;
+}) {
   return (
     <li className="results__row" key={entry.actId}>
       <span className="results__rank">{rankLabel(entry)}</span>
       <span className="results__who">
         <b>{entry.performerName}</b>
+        {entry.performerSubtitle && !dense && (
+          <em>{entry.performerSubtitle}</em>
+        )}
         <small>{entry.actName}</small>
       </span>
       <span className="results__score">{formatScore(entry.finalScore)}</span>
     </li>
   );
 }
+
+/** Rows beyond this many drop their third line so the board stays legible. */
+const DENSE_ROWS = 10;
 
 export function FinalResultsGraphic({
   title,
@@ -43,7 +56,9 @@ export function FinalResultsGraphic({
   title: string;
   results: PublicResults | null;
 }) {
-  if (!results || results.entries.length === 0) {
+  // A staged board with nothing revealed yet is still a board: it shows its
+  // empty places. Only a ranking with no finalised act at all holds.
+  if (!results || (results.entries.length === 0 && results.totalGroups === 0)) {
     return (
       <HoldingGraphic
         kicker={title}
@@ -59,10 +74,14 @@ export function FinalResultsGraphic({
           <p className="stage__kicker">Final results</p>
           <ol
             className="results__list"
-            style={{ "--rows": results.entries.length } as React.CSSProperties}
+            style={{ "--rows": results.totalEntries } as React.CSSProperties}
           >
             {results.entries.map((entry) => (
-              <ResultRow key={entry.actId} entry={entry} />
+              <ResultRow
+                key={entry.actId}
+                entry={entry}
+                dense={results.totalEntries > DENSE_ROWS}
+              />
             ))}
           </ol>
         </section>
@@ -76,37 +95,43 @@ export function FinalResultsGraphic({
   }
 }
 
-/** Slots fill from last place upwards; the unrevealed ranks stay as outlines. */
+/**
+ * Slots fill from last place upwards; the unrevealed places stay as outlines.
+ * One outline per hidden act, not per hidden rank: the board holds exactly as
+ * many rows as the finished leaderboard from the first press to the last, so
+ * revealing a three-way tie fills three outlines instead of growing the list
+ * and shrinking every row already on screen.
+ */
 function StagedResults({ results }: { results: PublicResults }) {
-  const pending = Array.from(
-    { length: results.pendingGroups },
-    (_, index) => index,
-  );
+  const hidden = Math.max(0, results.totalEntries - results.entries.length);
+  const pending = Array.from({ length: hidden }, (_, index) => index);
   return (
     <section className="stage results" key="staged">
       <p className="stage__kicker">Final results</p>
       <ol
         className="results__list"
-        style={
-          {
-            "--rows": results.entries.length + results.pendingGroups,
-          } as React.CSSProperties
-        }
+        style={{ "--rows": results.totalEntries } as React.CSSProperties}
       >
         {pending.map((index) => (
           <li
             className="results__row results__row--pending"
             key={`pending-${index}`}
+            aria-label="Place not yet revealed"
           >
             <span className="results__rank">?</span>
             <span className="results__who">
               <b>&nbsp;</b>
+              <small>&nbsp;</small>
             </span>
             <span className="results__score">—</span>
           </li>
         ))}
         {results.entries.map((entry) => (
-          <ResultRow key={entry.actId} entry={entry} />
+          <ResultRow
+            key={entry.actId}
+            entry={entry}
+            dense={results.totalEntries > DENSE_ROWS}
+          />
         ))}
       </ol>
     </section>
@@ -162,6 +187,9 @@ function Podium({ entries }: { entries: readonly RankingEntry[] }) {
                 {members.map((entry) => (
                   <div className="podium__entry" key={entry.actId}>
                     <b>{entry.performerName}</b>
+                    {entry.performerSubtitle && (
+                      <em>{entry.performerSubtitle}</em>
+                    )}
                     <small>{entry.actName}</small>
                     <span>{formatScore(entry.finalScore)}</span>
                   </div>
@@ -185,6 +213,9 @@ function Winner({ entries }: { entries: readonly RankingEntry[] }) {
       {winners.map((entry) => (
         <div className="winner__entry" key={entry.actId}>
           <h1 className="winner__name">{entry.performerName}</h1>
+          {entry.performerSubtitle && (
+            <p className="winner__members">{entry.performerSubtitle}</p>
+          )}
           <p className="winner__act">{entry.actName}</p>
           <p className="winner__score">{formatScore(entry.finalScore)}</p>
         </div>

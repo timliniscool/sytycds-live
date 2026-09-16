@@ -5,7 +5,10 @@ import {
   type ActPresentation,
   type AdminAct,
   type PerformanceVisualMode,
+  type Performer,
+  type PerformerDisplayMode,
 } from "../shared/domain";
+import { actIdentity, MAX_PERFORMERS } from "../shared/act-identity";
 import { isThemeId } from "../shared/themes";
 import { isRecord } from "../shared/trust";
 import { retireUnreferencedAssets } from "./media-cleanup";
@@ -13,6 +16,7 @@ import { syncSimpleCues } from "./simple-flow";
 
 const TEXT_LIMITS = {
   performerName: 160,
+  groupName: 160,
   schoolYear: 80,
   actName: 160,
   actType: 100,
@@ -24,6 +28,9 @@ const MAX_FONT_FAMILY = 120;
 
 export interface ActInput {
   performerName: string;
+  performers?: readonly Performer[];
+  groupName?: string;
+  performerDisplayMode?: PerformerDisplayMode;
   schoolYear: string;
   actName: string;
   actType: string;
@@ -32,11 +39,79 @@ export interface ActInput {
   publicImageAssetId?: string | null;
   showDescriptionToAudience: boolean;
   showImageToAudience: boolean;
+  showFullMemberListToAudience?: boolean;
   presentation: ActPresentation;
   appearance: ActAppearance;
 }
 
+/** Keeps internal callers and old API payloads safe during the schema rollout. */
+type NormalizedActInput = ActInput & {
+  performers: readonly Performer[];
+  groupName: string;
+  performerDisplayMode: PerformerDisplayMode;
+  showFullMemberListToAudience: boolean;
+};
+
+function withPerformerDefaults(input: ActInput): NormalizedActInput {
+  const suppliedPerformers = input.performers;
+  const performers: readonly Performer[] =
+    suppliedPerformers && suppliedPerformers.length > 0
+      ? suppliedPerformers
+      : [
+          {
+            id: `performer-${crypto.randomUUID()}`,
+            name: input.performerName,
+          },
+        ];
+  return {
+    ...input,
+    performers,
+    groupName: input.groupName ?? "",
+    performerDisplayMode: input.performerDisplayMode ?? "AUTOMATIC",
+    showFullMemberListToAudience: input.showFullMemberListToAudience ?? false,
+  };
+}
+
 const ASSET_ID = /^asset-[A-Za-z0-9-]{1,128}$/u;
+const PERFORMER_ID = /^performer-[A-Za-z0-9-]{1,128}$/u;
+
+function parsePerformers(value: unknown, legacy: unknown): Performer[] | null {
+  const source = Array.isArray(value)
+    ? value
+    : typeof legacy === "string" && legacy.trim()
+      ? [{ name: legacy }]
+      : [];
+  if (source.length < 1 || source.length > MAX_PERFORMERS) return null;
+  const performers: Performer[] = [];
+  const ids = new Set<string>();
+  for (const entry of source) {
+    if (!isRecord(entry) || typeof entry.name !== "string") return null;
+    const name = entry.name.replace(/\s+/gu, " ").trim();
+    const suppliedId = entry.id;
+    const id =
+      suppliedId === undefined || suppliedId === ""
+        ? `performer-${crypto.randomUUID()}`
+        : typeof suppliedId === "string" && PERFORMER_ID.test(suppliedId)
+          ? suppliedId
+          : null;
+    if (!id || !name || name.length > TEXT_LIMITS.performerName || ids.has(id))
+      return null;
+    ids.add(id);
+    performers.push({ id, name });
+  }
+  return performers;
+}
+
+function performerDisplayMode(value: unknown): PerformerDisplayMode | null {
+  return value === undefined || value === "AUTOMATIC"
+    ? "AUTOMATIC"
+    : value === "GROUP_NAME_ONLY" ||
+        value === "GROUP_NAME_AND_MEMBERS" ||
+        value === "MEMBER_NAMES" ||
+        value === "PERFORMER_COUNT"
+      ? value
+      : null;
+}
 
 function optionalAssetId(value: unknown): string | null | undefined {
   if (value === null || value === undefined || value === "") return null;
@@ -123,8 +198,26 @@ function parseAppearance(value: unknown): ActAppearance | null {
 
 export function parseActInput(value: unknown): ActInput | null {
   if (!isRecord(value)) return null;
-  const fields = Object.keys(TEXT_LIMITS) as (keyof typeof TEXT_LIMITS)[];
-  if (!fields.every((field) => typeof value[field] === "string")) return null;
+  for (const field of [
+    "schoolYear",
+    "actName",
+    "actType",
+    "publicDescription",
+    "internalNotes",
+  ] as const) {
+    if (typeof value[field] !== "string") return null;
+  }
+  const performers = parsePerformers(value.performers, value.performerName);
+  const displayMode = performerDisplayMode(value.performerDisplayMode);
+  if (!performers || !displayMode) return null;
+  const groupName =
+    value.groupName === undefined
+      ? ""
+      : typeof value.groupName === "string"
+        ? value.groupName.replace(/\s+/gu, " ").trim()
+        : null;
+  if (groupName === null || groupName.length > TEXT_LIMITS.groupName)
+    return null;
   const publicImageAssetId = optionalAssetId(value.publicImageAssetId);
   if (publicImageAssetId === undefined) return null;
   const presentation = parsePresentation(
@@ -135,7 +228,10 @@ export function parseActInput(value: unknown): ActInput | null {
   const appearance = parseAppearance(value.appearance);
   if (!appearance) return null;
   const candidate: ActInput = {
-    performerName: (value.performerName as string).trim(),
+    performerName: performers[0]!.name,
+    performers,
+    groupName,
+    performerDisplayMode: displayMode,
     schoolYear: (value.schoolYear as string).trim(),
     actName: (value.actName as string).trim(),
     actType: (value.actType as string).trim(),
@@ -145,18 +241,43 @@ export function parseActInput(value: unknown): ActInput | null {
     publicImageAssetId: presentation.actImageAssetId,
     showDescriptionToAudience: value.showDescriptionToAudience === true,
     showImageToAudience: value.showImageToAudience === true,
+    showFullMemberListToAudience: value.showFullMemberListToAudience === true,
     presentation,
     appearance,
   };
-  if (
-    candidate.performerName.length === 0 ||
-    candidate.actName.length === 0 ||
-    candidate.actType.length === 0
-  )
+  if (candidate.actName.length === 0 || candidate.actType.length === 0)
     return null;
-  return fields.every((field) => candidate[field].length <= TEXT_LIMITS[field])
+  return candidate.schoolYear.length <= TEXT_LIMITS.schoolYear &&
+    candidate.actName.length <= TEXT_LIMITS.actName &&
+    candidate.actType.length <= TEXT_LIMITS.actType &&
+    candidate.publicDescription.length <= TEXT_LIMITS.publicDescription &&
+    candidate.internalNotes.length <= TEXT_LIMITS.internalNotes
     ? candidate
     : null;
+}
+
+function replacePerformers(
+  sql: SqlStorage,
+  showIdentifier: string,
+  actIdentifier: string,
+  performers: readonly Performer[],
+): void {
+  sql.exec(
+    "DELETE FROM act_performers WHERE show_id = ? AND act_id = ?",
+    showIdentifier,
+    actIdentifier,
+  );
+  performers.forEach((performer, position) => {
+    sql.exec(
+      `INSERT INTO act_performers (show_id, act_id, id, position, display_name)
+       VALUES (?, ?, ?, ?, ?)`,
+      showIdentifier,
+      actIdentifier,
+      performer.id,
+      position,
+      performer.name,
+    );
+  });
 }
 
 /** The stored performance mode plus the asset's kind, as the operator sees it. */
@@ -187,8 +308,9 @@ function visualModeFor(
 export function createAct(
   storage: DurableObjectStorage,
   showIdentifier: string,
-  input: ActInput,
+  _input: ActInput,
 ): AdminAct | null {
+  const input = withPerformerDefaults(_input);
   return storage.transactionSync(() => {
     const present = storage.sql
       .exec<{ present: number }>(
@@ -207,16 +329,20 @@ export function createAct(
     const id = `act-${crypto.randomUUID()}`;
     const timestamp = new Date().toISOString();
     storage.sql.exec(
-      `INSERT INTO acts (id, show_id, order_index, performer_name, school_year,
+      `INSERT INTO acts (id, show_id, order_index, performer_name, group_name,
+        performer_display_mode, school_year,
         act_name, act_type, public_description, internal_notes, public_image_asset_id,
-        show_description_to_audience, show_image_to_audience, performance_mode,
+        show_description_to_audience, show_image_to_audience,
+        show_full_member_list_to_audience, performance_mode,
         performance_asset_id, performance_fit, backing_audio_asset_id,
         backing_audio_start, theme_id, font_family, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       id,
       showIdentifier,
       order,
       input.performerName,
+      input.groupName,
+      input.performerDisplayMode,
       input.schoolYear,
       input.actName,
       input.actType,
@@ -225,6 +351,7 @@ export function createAct(
       input.publicImageAssetId ?? null,
       input.showDescriptionToAudience ? 1 : 0,
       input.showImageToAudience ? 1 : 0,
+      input.showFullMemberListToAudience ? 1 : 0,
       input.presentation.performanceMode,
       input.presentation.performanceAssetId,
       input.presentation.performanceFit,
@@ -235,6 +362,7 @@ export function createAct(
       timestamp,
       timestamp,
     );
+    replacePerformers(storage.sql, showIdentifier, id, input.performers);
     syncSimpleCues(storage.sql, showIdentifier, id);
     storage.sql.exec(
       "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
@@ -307,21 +435,26 @@ export function editAct(
   storage: DurableObjectStorage,
   showIdentifier: string,
   requestedId: string,
-  input: ActInput,
+  _input: ActInput,
 ): boolean {
+  const input = withPerformerDefaults(_input);
   return storage.transactionSync(() => {
     if (!referencedAssetsExist(storage.sql, showIdentifier, input))
       return false;
     const timestamp = new Date().toISOString();
     const updated = storage.sql.exec(
-      `UPDATE acts SET performer_name = ?, school_year = ?, act_name = ?, act_type = ?,
+      `UPDATE acts SET performer_name = ?, group_name = ?, performer_display_mode = ?,
+         school_year = ?, act_name = ?, act_type = ?,
          public_description = ?, internal_notes = ?, public_image_asset_id = ?,
          show_description_to_audience = ?, show_image_to_audience = ?,
+         show_full_member_list_to_audience = ?,
          performance_mode = ?, performance_asset_id = ?, performance_fit = ?,
          backing_audio_asset_id = ?, backing_audio_start = ?,
          theme_id = ?, font_family = ?, updated_at = ?
        WHERE show_id = ? AND id = ?`,
       input.performerName,
+      input.groupName,
+      input.performerDisplayMode,
       input.schoolYear,
       input.actName,
       input.actType,
@@ -330,6 +463,7 @@ export function editAct(
       input.publicImageAssetId ?? null,
       input.showDescriptionToAudience ? 1 : 0,
       input.showImageToAudience ? 1 : 0,
+      input.showFullMemberListToAudience ? 1 : 0,
       input.presentation.performanceMode,
       input.presentation.performanceAssetId,
       input.presentation.performanceFit,
@@ -342,6 +476,12 @@ export function editAct(
       requestedId,
     );
     if (updated.rowsWritten !== 1) return false;
+    replacePerformers(
+      storage.sql,
+      showIdentifier,
+      requestedId,
+      input.performers,
+    );
     syncSimpleCues(storage.sql, showIdentifier, requestedId);
     storage.sql.exec(
       "UPDATE shows SET revision = revision + 1, updated_at = ? WHERE id = ?",
@@ -397,12 +537,15 @@ interface ActIdentityRow extends Record<string, SqlStorageValue> {
   order_index: number;
   act_name: string;
   performer_name: string;
+  group_name: string;
+  performer_display_mode: string;
   public_image_asset_id: string | null;
   performance_asset_id: string | null;
   backing_audio_asset_id: string | null;
 }
 
 const ACT_IDENTITY_COLUMNS = `id, order_index, act_name, performer_name,
+       group_name, performer_display_mode,
        public_image_asset_id, performance_asset_id, backing_audio_asset_id`;
 
 function countRows(
@@ -550,7 +693,21 @@ export function previewActDeletion(
     preview: {
       actId: act.id,
       actName: act.act_name,
-      performerName: act.performer_name,
+      performerName: actIdentity({
+        performerName: act.performer_name,
+        performers: sql
+          .exec<{ id: string; display_name: string }>(
+            `SELECT id, display_name FROM act_performers
+             WHERE show_id = ? AND act_id = ? ORDER BY position`,
+            showIdentifier,
+            act.id,
+          )
+          .toArray()
+          .map((member) => ({ id: member.id, name: member.display_name })),
+        groupName: act.group_name,
+        performerDisplayMode:
+          act.performer_display_mode as PerformerDisplayMode,
+      }).primary,
       isCurrentAct,
       audienceVotes: countRows(sql, "audience_votes", showIdentifier, act.id),
       judgeSubmissions: countRows(
@@ -657,6 +814,11 @@ export function deleteAct(
     // than a dangling owner reference.
     storage.sql.exec(
       "UPDATE media_assets SET act_id = NULL WHERE show_id = ? AND act_id = ?",
+      showIdentifier,
+      requestedId,
+    );
+    storage.sql.exec(
+      "DELETE FROM act_performers WHERE show_id = ? AND act_id = ?",
       showIdentifier,
       requestedId,
     );

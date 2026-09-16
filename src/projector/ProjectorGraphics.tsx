@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 
 import type { EmergencyPresentation, PublicAct } from "../../shared/domain";
+import { actIdentity } from "../../shared/act-identity";
 import { encodeQr, qrPath } from "./qr";
 
 /** Quiet zone in modules, as required for a scannable symbol. */
@@ -75,6 +76,7 @@ export function LobbyGraphic({
 }
 
 export function ActCardGraphic({ act }: { act: PublicAct }) {
+  const identity = actIdentity(act);
   return (
     <section className="stage act-card" key={act.id}>
       {act.publicImageAssetId && (
@@ -88,8 +90,11 @@ export function ActCardGraphic({ act }: { act: PublicAct }) {
         <p className="stage__kicker">
           Act {String(act.order + 1).padStart(2, "0")}
         </p>
-        <h1 className="act-card__performer">{act.performerName}</h1>
-        <p className="act-card__name">{act.actName}</p>
+        <h1 className="act-card__performer">{act.actName}</h1>
+        <p className="act-card__name">{identity.primary}</p>
+        {identity.secondary && (
+          <p className="act-card__members">{identity.secondary}</p>
+        )}
         <p className="act-card__meta">
           <span>{act.schoolYear}</span>
           <i aria-hidden="true" />
@@ -112,6 +117,7 @@ export function ActCardGraphic({ act }: { act: PublicAct }) {
  * never grows to fill half the screen.
  */
 export function PerformanceGraphic({ act }: { act: PublicAct }) {
+  const identity = actIdentity(act);
   return (
     <section className="stage performance" key={act.id}>
       {act.publicImageAssetId && (
@@ -123,7 +129,10 @@ export function PerformanceGraphic({ act }: { act: PublicAct }) {
       )}
       <div className="performance__copy">
         <h1 className="performance__act">{act.actName}</h1>
-        <p className="performance__performer">{act.performerName}</p>
+        <p className="performance__performer">{identity.primary}</p>
+        {identity.secondary && (
+          <p className="performance__members">{identity.secondary}</p>
+        )}
         <p className="performance__meta">
           <span>{act.schoolYear}</span>
           {act.actType && (

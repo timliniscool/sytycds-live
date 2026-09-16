@@ -106,20 +106,22 @@ export function deriveVoteView(inputs: VoteInputs): VoteView {
 /**
  * What a phone does the moment it learns voting has closed.
  *
- * A score the voter had chosen but not yet locked in counts: it is submitted
- * automatically, against the close the server announced, and the phone shows
- * it as sending. Nothing chosen means nothing sent. A submission already in
- * flight, or already accepted, is left exactly as it is: the server holds it
- * and decides, so a LOCK IN followed by a close can never produce two votes.
+ * A chosen score is local state, not a vote. Closing discards any selection or
+ * confirmation that has not started an explicit LOCK IN request. A request
+ * already in flight is left to authoritative server ordering.
  */
 export function resolveVotingClose(submission: VoteSubmission): {
   submission: VoteSubmission;
   autoSubmit: AudienceScore | null;
 } {
-  if (submission.kind === "selected" || submission.kind === "confirming") {
+  if (
+    submission.kind === "selected" ||
+    submission.kind === "confirming" ||
+    submission.kind === "rejected"
+  ) {
     return {
-      submission: { kind: "submitting", score: submission.score },
-      autoSubmit: submission.score,
+      submission: { kind: "idle" },
+      autoSubmit: null,
     };
   }
   return { submission, autoSubmit: null };
@@ -142,7 +144,7 @@ export function connectionNotice(
 export function rejectionMessage(reason: VoteRejection): string {
   switch (reason) {
     case "VOTING_CLOSED":
-      return "Voting closed before your score could be counted.";
+      return "Voting closed before your score was submitted.";
     case "WRONG_ACT":
       return "The act changed before your score arrived.";
     case "INVALID_SCORE":

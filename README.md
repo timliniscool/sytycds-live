@@ -267,7 +267,8 @@ _ACTS & MEDIA._ Each act has:
 
 | Field              | Who sees it                                     |
 | ------------------ | ----------------------------------------------- |
-| Performer name     | Projector and phones                            |
+| Performers         | Projector and phones according to display rules |
+| Group name         | Projector and phones when supplied              |
 | School year        | Projector and phones                            |
 | Act name           | Projector and phones                            |
 | Act type           | Projector (and phones with the act name)        |
@@ -279,13 +280,34 @@ _ACTS & MEDIA._ Each act has:
 act current. **DELETE ACT** opens a summary of exactly what would be destroyed;
 see [Deleting an act](#deleting-an-act).
 
+### Soloists and groups
+
+Every act has an ordered performer list. Use **+ ADD PERFORMER** for duos,
+bands, dance crews and large ensembles; up to 64 members are retained as
+separate records and can be edited or removed individually. **Group name** is
+optional: a multi-person act does not need one, and supplying one never removes
+the member names.
+
+The advanced **Projector performer display** defaults to **Automatic**. A solo
+shows the person's name; a short unnamed group shows its names; a named group
+shows the group name with a readable member line; a large named group shows the
+group name and a performer count; a large unnamed group shows `Ensemble · N
+performers`. Automatic considers the length of the rendered member line as
+well as the raw count. The editor preview shows the chosen result. Explicit
+overrides can show only the group name, group plus members, member names, or a
+performer count.
+
 ### On audience phones
 
 _Advanced settings → On audience phones._ Phones always receive the act name,
-the performer and the year or group. Two switches control the rest:
+the public performer/group identity and the year or cohort. Three switches
+control the rest:
 
 - `Show description on audience phones` — off by default.
 - `Show act image on audience phones` — off by default.
+- `Show full member list to audience` — off by default. When off, the server
+  sends only the identity and count needed to represent the act; internal
+  member rows are not sent to the phone.
 
 When a switch is off, the server does not send that field at all; it is not
 hidden in the phone, it is absent. Stage media — performance visuals and
@@ -328,8 +350,11 @@ library of every act that uses it. **DELETE** removes a file from storage and
 is only available while nothing uses it. Deleting an act removes the files
 only it used or owned; shared files stay.
 
-The library is created with the act, so a new act must be saved before files
-can be added to it.
+Files can be added while the act is still being created. They wait in the
+form, can already be chosen for the act image, performance visual or backing
+audio, and are uploaded into the new act's library the moment **ADD TO
+RUNNING ORDER** is pressed. A file whose upload fails stays listed with the
+reason and a **RETRY UPLOAD** button; the act itself is never left half-made.
 
 ---
 
@@ -337,8 +362,10 @@ can be added to it.
 
 _Act media library, then Presentation → Backing audio._
 
-Upload the track to the act's media library, then choose it in **Backing
-audio**. You do not build a cue for this. Then choose when it starts:
+Add the track to the act's media library (while creating the act or later),
+then choose it under **Backing audio**. Backing audio is only ever a choice
+from the library — there is no second uploader for it — and you do not build a
+cue for it. Then choose when it starts:
 
 - **Automatically, when PERFORMANCE begins** — the GO into PERFORMANCE starts
   the track. This is what most acts want.
@@ -488,34 +515,25 @@ the current act 0–10. **CLOSE AUDIENCE VOTING** ends it.
 
 How a phone vote works, exactly:
 
-1. The voter taps a number. The phone says _"Selected 8 — lock it in, or it is
-   sent when voting closes"_.
-2. They press **LOCK IN 8** and confirm, and the vote is sent immediately;
-   **or** they do nothing more, and the moment you close voting the phone
-   sends the 8 it was holding.
+1. The voter taps a number. The phone says _"Selected 8 — not submitted yet"_.
+2. They press **LOCK IN 8** and confirm. Only then is the vote sent.
 3. Only the server decides whether a vote counts.
 4. The phone shows the score as locked only after the server accepts it.
 
-**Closing voting counts what the hall had chosen.** A phone holding a selected
-score submits it automatically; a phone that never chose anything sends
-nothing; a score that was already locked in is never sent twice. Because your
-CLOSE reaches phones before their automatic submissions reach the server,
-each close carries an identifier and the server accepts submissions quoting it
-for a short, bounded grace interval (eight seconds) — for that act, for that
-close, one per phone, and never after the act changes or voting is reopened.
-An ordinary late LOCK IN after the close is still refused, and the phone says
-_"Voting closed before your score could be counted."_
+**A selection is not a vote.** Closing voting discards any score a phone had
+selected but had not locked in, and sends nothing. A late request cannot quote
+the close transition to gain an exception. The phone says _"Voting closed"_;
+if an explicit request lost the server race it says _"Voting closed before
+your score was submitted."_
 
 If a lock-in and your close cross in flight, the server decides: a vote
-committed while voting was still open counts, and anything arriving after the
-grace interval is refused.
+committed while voting was still open counts, and anything the server orders
+after CLOSE is refused.
 
 One vote per phone per act, and it cannot be changed. The console shows
 accepted votes, the weighted mean and how many phones are connected.
 
-Close voting before changing the act. Closing a thousand phones legitimately
-produces up to a thousand submissions in the following seconds; that is real
-votes being stored, not a fault.
+Close voting before changing the act. CLOSE itself produces no vote traffic.
 
 ---
 
@@ -532,10 +550,22 @@ The judge matrix shows three independent things per judge: whether they are
 A judge can be offline with scoring open; that is not an error, they simply
 have not loaded the page.
 
-Judges type a number. Anything from 0 to 10 counts as typed. Values outside
-that range are accepted and tapered by the server towards a bound, and the
-console shows both what was typed and the score that counts. This is a
-deliberate, documented part of the scoring model.
+Judges enter a value, not necessarily a plain decimal. The scoring page has a
+compact scientific keypad and the field accepts plain-text mathematics in the
+way a calculator or WolframAlpha would read it: `8.5`, `pi`, `e`, `1e6`,
+`infinity`, `sqrt(81)`, `sin(pi/2)`, `(7+3)/2`, `2^3`, `log(100)`, `exp(2)`,
+`5!`, `sum from k=1 to 10 of k^2` or `integral from 0 to pi of sin(x) dx`.
+Nothing is ever executed as code: a closed parser reads the expression and
+refuses anything else with a plain reason.
+
+Two numbers are shown to the judge. The **Effective Score** is the numeric
+value the entry evaluates to before the show's scoring transformation is
+applied. Anything from 0 to 10 counts as is; values outside that range are
+tapered by the server towards a bound (infinity counts as 15, negative
+infinity as −5), and the page says what the entry will count as when that
+differs. An entry richer than a plain number or constant is typeset as
+mathematics on the judge's page, in the console's judge matrix and on the
+projector scoreboard, with the value it evaluated to beside it.
 
 ---
 
@@ -651,6 +681,20 @@ Reveal is yours to control (_RESULTS_):
 
 Switch the projector to **FINAL RESULTS** to put the current stage on screen.
 
+### When nothing is eligible yet
+
+Until at least one act has been finalised there is nothing to rank, so every
+stage except HIDDEN is disabled and **PUT FINAL RESULTS ON PROJECTOR** stays
+shut. An empty results board in front of an audience is worse than no results
+board at all.
+
+The panel tells you why rather than leaving you with a dead button. It names
+the next thing to do — typically _"4 acts are fully scored and waiting for
+FINALISE"_ — and the table underneath gives the exact reason for each act:
+which judges have not scored, whether the audience result is missing, or that
+scoring is complete and only FINALISE remains. Hovering a disabled control
+repeats the reason.
+
 ---
 
 ## Deleting an act
@@ -694,27 +738,24 @@ contained. Show history is append-only and is never rewritten.
 
 _SETUP & PREFLIGHT → 04 / DANGER → **RESET ENTIRE SHOW…**_
 
-This returns the event to the **default show**, as if it had just been
-created.
+This returns the event to a safe, empty running state while keeping the venue
+setup ready for the next event.
 
 **It clears:** every act and cue; every uploaded and generated media file
 (from storage too); every audience vote and aggregate, judge score, finalised
 result and ranking snapshot; the current act, display mode, show-flow step,
-voting and reveal state; the event name, short name and tagline; the theme and
-typeface; the judge panel and its links; the audience/judge weighting; the GO
-behaviour; the public intermission and emergency text; the projector pairing
-code **and** every paired projector session; and any generated test show and
-its seed.
+voting and reveal state; every temporary projector pairing code; and any
+generated test show and its seed.
 
-**Afterwards the show is** “So You Think You Can Do Stuff”, four judges named
-Judge 1–4, 50:50 weighting, the default theme and the system typeface, with
-the projector back on its pairing screen. Re-pair the display and reissue
-judge links before the next event.
+**It keeps:** the event name, short name, tagline and public messages; the
+theme and typeface; reactions; the judge panel and its links; audience/judge
+weighting; GO behaviour; and established projector sessions. The projector and
+judge devices stay paired but immediately receive the empty lobby state.
 
 **It never touches** the administrator account or your sign-in, deployment
 secrets, Cloudflare configuration, cached typefaces or any platform asset.
-`RESET ENTIRE SHOW` is a reset of the show, not a factory reset of the
-installation.
+`RESET ENTIRE SHOW` is a between-events data reset, not a factory reset of the
+installation or its venue configuration.
 
 The confirmation is deliberate: pressing **RESET ENTIRE SHOW…** opens a warning,
 and the destructive button stays disabled until you type either the event's own
@@ -744,8 +785,9 @@ reveals and final results live; mid-show, early, sparse and heavy audiences,
 media-heavy, long text, edge scoring inputs and deliberately broken media are
 all in the pool and can be pinned from the list.
 
-Generation **replaces** the current show data and is confirmed by phrase; it
-never appends invented acts to a real running order. Your event name, theme,
+Generation **replaces** the current show data and asks for one clear
+confirmation that says so; it never appends invented acts to a real running
+order. Generated acts include soloists, named groups and unnamed groups. Your event name, theme,
 typeface and GO behaviour are kept; the judge panel is replaced by the
 scenario's. Everything generated is tagged and stored under its own namespace,
 so **RESET ENTIRE SHOW** removes all of it.
@@ -940,10 +982,9 @@ production they are Worker secrets. `docs/deployment.md` is the full runbook.
   console said it would, or refuses with the reason the console already shows.
   Dangerous actions are never implied by a step unless the show's stored GO
   policy allows them.
-- **Voting close is bounded, not reopened.** CLOSE mints a close revision; a
-  phone's automatic submission quoting it is accepted for `VOTE_CLOSE_GRACE_MS`
-  after the close, for that act only, once per phone. Everything else after the
-  close is refused.
+- **Voting requires explicit consent.** Selecting a score is client-local.
+  CLOSE discards it without a request, and the transaction order of an explicit
+  LOCK IN versus CLOSE is authoritative. Nothing is accepted after CLOSE.
 - **Presence is authoritative.** Paired (a session row), connected (a socket
   attachment) and armed (recorded on the projector's attachment from its own
   report) are three facts computed from the coordinator's own state and pushed

@@ -10,11 +10,7 @@ import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
-import {
-  PROTOCOL_VERSION,
-  showRevision,
-  VOTE_CLOSE_GRACE_MS,
-} from "../shared/domain";
+import { PROTOCOL_VERSION, showRevision } from "../shared/domain";
 import {
   MAX_JUDGES,
   MIN_JUDGES,
@@ -350,14 +346,14 @@ describe("theme persistence", () => {
 });
 
 describe("audience vote consent", () => {
-  it("submits a selected but unlocked score automatically when voting closes", () => {
+  it("discards a selected but unlocked score when voting closes", () => {
     expect(resolveVotingClose({ kind: "selected", score: 9 })).toEqual({
-      submission: { kind: "submitting", score: 9 },
-      autoSubmit: 9,
+      submission: { kind: "idle" },
+      autoSubmit: null,
     });
     expect(resolveVotingClose({ kind: "confirming", score: 9 })).toEqual({
-      submission: { kind: "submitting", score: 9 },
-      autoSubmit: 9,
+      submission: { kind: "idle" },
+      autoSubmit: null,
     });
   });
 
@@ -394,8 +390,8 @@ describe("audience vote consent", () => {
     });
   });
 
-  it("counts a delayed automatic submission inside the grace window, and only then", async () => {
-    await withShow("prompt1-vote-grace", async (storage) => {
+  it("never accepts a selected score after close, even with a close revision", async () => {
+    await withShow("prompt1-vote-no-grace", async (storage) => {
       await seedShowWithAct(storage);
       command(storage, "OPEN_AUDIENCE_VOTING");
       command(storage, "CLOSE_AUDIENCE_VOTING");
@@ -407,8 +403,8 @@ describe("audience vote consent", () => {
         )
         .one().vote_closed_at;
 
-      // The phone's automatic submission reaches the server 3 s after CLOSE,
-      // quoting the close it is answering: accepted and counted.
+      // A selected score is local-only. Quoting the genuine close does not
+      // turn it into an accepted vote.
       expect(
         submitAudienceVote(
           storage,
@@ -417,8 +413,8 @@ describe("audience vote consent", () => {
           { actIdentifier: "act-1", score: 9, closeRevision: revision },
           closedAt + 3_000,
         ),
-      ).toMatchObject({ ok: true });
-      // The same phone again: one vote per phone still holds.
+      ).toEqual({ ok: false, code: "VOTING_CLOSED" });
+      // No close revision grants an exception.
       expect(
         submitAudienceVote(
           storage,
@@ -427,7 +423,7 @@ describe("audience vote consent", () => {
           { actIdentifier: "act-1", score: 3, closeRevision: revision },
           closedAt + 3_500,
         ),
-      ).toEqual({ ok: false, code: "ALREADY_VOTED" });
+      ).toEqual({ ok: false, code: "VOTING_CLOSED" });
       // An ordinary LOCK IN after CLOSE has no close revision: refused.
       expect(
         submitAudienceVote(
@@ -448,22 +444,22 @@ describe("audience vote consent", () => {
           closedAt + 1_000,
         ),
       ).toEqual({ ok: false, code: "VOTING_CLOSED" });
-      // Past the grace window the revision no longer helps.
+      // Time passing does not change the closed state.
       expect(
         submitAudienceVote(
           storage,
           PRIMARY_SHOW_ID,
           voterHash(4),
           { actIdentifier: "act-1", score: 8, closeRevision: revision },
-          closedAt + VOTE_CLOSE_GRACE_MS + 1,
+          closedAt + 60_000,
         ),
       ).toEqual({ ok: false, code: "VOTING_CLOSED" });
-      expect(voteCount(storage)).toBe(1);
+      expect(voteCount(storage)).toBe(0);
     });
   });
 
-  it("supersedes the grace window when the act changes", async () => {
-    await withShow("prompt1-vote-grace-act", async (storage) => {
+  it("supersedes the close marker when the act changes", async () => {
+    await withShow("prompt1-vote-close-act", async (storage) => {
       await seedShowWithAct(storage);
       command(storage, "OPEN_AUDIENCE_VOTING");
       command(storage, "CLOSE_AUDIENCE_VOTING");

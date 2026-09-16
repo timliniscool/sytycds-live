@@ -15,6 +15,7 @@ import {
   type VoteRejection,
   type VoteSubmission,
 } from "../vote/vote-view";
+import { actIdentity } from "../../shared/act-identity";
 import {
   REACTION_IDS,
   type ReactionHistogram,
@@ -160,33 +161,20 @@ export default function VoteSurface() {
     if (votingOpen) setSawVotingOpen(true);
   }, [votingOpen]);
 
-  // Voting closed underneath this phone. A score the voter had chosen but not
-  // yet locked in is submitted now, against the close the server announced,
-  // so it is counted inside the grace window; a phone holding nothing sends
-  // nothing, and a submission already in flight is left to the server.
+  // Voting closed underneath this phone. Unsent local selection is discarded;
+  // only a LOCK IN request already in flight remains for server ordering.
   useEffect(() => {
     if (votingOpen || !sawVotingOpen) return;
     const resolved = resolveVotingClose(submissionRef.current);
     if (resolved.submission !== submissionRef.current)
       setSubmission(resolved.submission);
-    if (resolved.autoSubmit !== null) {
-      void submit(resolved.autoSubmit, {
-        closeRevision: client.getState().voteCloseRevision,
-      });
-    }
-    // `submit` reads only stable refs and the client; the close is the event.
   }, [votingOpen, sawVotingOpen]);
 
-  async function submit(
-    score: AudienceScore,
-    options: { closeRevision?: string | null } = {},
-  ): Promise<void> {
-    const closing = options.closeRevision !== undefined;
-    // The server is authoritative, but a phone that already knows voting has
-    // closed should not send an ordinary LOCK IN at all. The automatic
-    // submission on close is the one deliberate exception, and it quotes the
-    // close it is answering so the server can bound it.
-    if (!actId || (!votingOpen && !closing)) {
+  async function submit(score: AudienceScore): Promise<void> {
+    // The server remains authoritative. A phone that already knows voting has
+    // closed does not send at all; a request already in flight may still lose
+    // the race when the server serialises CLOSE first.
+    if (!actId || !votingOpen) {
       setSubmission({ kind: "idle" });
       return;
     }
@@ -199,9 +187,6 @@ export default function VoteSurface() {
         body: JSON.stringify({
           actId,
           score,
-          ...(closing && options.closeRevision
-            ? { closeRevision: options.closeRevision }
-            : {}),
         }),
       });
       const result = (await response.json()) as VoteResponse;
@@ -240,6 +225,13 @@ export default function VoteSurface() {
       : null;
 
   const voting = view.kind === "VOTING";
+  const visibleAct =
+    view.kind === "VOTING" || view.kind === "ACT" || view.kind === "CLOSED"
+      ? view.act
+      : null;
+  const visibleIdentity = visibleAct
+    ? actIdentity(visibleAct, { surface: "audience" })
+    : null;
   return (
     <main className={`vote${voting ? " vote--voting" : ""}`} aria-live="polite">
       <header className="vote__head">
@@ -265,8 +257,19 @@ export default function VoteSurface() {
             )}
             <h1 className="vote__act">{view.act.actName}</h1>
             <p className="vote__performer">
-              {view.act.performerName} · {view.act.schoolYear}
+              {visibleIdentity?.primary} · {view.act.schoolYear}
             </p>
+            {visibleIdentity?.secondary && (
+              <p className="vote__members">{visibleIdentity.secondary}</p>
+            )}
+            {!voting &&
+              visibleIdentity?.memberNames &&
+              visibleIdentity.memberNames !== visibleIdentity.primary &&
+              visibleIdentity.memberNames !== visibleIdentity.secondary && (
+                <p className="vote__full-members">
+                  {visibleIdentity.memberNames}
+                </p>
+              )}
             {!voting && view.act.publicDescription && (
               <p className="vote__description">{view.act.publicDescription}</p>
             )}
@@ -309,11 +312,8 @@ export default function VoteSurface() {
       )}
       {view.kind === "CLOSED" && (
         <Message
-          body="Voting has closed"
+          body="Voting closed"
           detail={
-            // A score still travelling when voting closed is being counted
-            // inside the grace window; one that missed it is a lost race, not
-            // a silent failure. Say exactly which happened.
             submission.kind === "submitting"
               ? `Sending your score of ${submission.score}…`
               : submission.kind === "rejected"
@@ -352,6 +352,9 @@ export default function VoteSurface() {
                 </span>
                 <span className="vote__results-who">
                   <b>{entry.performerName}</b>
+                  {entry.performerSubtitle && (
+                    <em>{entry.performerSubtitle}</em>
+                  )}
                   <small>{entry.actName}</small>
                 </span>
                 <span className="vote__results-score">
@@ -409,14 +412,13 @@ export default function VoteSurface() {
               </p>
             )}
             {/*
-              A chosen score counts: either when LOCK IN is pressed, or
-              automatically the moment the operator closes voting. The phone
-              says so, so nobody is surprised either way.
+              A chosen score is local only. It is not sent until the voter
+              explicitly confirms LOCK IN.
             */}
             <p className="vote__pending" aria-live="polite">
               {pendingScore === null
-                ? "Tap a score. It counts when you lock it in, or when voting closes."
-                : `Selected ${pendingScore} — lock it in, or it is sent when voting closes`}
+                ? "Tap a score, then lock it in."
+                : `Selected ${pendingScore} — not submitted yet`}
             </p>
             <button
               type="button"

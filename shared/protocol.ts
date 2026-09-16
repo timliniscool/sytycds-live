@@ -177,8 +177,8 @@ export interface VotingStateUpdateMessage extends RevisionedServerMessage {
   type: "voting_state_update";
   state: AudienceVoteState;
   /**
-   * Set on CLOSED: the identifier a phone quotes when it submits the score it
-   * was holding at the moment voting closed. Null while voting is open.
+   * Set on CLOSED so clients can identify the transition. It does not grant a
+   * post-close submission window. Null while voting is open.
    */
   closeRevision: string | null;
 }

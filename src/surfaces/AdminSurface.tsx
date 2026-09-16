@@ -23,6 +23,7 @@ import type {
 import { EmergencyPanel } from "../admin/EmergencyPanel";
 import { HistoryPanel } from "../admin/HistoryPanel";
 import { MediaConsole } from "../admin/MediaConsole";
+import { JudgeEntry } from "../math/MathExpression";
 import { ResultsPanel } from "../admin/ResultsPanel";
 import { ShowIdentityPanel } from "../admin/ShowIdentityPanel";
 import {
@@ -841,7 +842,9 @@ function Console() {
                     </div>
                     {judge.submission ? (
                       <p>
-                        <b>{judge.submission.input.raw}</b>
+                        <b>
+                          <JudgeEntry raw={judge.submission.input.raw} />
+                        </b>
                         {Math.abs(
                           judge.submission.effectiveScore -
                             (judge.submission.parsed.finiteValue ??

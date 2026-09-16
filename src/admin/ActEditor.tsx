@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 
 import { describeOperation } from "./cue-language";
 import type {
@@ -8,12 +8,17 @@ import type {
   MediaAsset,
   MediaAssetReference,
   PerformanceVisualMode,
+  Performer,
+  PerformerDisplayMode,
   PersistedCue,
 } from "../../shared/domain";
+import { actIdentity, MAX_PERFORMERS } from "../../shared/act-identity";
 import { CURATED_THEMES, type ThemeId } from "../../shared/themes";
 
 interface ActDraft {
-  performerName: string;
+  performers: Performer[];
+  groupName: string;
+  performerDisplayMode: PerformerDisplayMode;
   schoolYear: string;
   actName: string;
   actType: string;
@@ -22,6 +27,7 @@ interface ActDraft {
   actImageAssetId: string;
   showDescriptionToAudience: boolean;
   showImageToAudience: boolean;
+  showFullMemberListToAudience: boolean;
   performanceVisualMode: PerformanceVisualMode;
   performanceAssetId: string;
   performanceFit: ActPresentation["performanceFit"];
@@ -32,7 +38,9 @@ interface ActDraft {
 }
 
 const EMPTY_ACT: ActDraft = {
-  performerName: "",
+  performers: [{ id: `performer-${crypto.randomUUID()}`, name: "" }],
+  groupName: "",
+  performerDisplayMode: "AUTOMATIC",
   schoolYear: "",
   actName: "",
   actType: "",
@@ -41,6 +49,7 @@ const EMPTY_ACT: ActDraft = {
   actImageAssetId: "",
   showDescriptionToAudience: false,
   showImageToAudience: false,
+  showFullMemberListToAudience: false,
   performanceVisualMode: "AUTOMATIC",
   performanceAssetId: "",
   performanceFit: "contain",
@@ -83,10 +92,65 @@ const EMPTY_CUE: CueDraft = {
 const LIBRARY_ACCEPT =
   "image/jpeg,image/png,image/webp,audio/mpeg,audio/mp4,audio/ogg,audio/wav,video/mp4,video/webm";
 
+type LibraryKind = MediaAsset["kind"];
+
+/**
+ * A file chosen before the act exists. It waits in the browser, can already be
+ * assigned to a presentation slot, and is uploaded into the act's library the
+ * moment the act has been created. Its id is local and never reaches the
+ * server: slots that point at a queued file are resolved to real asset ids
+ * after the upload.
+ */
+interface QueuedFile {
+  id: string;
+  file: File;
+  kind: LibraryKind;
+  /** Object URL for the local preview; revoked when the entry goes. */
+  url: string;
+  /** Set when an upload attempt failed; the entry stays so it can be retried. */
+  error: string | null;
+}
+
+/** One selectable entry for the presentation slots, from either source. */
+interface MediaChoice {
+  id: string;
+  label: string;
+  description: string;
+  url: string;
+  kind: LibraryKind;
+}
+
+type UploadOutcome =
+  { ok: true; assetId: string } | { ok: false; error: string };
+
+const QUEUED_PREFIX = "queued-";
+const isQueuedId = (id: string) => id.startsWith(QUEUED_PREFIX);
+
+function libraryKind(file: File): LibraryKind | null {
+  if (file.type.startsWith("image/")) return "image";
+  if (file.type.startsWith("audio/")) return "audio";
+  if (file.type.startsWith("video/")) return "video";
+  return null;
+}
+
+function describeFile(file: File): string {
+  return `${(file.size / 1_048_576).toFixed(1)} MB`;
+}
+
 function actDraft(act: AdminAct | null): ActDraft {
   return act
     ? {
-        performerName: act.performerName,
+        performers:
+          act.performers && act.performers.length > 0
+            ? [...act.performers]
+            : [
+                {
+                  id: `performer-${crypto.randomUUID()}`,
+                  name: act.performerName,
+                },
+              ],
+        groupName: act.groupName ?? "",
+        performerDisplayMode: act.performerDisplayMode ?? "AUTOMATIC",
         schoolYear: act.schoolYear,
         actName: act.actName,
         actType: act.actType,
@@ -96,6 +160,7 @@ function actDraft(act: AdminAct | null): ActDraft {
           act.presentation.actImageAssetId ?? act.publicImageAssetId ?? "",
         showDescriptionToAudience: act.showDescriptionToAudience,
         showImageToAudience: act.showImageToAudience,
+        showFullMemberListToAudience: act.showFullMemberListToAudience ?? false,
         performanceVisualMode: act.presentation.performanceVisualMode,
         performanceAssetId: act.presentation.performanceAssetId ?? "",
         performanceFit: act.presentation.performanceFit,
@@ -241,6 +306,12 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
   const [imageSequence, setImageSequence] = useState<Set<string>>(new Set());
   const [uploading, setUploading] = useState<Record<string, number>>({});
   const [dragging, setDragging] = useState(false);
+  const [queued, setQueued] = useState<QueuedFile[]>([]);
+  // Files that failed during creation stay queued for a retry; the switch from
+  // "creating" to the new act must not wipe them.
+  const keepQueueRef = useRef(false);
+  const actsRef = useRef(acts);
+  actsRef.current = acts;
   const [cueId, setCueId] = useState<string | null>(null);
   const currentCue = selected?.cues.find((cue) => cue.id === cueId) ?? null;
   const [cue, setCue] = useState<CueDraft>(() => cueDraft(currentCue));
@@ -249,12 +320,17 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
   const [deletion, setDeletion] = useState<ActDeletionPreview | null>(null);
   const [deletePhrase, setDeletePhrase] = useState("");
 
+  // Fall back to a real act only when the selection has gone stale (deleted,
+  // or never made). An explicit "+ ADD ACT" clears the selection on purpose
+  // and must not be undone here, or the new-act form could never open while
+  // the running order has acts in it.
   useEffect(() => {
+    if (creating) return;
     if (selectedId && acts.some((act) => act.id === selectedId)) return;
     const next = activeActId ?? acts[0]?.id ?? null;
     setSelectedId(next);
     setCreating(acts.length === 0);
-  }, [acts, activeActId, selectedId]);
+  }, [acts, activeActId, selectedId, creating]);
 
   useEffect(() => {
     setDraft(actDraft(creating ? null : selected));
@@ -262,7 +338,26 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     setCue({ ...EMPTY_CUE });
     setSelectedAssetId(null);
     setImageSequence(new Set());
+    if (keepQueueRef.current) {
+      keepQueueRef.current = false;
+    } else {
+      setQueued((current) => {
+        current.forEach((entry) => URL.revokeObjectURL(entry.url));
+        return [];
+      });
+    }
   }, [selectedId, creating]);
+
+  // Nothing leaks when the editor unmounts mid-creation.
+  useEffect(
+    () => () => {
+      setQueued((current) => {
+        current.forEach((entry) => URL.revokeObjectURL(entry.url));
+        return [];
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     setCue(cueDraft(currentCue));
@@ -305,10 +400,12 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     };
   }, [libraryActId, referenceKey]);
 
-  async function refreshAssets(): Promise<void> {
-    if (!libraryActId) return;
+  async function refreshAssets(
+    actId: string | null = libraryActId,
+  ): Promise<void> {
+    if (!actId) return;
     const response = await fetch(
-      `/api/admin/media?actId=${encodeURIComponent(libraryActId)}`,
+      `/api/admin/media?actId=${encodeURIComponent(actId)}`,
       { credentials: "same-origin" },
     );
     if (response.ok) {
@@ -343,7 +440,127 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
       ),
     [assets],
   );
+  /**
+   * What the presentation slots can point at. While the act is being created
+   * the choices are the queued files; afterwards they are the act's library.
+   * Either way the slot holds an id and the operator sees a filename.
+   */
+  const choices: MediaChoice[] = useMemo(
+    () =>
+      creating
+        ? queued.map((entry) => ({
+            id: entry.id,
+            label: entry.file.name,
+            description: describeFile(entry.file),
+            url: entry.url,
+            kind: entry.kind,
+          }))
+        : assets.map((asset) => ({
+            id: asset.id,
+            label: asset.originalFilename,
+            description: describeAsset(asset),
+            url: assetUrl(asset),
+            kind: asset.kind,
+          })),
+    [creating, queued, assets],
+  );
+  const imageChoices = choices.filter((choice) => choice.kind === "image");
+  const videoChoices = choices.filter((choice) => choice.kind === "video");
+  const audioChoices = choices.filter(
+    (choice) => choice.kind === "audio" || choice.kind === "video",
+  );
   const preview = assets.find((asset) => asset.id === selectedAssetId) ?? null;
+  const previewQueued =
+    queued.find((entry) => entry.id === selectedAssetId) ?? null;
+  const backingChoice =
+    choices.find((choice) => choice.id === draft.backingAudioAssetId) ?? null;
+
+  /** The slots a queued file has already been given, for its badges. */
+  function queuedUses(id: string): string[] {
+    const uses: string[] = [];
+    if (draft.actImageAssetId === id) uses.push("ACT IMAGE");
+    if (draft.performanceAssetId === id) uses.push("PERFORMANCE VISUAL");
+    if (draft.backingAudioAssetId === id) uses.push("BACKING AUDIO");
+    return uses;
+  }
+
+  function addFiles(files: readonly File[]): void {
+    if (creating) {
+      const accepted: QueuedFile[] = [];
+      const refused: string[] = [];
+      for (const file of files) {
+        const kind = libraryKind(file);
+        if (!kind) {
+          refused.push(file.name);
+          continue;
+        }
+        accepted.push({
+          id: `${QUEUED_PREFIX}${crypto.randomUUID()}`,
+          file,
+          kind,
+          url: URL.createObjectURL(file),
+          error: null,
+        });
+      }
+      if (accepted.length > 0)
+        setQueued((current) => [...current, ...accepted]);
+      setNotice(
+        refused.length > 0
+          ? `Not added (unsupported type): ${refused.join(", ")}.`
+          : accepted.length > 0
+            ? `${accepted.length} file${accepted.length === 1 ? "" : "s"} ready. ${accepted.length === 1 ? "It uploads" : "They upload"} into the act's library when you add the act.`
+            : null,
+      );
+      return;
+    }
+    uploadFiles(files);
+  }
+
+  function removeQueued(id: string): void {
+    setQueued((current) => {
+      const entry = current.find((candidate) => candidate.id === id);
+      if (entry) URL.revokeObjectURL(entry.url);
+      return current.filter((candidate) => candidate.id !== id);
+    });
+    setSelectedAssetId((current) => (current === id ? null : current));
+    // A slot cannot point at a file that is no longer coming.
+    setDraft((current) => ({
+      ...current,
+      actImageAssetId:
+        current.actImageAssetId === id ? "" : current.actImageAssetId,
+      performanceAssetId:
+        current.performanceAssetId === id ? "" : current.performanceAssetId,
+      performanceVisualMode:
+        current.performanceAssetId === id
+          ? "AUTOMATIC"
+          : current.performanceVisualMode,
+      backingAudioAssetId:
+        current.backingAudioAssetId === id ? "" : current.backingAudioAssetId,
+    }));
+  }
+
+  /** A file that failed during creation is uploaded into the existing act. */
+  async function retryQueued(entry: QueuedFile): Promise<void> {
+    if (!libraryActId) return;
+    setBusy(true);
+    const outcome = await uploadFile(entry.file, libraryActId);
+    setBusy(false);
+    if (outcome.ok) {
+      removeQueued(entry.id);
+      setNotice(
+        `${entry.file.name} is in the act's library. Choose it in a Presentation slot if it was meant for one.`,
+      );
+    } else {
+      setQueued((current) =>
+        current.map((candidate) =>
+          candidate.id === entry.id
+            ? { ...candidate, error: outcome.error }
+            : candidate,
+        ),
+      );
+      setNotice(`${entry.file.name} failed again: ${outcome.error}.`);
+    }
+  }
 
   function updateAct<Field extends keyof ActDraft>(
     field: Field,
@@ -352,60 +569,186 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
+  /** The request body for POST and PATCH, from a draft. */
+  function actBody(source: ActDraft): string {
+    return JSON.stringify({
+      performers: source.performers,
+      groupName: source.groupName,
+      performerDisplayMode: source.performerDisplayMode,
+      schoolYear: source.schoolYear,
+      actName: source.actName,
+      actType: source.actType,
+      publicDescription: source.publicDescription,
+      internalNotes: source.internalNotes,
+      publicImageAssetId: source.actImageAssetId || null,
+      showDescriptionToAudience: source.showDescriptionToAudience,
+      showImageToAudience: source.showImageToAudience,
+      showFullMemberListToAudience: source.showFullMemberListToAudience,
+      presentation: {
+        actImageAssetId: source.actImageAssetId || null,
+        performanceVisualMode: source.performanceVisualMode,
+        performanceAssetId:
+          source.performanceVisualMode === "AUTOMATIC"
+            ? null
+            : source.performanceAssetId || null,
+        performanceFit: source.performanceFit,
+        backingAudioAssetId: source.backingAudioAssetId || null,
+        backingAudioStart: source.backingAudioStart,
+      },
+      appearance: {
+        themeId: source.themeId || null,
+        fontFamily: source.fontFamily || null,
+      },
+    });
+  }
+
   async function saveAct(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
+    if (creating) {
+      await createActWithMedia();
+      return;
+    }
     setBusy(true);
     setNotice(null);
-    const endpoint = creating
-      ? "/api/admin/acts"
-      : `/api/admin/acts/${encodeURIComponent(selected?.id ?? "")}`;
-    const response = await fetch(endpoint, {
-      method: creating ? "POST" : "PATCH",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        performerName: draft.performerName,
-        schoolYear: draft.schoolYear,
-        actName: draft.actName,
-        actType: draft.actType,
-        publicDescription: draft.publicDescription,
-        internalNotes: draft.internalNotes,
-        publicImageAssetId: draft.actImageAssetId || null,
-        showDescriptionToAudience: draft.showDescriptionToAudience,
-        showImageToAudience: draft.showImageToAudience,
-        presentation: {
-          actImageAssetId: draft.actImageAssetId || null,
-          performanceVisualMode: draft.performanceVisualMode,
-          performanceAssetId:
-            draft.performanceVisualMode === "AUTOMATIC"
-              ? null
-              : draft.performanceAssetId || null,
-          performanceFit: draft.performanceFit,
-          backingAudioAssetId: draft.backingAudioAssetId || null,
-          backingAudioStart: draft.backingAudioStart,
-        },
-        appearance: {
-          themeId: draft.themeId || null,
-          fontFamily: draft.fontFamily || null,
-        },
-      }),
-    });
+    const response = await fetch(
+      `/api/admin/acts/${encodeURIComponent(selected?.id ?? "")}`,
+      {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: actBody(draft),
+      },
+    );
     const result = (await response.json().catch(() => null)) as {
       act?: AdminAct;
       error?: string;
     } | null;
     setBusy(false);
-    if (!response.ok) {
-      setNotice(result?.error ?? "Act could not be saved.");
+    setNotice(
+      response.ok ? "Act saved." : (result?.error ?? "Act could not be saved."),
+    );
+  }
+
+  /**
+   * One creation, from the operator's point of view. The act is created
+   * first (its slots temporarily empty where they point at files that do not
+   * exist yet), the queued files are uploaded into the new act's library one
+   * after another, and the slots are then assigned their real asset ids. A
+   * file that fails stays in the queue, named, with a retry; the act itself
+   * is never left half-made or unexplained.
+   */
+  async function createActWithMedia(): Promise<void> {
+    setBusy(true);
+    setNotice(null);
+    const withoutQueued: ActDraft = {
+      ...draft,
+      actImageAssetId: isQueuedId(draft.actImageAssetId)
+        ? ""
+        : draft.actImageAssetId,
+      performanceAssetId: isQueuedId(draft.performanceAssetId)
+        ? ""
+        : draft.performanceAssetId,
+      performanceVisualMode: isQueuedId(draft.performanceAssetId)
+        ? "AUTOMATIC"
+        : draft.performanceVisualMode,
+      backingAudioAssetId: isQueuedId(draft.backingAudioAssetId)
+        ? ""
+        : draft.backingAudioAssetId,
+    };
+    const response = await fetch("/api/admin/acts", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: actBody(withoutQueued),
+    });
+    const result = (await response.json().catch(() => null)) as {
+      act?: AdminAct;
+      error?: string;
+    } | null;
+    if (!response.ok || !result?.act) {
+      setBusy(false);
+      setNotice(result?.error ?? "Act could not be created.");
       return;
     }
-    if (creating && result?.act) setSelectedId(result.act.id);
+    const actId = result.act.id;
+
+    const uploaded = new Map<string, string>();
+    const failed: QueuedFile[] = [];
+    for (const [index, entry] of queued.entries()) {
+      setNotice(
+        `Act created. Uploading ${entry.file.name} (${index + 1} of ${queued.length})…`,
+      );
+      const outcome = await uploadFile(entry.file, actId);
+      if (outcome.ok) {
+        uploaded.set(entry.id, outcome.assetId);
+        URL.revokeObjectURL(entry.url);
+      } else {
+        failed.push({ ...entry, error: outcome.error });
+      }
+    }
+
+    const resolve = (id: string) =>
+      isQueuedId(id) ? (uploaded.get(id) ?? "") : id;
+    const assigned: ActDraft = {
+      ...draft,
+      actImageAssetId: resolve(draft.actImageAssetId),
+      performanceAssetId: resolve(draft.performanceAssetId),
+      backingAudioAssetId: resolve(draft.backingAudioAssetId),
+    };
+    if (
+      assigned.performanceVisualMode !== "AUTOMATIC" &&
+      !assigned.performanceAssetId
+    )
+      assigned.performanceVisualMode = "AUTOMATIC";
+    const slotsToAssign =
+      uploaded.size > 0 &&
+      (assigned.actImageAssetId !== withoutQueued.actImageAssetId ||
+        assigned.performanceAssetId !== withoutQueued.performanceAssetId ||
+        assigned.backingAudioAssetId !== withoutQueued.backingAudioAssetId);
+    let assignmentError: string | null = null;
+    if (slotsToAssign) {
+      const patch = await fetch(
+        `/api/admin/acts/${encodeURIComponent(actId)}`,
+        {
+          method: "PATCH",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: actBody(assigned),
+        },
+      );
+      if (!patch.ok) assignmentError = await readError(patch);
+    }
+
+    // Let the running order catch up before the editor switches to the new
+    // act, so the form fills from the server's copy rather than an empty draft.
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      if (actsRef.current.some((act) => act.id === actId)) break;
+      await new Promise((tick) => setTimeout(tick, 100));
+    }
+    keepQueueRef.current = failed.length > 0;
+    setQueued(failed);
+    setSelectedId(actId);
     setCreating(false);
-    setNotice(
-      creating
-        ? "Act added to the running order. Its media library is ready below."
-        : "Act saved.",
-    );
+    setBusy(false);
+
+    const parts: string[] = ["Act added to the running order."];
+    if (uploaded.size > 0)
+      parts.push(
+        `${uploaded.size} file${uploaded.size === 1 ? "" : "s"} uploaded to its media library.`,
+      );
+    if (assignmentError)
+      parts.push(
+        `The files are in the library, but assigning them to the slots failed: ${assignmentError}. Choose them in Presentation and save.`,
+      );
+    if (failed.length > 0)
+      parts.push(
+        `${failed.length} upload${failed.length === 1 ? "" : "s"} failed (${failed
+          .map((entry) => `${entry.file.name}: ${entry.error}`)
+          .join(
+            "; ",
+          )}). ${failed.length === 1 ? "It is" : "They are"} kept below for RETRY UPLOAD; any slot that was meant for ${failed.length === 1 ? "it" : "them"} is empty until then.`,
+      );
+    setNotice(parts.join(" "));
   }
 
   /**
@@ -428,6 +771,28 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
     }
     setDeletePhrase("");
     setDeletion((await response.json()) as ActDeletionPreview);
+  }
+
+  async function duplicateSelected(): Promise<void> {
+    if (!selected) return;
+    setBusy(true);
+    setNotice(null);
+    const response = await fetch(
+      `/api/admin/acts/${encodeURIComponent(selected.id)}/duplicate`,
+      { method: "POST", credentials: "same-origin" },
+    );
+    const result = (await response.json().catch(() => null)) as {
+      act?: AdminAct;
+      error?: string;
+    } | null;
+    setBusy(false);
+    if (!response.ok || !result?.act) {
+      setNotice(result?.error ?? "Act could not be duplicated.");
+      return;
+    }
+    setSelectedId(result.act.id);
+    setCreating(false);
+    setNotice("Act duplicated without votes, scores, results or manual cues.");
   }
 
   async function confirmDeletion(): Promise<void> {
@@ -486,21 +851,16 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
   }
 
   /**
-   * One upload path for every kind of media. The file lands in this act's
-   * library, its metadata is read here in the browser and recorded, and the
-   * returned asset ID is what every slot and cue then refers to.
+   * One upload path for every kind of media. The file lands in the given
+   * act's library, its metadata is read here in the browser and recorded, and
+   * the returned asset ID is what every slot and cue then refers to.
    */
-  function uploadFile(file: File): Promise<string | null> {
-    return new Promise<string | null>((resolve) => {
-      if (!libraryActId) {
-        setNotice("Save the act first; its media library is created with it.");
-        resolve(null);
-        return;
-      }
+  function uploadFile(file: File, actId: string): Promise<UploadOutcome> {
+    return new Promise<UploadOutcome>((resolve) => {
       const xhr = new XMLHttpRequest();
       xhr.open(
         "POST",
-        `/api/admin/media?filename=${encodeURIComponent(file.name)}&actId=${encodeURIComponent(libraryActId)}`,
+        `/api/admin/media?filename=${encodeURIComponent(file.name)}&actId=${encodeURIComponent(actId)}`,
       );
       xhr.withCredentials = true;
       xhr.setRequestHeader("Content-Type", file.type);
@@ -511,15 +871,16 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
             [file.name]: Math.round((event.loaded / event.total) * 100),
           }));
       };
-      xhr.onload = () => {
+      const finished = () =>
         setUploading((current) => {
           const next = { ...current };
           delete next[file.name];
           return next;
         });
+      xhr.onload = () => {
+        finished();
         if (xhr.status >= 200 && xhr.status < 300) {
-          setNotice(`${file.name} added to the act's media library.`);
-          let assetId: string | null = null;
+          let assetId: string | null;
           try {
             const result = JSON.parse(xhr.responseText) as {
               asset?: { id?: unknown };
@@ -529,21 +890,21 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
           } catch {
             assetId = null;
           }
+          if (!assetId) {
+            resolve({ ok: false, error: "the server returned no asset id" });
+            return;
+          }
+          const id = assetId;
           void (async () => {
-            if (assetId) {
-              const metadata = await inspectMedia(file);
-              await fetch(
-                `/api/admin/media/${encodeURIComponent(assetId)}/metadata`,
-                {
-                  method: "PATCH",
-                  credentials: "same-origin",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify(metadata),
-                },
-              );
-            }
-            await refreshAssets();
-          })().finally(() => resolve(assetId));
+            const metadata = await inspectMedia(file);
+            await fetch(`/api/admin/media/${encodeURIComponent(id)}/metadata`, {
+              method: "PATCH",
+              credentials: "same-origin",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(metadata),
+            }).catch(() => undefined);
+            await refreshAssets(actId).catch(() => undefined);
+          })().finally(() => resolve({ ok: true, assetId: id }));
         } else {
           let detail = `HTTP ${xhr.status}`;
           try {
@@ -552,26 +913,32 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
           } catch {
             // Keep the status code.
           }
-          setNotice(`${file.name} failed: ${detail}.`);
-          resolve(null);
+          resolve({ ok: false, error: detail });
         }
       };
       xhr.onerror = () => {
-        setUploading((current) => {
-          const next = { ...current };
-          delete next[file.name];
-          return next;
-        });
-        setNotice(`${file.name} could not be uploaded.`);
-        resolve(null);
+        finished();
+        resolve({ ok: false, error: "the upload could not reach the server" });
       };
       setUploading((current) => ({ ...current, [file.name]: 0 }));
       xhr.send(file);
     });
   }
 
+  /** Uploads into the current act's library and reports each result. */
   function uploadFiles(files: readonly File[]): void {
-    void Promise.all(files.map(uploadFile));
+    const actId = libraryActId;
+    if (!actId) return;
+    void Promise.all(
+      files.map(async (file) => {
+        const outcome = await uploadFile(file, actId);
+        setNotice(
+          outcome.ok
+            ? `${file.name} added to the act's media library.`
+            : `${file.name} failed: ${outcome.error}.`,
+        );
+      }),
+    );
   }
 
   async function deleteAsset(asset: MediaAsset): Promise<void> {
@@ -757,7 +1124,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
   }
 
   const performanceChoices =
-    draft.performanceVisualMode === "VIDEO" ? videos : images;
+    draft.performanceVisualMode === "VIDEO" ? videoChoices : imageChoices;
   const fontChoices = [
     ...new Set([...cachedFonts, draft.fontFamily].filter(Boolean)),
   ].sort();
@@ -769,7 +1136,8 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
         <h2>Build the running order</h2>
         <span>
           Each act has one media library. Its image, backing audio, performance
-          visual and any advanced cues all point at files in it.
+          visual and any advanced cues all point at files in it. Files can be
+          added while the act is being created.
         </span>
         <button
           type="button"
@@ -804,7 +1172,7 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
             <b>{String(act.order + 1).padStart(2, "0")}</b>
             <span>
               <strong>{act.actName}</strong>
-              <small>{act.performerName}</small>
+              <small>{actIdentity(act, { surface: "admin" }).compact}</small>
             </span>
             {act.id === activeActId && <em>LIVE</em>}
           </button>
@@ -830,6 +1198,13 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                     >
                       SELECT FOR SHOW
                     </button>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void duplicateSelected()}
+                    >
+                      DUPLICATE
+                    </button>
                   </div>
                 )}
               </div>
@@ -837,15 +1212,82 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                 className="act-form"
                 onSubmit={(event) => void saveAct(event)}
               >
-                <label>
-                  Performer name
-                  <input
-                    required
-                    maxLength={160}
-                    value={draft.performerName}
-                    onChange={(event) =>
-                      updateAct("performerName", event.target.value)
+                <fieldset className="act-form__wide performer-editor">
+                  <legend>Performers</legend>
+                  <p>
+                    Add every person in the act. A group name is optional, even
+                    for large ensembles.
+                  </p>
+                  <ol className="performer-editor__list">
+                    {draft.performers.map((performer, index) => (
+                      <li key={performer.id}>
+                        <span>{index + 1}</span>
+                        <input
+                          required
+                          aria-label={`Performer ${index + 1} name`}
+                          maxLength={160}
+                          value={performer.name}
+                          onChange={(event) => {
+                            const name = event.target.value;
+                            setDraft((current) => ({
+                              ...current,
+                              performers: current.performers.map((entry) =>
+                                entry.id === performer.id
+                                  ? { ...entry, name }
+                                  : entry,
+                              ),
+                            }));
+                          }}
+                        />
+                        <button
+                          type="button"
+                          disabled={draft.performers.length === 1}
+                          aria-label={`Remove performer ${index + 1}`}
+                          onClick={() =>
+                            setDraft((current) => ({
+                              ...current,
+                              performers: current.performers.filter(
+                                (entry) => entry.id !== performer.id,
+                              ),
+                            }))
+                          }
+                        >
+                          REMOVE
+                        </button>
+                      </li>
+                    ))}
+                  </ol>
+                  <button
+                    type="button"
+                    disabled={draft.performers.length >= MAX_PERFORMERS}
+                    onClick={() =>
+                      setDraft((current) => ({
+                        ...current,
+                        performers: [
+                          ...current.performers,
+                          {
+                            id: `performer-${crypto.randomUUID()}`,
+                            name: "",
+                          },
+                        ],
+                      }))
                     }
+                  >
+                    + ADD PERFORMER
+                  </button>
+                  <small>
+                    {draft.performers.length} of {MAX_PERFORMERS} performers
+                  </small>
+                </fieldset>
+                <label>
+                  Group name <small>Optional</small>
+                  <input
+                    maxLength={160}
+                    value={draft.groupName}
+                    onChange={(event) =>
+                      updateAct("groupName", event.target.value)
+                    }
+                    placeholder="e.g. The Jazz Collective"
                   />
                 </label>
                 <label>
@@ -904,169 +1346,307 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                   />
                 </label>
 
+                <details className="act-form__wide display-options">
+                  <summary>Advanced act display</summary>
+                  <label>
+                    Projector performer display
+                    <select
+                      value={draft.performerDisplayMode}
+                      onChange={(event) =>
+                        updateAct(
+                          "performerDisplayMode",
+                          event.target.value as PerformerDisplayMode,
+                        )
+                      }
+                    >
+                      <option value="AUTOMATIC">Automatic</option>
+                      <option value="GROUP_NAME_ONLY">Group name only</option>
+                      <option value="GROUP_NAME_AND_MEMBERS">
+                        Group name + member names
+                      </option>
+                      <option value="MEMBER_NAMES">Member names</option>
+                      <option value="PERFORMER_COUNT">Performer count</option>
+                    </select>
+                  </label>
+                  <div className="identity-preview" aria-live="polite">
+                    <small>PROJECTOR PREVIEW</small>
+                    <b>
+                      {
+                        actIdentity(
+                          {
+                            performerName:
+                              draft.performers[0]?.name || "Performer",
+                            performers: draft.performers,
+                            performerCount: draft.performers.length,
+                            groupName: draft.groupName,
+                            performerDisplayMode: draft.performerDisplayMode,
+                          },
+                          { surface: "projector" },
+                        ).primary
+                      }
+                    </b>
+                    <span>
+                      {
+                        actIdentity(
+                          {
+                            performerName:
+                              draft.performers[0]?.name || "Performer",
+                            performers: draft.performers,
+                            performerCount: draft.performers.length,
+                            groupName: draft.groupName,
+                            performerDisplayMode: draft.performerDisplayMode,
+                          },
+                          { surface: "projector" },
+                        ).secondary
+                      }
+                    </span>
+                  </div>
+                </details>
+
                 {/*
                   The one library. Every file for this act arrives here, once,
-                  and is then chosen by name in the slots below. There are no
-                  separate uploaders for image, audio or performance media.
+                  and is then chosen by name in the slots below. While the act
+                  is still being created the files wait in a local queue and
+                  are uploaded the moment the act exists, so creating an act
+                  with its media is one step. There are no separate uploaders
+                  for image, audio or performance media.
                 */}
                 <fieldset className="act-form__wide media-library">
                   <legend>Act media library</legend>
-                  {creating ? (
-                    <p>
-                      Save the act first. Its media library is created with it,
-                      and every file you add afterwards belongs to this act.
+                  <label
+                    className={`drop-zone__target${dragging ? " is-dragging" : ""}`}
+                    onDragOver={(event) => {
+                      event.preventDefault();
+                      setDragging(true);
+                    }}
+                    onDragLeave={() => setDragging(false)}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      setDragging(false);
+                      addFiles([...event.dataTransfer.files]);
+                    }}
+                  >
+                    <span>
+                      {dragging
+                        ? "Release to add to this act's library"
+                        : creating
+                          ? "Drop images, audio or video here, or click to choose files. They upload into this act's library when you add the act."
+                          : "Drop images, audio or video here, or click to choose files"}
+                    </span>
+                    <input
+                      type="file"
+                      multiple
+                      accept={LIBRARY_ACCEPT}
+                      disabled={busy}
+                      onChange={(event) => {
+                        addFiles([...(event.target.files ?? [])]);
+                        event.target.value = "";
+                      }}
+                    />
+                  </label>
+                  {Object.entries(uploading).map(([name, percent]) => (
+                    <p className="upload-progress" key={name}>
+                      <span>{name}</span>
+                      <progress value={percent} max={100} /> {percent}%
                     </p>
-                  ) : (
-                    <>
-                      <label
-                        className={`drop-zone__target${dragging ? " is-dragging" : ""}`}
-                        onDragOver={(event) => {
-                          event.preventDefault();
-                          setDragging(true);
-                        }}
-                        onDragLeave={() => setDragging(false)}
-                        onDrop={(event) => {
-                          event.preventDefault();
-                          setDragging(false);
-                          uploadFiles([...event.dataTransfer.files]);
-                        }}
-                      >
-                        <span>
-                          {dragging
-                            ? "Release to add to this act's library"
-                            : "Drop images, audio or video here, or click to choose files"}
-                        </span>
-                        <input
-                          type="file"
-                          multiple
-                          accept={LIBRARY_ACCEPT}
-                          disabled={busy}
-                          onChange={(event) => {
-                            uploadFiles([...(event.target.files ?? [])]);
-                            event.target.value = "";
-                          }}
-                        />
-                      </label>
-                      {Object.entries(uploading).map(([name, percent]) => (
-                        <p className="upload-progress" key={name}>
-                          <span>{name}</span>
-                          <progress value={percent} max={100} /> {percent}%
-                        </p>
-                      ))}
-                      {assets.length === 0 && (
-                        <p className="media-library__empty">
-                          No media yet. Without any, the act still has a
-                          finished performance screen drawn from its name.
-                        </p>
-                      )}
-                      <ul className="media-list">
-                        {assets.map((asset) => {
-                          const mine = asset.references.filter(
-                            (reference) => reference.actId === selected?.id,
-                          );
-                          const shared =
-                            asset.actId !== null &&
-                            asset.actId !== selected?.id;
-                          return (
-                            <li
-                              key={asset.id}
-                              className={`media-list__item media-list__item--${asset.kind}${selectedAssetId === asset.id ? " is-active" : ""}`}
-                            >
+                  ))}
+                  {queued.length > 0 && (
+                    <ul
+                      className="media-list media-list--queued"
+                      aria-label={
+                        creating
+                          ? "Files waiting to upload with the act"
+                          : "Files that still need uploading"
+                      }
+                    >
+                      {queued.map((entry) => (
+                        <li
+                          key={entry.id}
+                          className={`media-list__item media-list__item--${entry.kind}${selectedAssetId === entry.id ? " is-active" : ""}`}
+                        >
+                          <button
+                            type="button"
+                            className="media-list__main"
+                            onClick={() =>
+                              setSelectedAssetId((current) =>
+                                current === entry.id ? null : entry.id,
+                              )
+                            }
+                          >
+                            <em className="media-list__kind">
+                              {entry.kind.toUpperCase()}
+                            </em>
+                            <b>{entry.file.name}</b>
+                            <small>{describeFile(entry.file)}</small>
+                          </button>
+                          <span className="media-list__flags">
+                            <em className="media-list__state">
+                              {entry.error
+                                ? "UPLOAD FAILED"
+                                : creating
+                                  ? "UPLOADS WITH THE ACT"
+                                  : "NOT UPLOADED"}
+                            </em>
+                            {queuedUses(entry.id).map((use) => (
+                              <em key={use} className="media-list__use">
+                                {use}
+                              </em>
+                            ))}
+                          </span>
+                          <span className="media-list__actions">
+                            {!creating && (
                               <button
                                 type="button"
-                                className="media-list__main"
-                                onClick={() =>
-                                  setSelectedAssetId((current) =>
-                                    current === asset.id ? null : asset.id,
-                                  )
-                                }
+                                disabled={busy}
+                                onClick={() => void retryQueued(entry)}
                               >
-                                <em className="media-list__kind">
-                                  {asset.kind.toUpperCase()}
-                                </em>
-                                <b>{asset.originalFilename}</b>
-                                <small>{describeAsset(asset)}</small>
+                                RETRY UPLOAD
                               </button>
-                              <span className="media-list__flags">
-                                <em
-                                  className={`media-list__state${asset.readiness === "READY" ? " media-list__state--ready" : ""}`}
-                                >
-                                  {asset.readiness}
-                                </em>
-                                {asset.generatedTest && (
-                                  <em className="media-list__state">TEST</em>
-                                )}
-                                {shared && (
-                                  <em className="media-list__state">SHARED</em>
-                                )}
-                                {asset.actId === null && (
-                                  <em className="media-list__state">
-                                    SHOW FILE
-                                  </em>
-                                )}
-                                {mine.map((reference, index) => (
-                                  <em
-                                    key={`${reference.kind}-${index}`}
-                                    className="media-list__use"
-                                  >
-                                    {referenceLabel(reference)}
-                                  </em>
-                                ))}
-                                {asset.references.length > mine.length && (
-                                  <em className="media-list__use">
-                                    USED BY ANOTHER ACT
-                                  </em>
-                                )}
-                              </span>
-                              <span className="media-list__actions">
-                                {asset.kind === "image" && (
-                                  <label className="media-list__sequence">
-                                    <input
-                                      type="checkbox"
-                                      checked={imageSequence.has(asset.id)}
-                                      onChange={(event) =>
-                                        setImageSequence((current) => {
-                                          const next = new Set(current);
-                                          if (event.target.checked)
-                                            next.add(asset.id);
-                                          else next.delete(asset.id);
-                                          return next;
-                                        })
-                                      }
-                                    />
-                                    sequence
-                                  </label>
-                                )}
-                                <button
-                                  type="button"
-                                  disabled={asset.referenced}
-                                  title={
-                                    asset.referenced
-                                      ? "In use; remove it from the slots and cues first"
-                                      : "Delete from storage"
-                                  }
-                                  onClick={() => void deleteAsset(asset)}
-                                >
-                                  DELETE
-                                </button>
-                              </span>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                      {preview && (
-                        <div className="media-preview">
-                          <strong>PREVIEW · {preview.originalFilename}</strong>
-                          {preview.kind === "image" ? (
-                            <img src={assetUrl(preview)} alt="" />
-                          ) : preview.kind === "video" ? (
-                            <video src={assetUrl(preview)} controls />
-                          ) : (
-                            <audio src={assetUrl(preview)} controls />
+                            )}
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => removeQueued(entry.id)}
+                            >
+                              REMOVE
+                            </button>
+                          </span>
+                          {entry.error && (
+                            <small className="media-list__error">
+                              {entry.error}
+                            </small>
                           )}
-                        </div>
-                      )}
-                    </>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {creating && queued.length === 0 && (
+                    <p className="media-library__empty">
+                      No media yet. Add files now and they upload with the act,
+                      or add them any time later. Without any, the act still has
+                      a finished performance screen drawn from its name.
+                    </p>
+                  )}
+                  {!creating && assets.length === 0 && queued.length === 0 && (
+                    <p className="media-library__empty">
+                      No media yet. Without any, the act still has a finished
+                      performance screen drawn from its name.
+                    </p>
+                  )}
+                  {!creating && (
+                    <ul className="media-list">
+                      {assets.map((asset) => {
+                        const mine = asset.references.filter(
+                          (reference) => reference.actId === selected?.id,
+                        );
+                        const shared =
+                          asset.actId !== null && asset.actId !== selected?.id;
+                        return (
+                          <li
+                            key={asset.id}
+                            className={`media-list__item media-list__item--${asset.kind}${selectedAssetId === asset.id ? " is-active" : ""}`}
+                          >
+                            <button
+                              type="button"
+                              className="media-list__main"
+                              onClick={() =>
+                                setSelectedAssetId((current) =>
+                                  current === asset.id ? null : asset.id,
+                                )
+                              }
+                            >
+                              <em className="media-list__kind">
+                                {asset.kind.toUpperCase()}
+                              </em>
+                              <b>{asset.originalFilename}</b>
+                              <small>{describeAsset(asset)}</small>
+                            </button>
+                            <span className="media-list__flags">
+                              <em
+                                className={`media-list__state${asset.readiness === "READY" ? " media-list__state--ready" : ""}`}
+                              >
+                                {asset.readiness}
+                              </em>
+                              {asset.generatedTest && (
+                                <em className="media-list__state">TEST</em>
+                              )}
+                              {shared && (
+                                <em className="media-list__state">SHARED</em>
+                              )}
+                              {asset.actId === null && (
+                                <em className="media-list__state">SHOW FILE</em>
+                              )}
+                              {mine.map((reference, index) => (
+                                <em
+                                  key={`${reference.kind}-${index}`}
+                                  className="media-list__use"
+                                >
+                                  {referenceLabel(reference)}
+                                </em>
+                              ))}
+                              {asset.references.length > mine.length && (
+                                <em className="media-list__use">
+                                  USED BY ANOTHER ACT
+                                </em>
+                              )}
+                            </span>
+                            <span className="media-list__actions">
+                              {asset.kind === "image" && (
+                                <label className="media-list__sequence">
+                                  <input
+                                    type="checkbox"
+                                    checked={imageSequence.has(asset.id)}
+                                    onChange={(event) =>
+                                      setImageSequence((current) => {
+                                        const next = new Set(current);
+                                        if (event.target.checked)
+                                          next.add(asset.id);
+                                        else next.delete(asset.id);
+                                        return next;
+                                      })
+                                    }
+                                  />
+                                  sequence
+                                </label>
+                              )}
+                              <button
+                                type="button"
+                                disabled={asset.referenced}
+                                title={
+                                  asset.referenced
+                                    ? "In use; remove it from the slots and cues first"
+                                    : "Delete from storage"
+                                }
+                                onClick={() => void deleteAsset(asset)}
+                              >
+                                DELETE
+                              </button>
+                            </span>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                  {(preview || previewQueued) && (
+                    <div className="media-preview">
+                      <strong>
+                        PREVIEW ·{" "}
+                        {preview?.originalFilename ?? previewQueued?.file.name}
+                      </strong>
+                      {(() => {
+                        const kind = preview?.kind ?? previewQueued?.kind;
+                        const url = preview
+                          ? assetUrl(preview)
+                          : (previewQueued?.url ?? "");
+                        return kind === "image" ? (
+                          <img src={url} alt="" />
+                        ) : kind === "video" ? (
+                          <video src={url} controls />
+                        ) : (
+                          <audio src={url} controls />
+                        );
+                      })()}
+                    </div>
                   )}
                 </fieldset>
 
@@ -1074,23 +1654,26 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                   <legend>Presentation</legend>
                   <p>
                     Every act already has a finished performance screen: its
-                    name, performer and year, centred on the projector. These
-                    slots point at files in the library above; the media cue for
-                    the performance is built from them automatically.
+                    name, performer/group identity and year, centred on the
+                    projector. These slots choose files from the library above
+                    {creating
+                      ? ", including files still waiting to upload"
+                      : ""}
+                    ; the media cue for the performance is built from them
+                    automatically.
                   </p>
                   <label>
                     Act image
                     <select
                       value={draft.actImageAssetId}
-                      disabled={creating}
                       onChange={(event) =>
                         updateAct("actImageAssetId", event.target.value)
                       }
                     >
                       <option value="">None</option>
-                      {images.map((asset) => (
-                        <option key={asset.id} value={asset.id}>
-                          {asset.originalFilename}
+                      {imageChoices.map((choice) => (
+                        <option key={choice.id} value={choice.id}>
+                          {choice.label}
                         </option>
                       ))}
                     </select>
@@ -1099,7 +1682,6 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                     Performance visual
                     <select
                       value={draft.performanceVisualMode}
-                      disabled={creating}
                       onChange={(event) => {
                         const mode = event.target
                           .value as PerformanceVisualMode;
@@ -1116,10 +1698,16 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                       <option value="AUTOMATIC">
                         Automatic — drawn from the act
                       </option>
-                      <option value="IMAGE" disabled={images.length === 0}>
+                      <option
+                        value="IMAGE"
+                        disabled={imageChoices.length === 0}
+                      >
                         An image from the library
                       </option>
-                      <option value="VIDEO" disabled={videos.length === 0}>
+                      <option
+                        value="VIDEO"
+                        disabled={videoChoices.length === 0}
+                      >
                         A video from the library
                       </option>
                     </select>
@@ -1138,9 +1726,9 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                           }
                         >
                           <option value="">Choose from the library</option>
-                          {performanceChoices.map((asset) => (
-                            <option key={asset.id} value={asset.id}>
-                              {asset.originalFilename}
+                          {performanceChoices.map((choice) => (
+                            <option key={choice.id} value={choice.id}>
+                              {choice.label}
                             </option>
                           ))}
                         </select>
@@ -1170,23 +1758,51 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                       )}
                     </>
                   )}
-                  <label>
-                    Backing audio
-                    <select
-                      value={draft.backingAudioAssetId}
-                      disabled={creating}
-                      onChange={(event) =>
-                        updateAct("backingAudioAssetId", event.target.value)
-                      }
-                    >
-                      <option value="">None</option>
-                      {audioAssets.map((asset) => (
-                        <option key={asset.id} value={asset.id}>
-                          {asset.originalFilename}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  {/*
+                    Backing audio is an assignment, not an upload: the file is
+                    in the library (or the creation queue) and this chooses
+                    which one carries the role.
+                  */}
+                  <div className="backing-audio act-form__wide">
+                    <strong>BACKING AUDIO</strong>
+                    <label>
+                      Backing audio track
+                      <select
+                        value={draft.backingAudioAssetId}
+                        onChange={(event) =>
+                          updateAct("backingAudioAssetId", event.target.value)
+                        }
+                      >
+                        <option value="">None</option>
+                        {audioChoices.map((choice) => (
+                          <option key={choice.id} value={choice.id}>
+                            {choice.label}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    {audioChoices.length === 0 && (
+                      <small className="backing-audio__hint">
+                        Add an audio (or video) file to the library above to
+                        choose it here.
+                      </small>
+                    )}
+                    {backingChoice && (
+                      <div className="backing-audio__selected">
+                        <span>
+                          <b>{backingChoice.label}</b>
+                          <small>{backingChoice.description}</small>
+                        </span>
+                        <audio src={backingChoice.url} controls />
+                        <button
+                          type="button"
+                          onClick={() => updateAct("backingAudioAssetId", "")}
+                        >
+                          REMOVE
+                        </button>
+                      </div>
+                    )}
+                  </div>
                   {draft.backingAudioAssetId && (
                     <label>
                       Start backing audio
@@ -1268,9 +1884,9 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                   <fieldset className="audience-fields">
                     <legend>On audience phones</legend>
                     <p>
-                      Phones always receive the act name, the performer and the
-                      year or group. These two are opt-in, and when they are off
-                      the server does not send them at all.
+                      Phones always receive the act name, public performer/group
+                      identity and year or cohort. Optional detail is removed by
+                      the server when its switch is off.
                     </p>
                     <label className="switch-row">
                       <input
@@ -1294,6 +1910,19 @@ export function ActEditor({ acts, activeActId, onSelectLive }: ActEditorProps) {
                         }
                       />
                       <span>Show act image on audience phones</span>
+                    </label>
+                    <label className="switch-row">
+                      <input
+                        type="checkbox"
+                        checked={draft.showFullMemberListToAudience}
+                        onChange={(event) =>
+                          updateAct(
+                            "showFullMemberListToAudience",
+                            event.target.checked,
+                          )
+                        }
+                      />
+                      <span>Show full member list to audience</span>
                     </label>
                   </fieldset>
                 </details>

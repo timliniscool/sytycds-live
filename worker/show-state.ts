@@ -34,6 +34,7 @@ import {
   type VisualCue,
   type VisualCueKind,
   type PerformanceVisualMode,
+  type PerformerDisplayMode,
   type ShowFlowNext,
   type ShowFlowPolicy,
   type ShowFlowState,
@@ -41,6 +42,7 @@ import {
   type TestShowGeneration,
 } from "../shared/domain";
 import { rankGroups } from "../shared/ranking";
+import { actIdentity } from "../shared/act-identity";
 import { isThemeId, DEFAULT_THEME_ID } from "../shared/themes";
 import { scenarioLabel } from "../shared/test-show";
 import { auditEventForCommand, recordAuditEvent } from "./audit";
@@ -120,6 +122,8 @@ interface ActRow extends Record<string, SqlStorageValue> {
   id: string;
   order_index: number;
   performer_name: string;
+  group_name: string;
+  performer_display_mode: string;
   school_year: string;
   act_name: string;
   act_type: string;
@@ -129,6 +133,7 @@ interface ActRow extends Record<string, SqlStorageValue> {
   public_image_asset_id: string | null;
   show_description_to_audience: number;
   show_image_to_audience: number;
+  show_full_member_list_to_audience: number;
   performance_mode: string;
   performance_asset_id: string | null;
   performance_fit: string;
@@ -138,9 +143,11 @@ interface ActRow extends Record<string, SqlStorageValue> {
   font_family: string | null;
 }
 
-const ACT_COLUMNS = `id, order_index, performer_name, school_year, act_name, act_type,
+const ACT_COLUMNS = `id, order_index, performer_name, group_name, performer_display_mode,
+                school_year, act_name, act_type,
                 public_description, internal_notes, withdrawn_at, public_image_asset_id,
-                show_description_to_audience, show_image_to_audience, performance_mode,
+                show_description_to_audience, show_image_to_audience,
+                show_full_member_list_to_audience, performance_mode,
                 performance_asset_id, performance_fit, backing_audio_asset_id,
                 backing_audio_start, theme_id, font_family`;
 
@@ -318,8 +325,12 @@ function showStepOf(value: string | null): ShowStep | null {
     : null;
 }
 
-function actLabel(act: ActRow): string {
-  return `${act.act_name} — ${act.performer_name}`;
+function actLabel(
+  sql: SqlStorage,
+  showIdentifier: string,
+  act: ActRow,
+): string {
+  return `${act.act_name} — ${toPublicAct(sql, showIdentifier, act).performerName}`;
 }
 
 /**
@@ -339,7 +350,11 @@ function computeFlow(
   if (!show.active_act_id) {
     const first = selectedActForDirection(sql, show, "next");
     const next: ShowFlowNext = first
-      ? { kind: "first_act", actId: actId(first.id), label: actLabel(first) }
+      ? {
+          kind: "first_act",
+          actId: actId(first.id),
+          label: actLabel(sql, show.id, first),
+        }
       : { kind: "end" };
     return {
       step: null,
@@ -384,7 +399,11 @@ function computeFlow(
 function nextActFlow(sql: SqlStorage, show: ShowRow): ShowFlowNext {
   const next = selectedActForDirection(sql, show, "next");
   return next
-    ? { kind: "next_act", actId: actId(next.id), label: actLabel(next) }
+    ? {
+        kind: "next_act",
+        actId: actId(next.id),
+        label: actLabel(sql, show.id, next),
+      }
     : { kind: "end" };
 }
 
@@ -453,11 +472,36 @@ function persistedShow(row: ShowRow): PersistedShow {
   };
 }
 
-function toPublicAct(row: ActRow): PublicAct {
-  return {
+function performersFor(
+  sql: SqlStorage,
+  showIdentifier: string,
+  actIdentifier: string,
+) {
+  return sql
+    .exec<{ id: string; display_name: string }>(
+      `SELECT id, display_name FROM act_performers
+       WHERE show_id = ? AND act_id = ? ORDER BY position`,
+      showIdentifier,
+      actIdentifier,
+    )
+    .toArray()
+    .map((performer) => ({ id: performer.id, name: performer.display_name }));
+}
+
+function toPublicAct(
+  sql: SqlStorage,
+  showIdentifier: string,
+  row: ActRow,
+): PublicAct {
+  const performers = performersFor(sql, showIdentifier, row.id);
+  const act: PublicAct = {
     id: actId(row.id),
     order: row.order_index,
     performerName: row.performer_name,
+    performers,
+    performerCount: performers.length || 1,
+    groupName: row.group_name,
+    performerDisplayMode: row.performer_display_mode as PerformerDisplayMode,
     schoolYear: row.school_year,
     actName: row.act_name,
     actType: row.act_type,
@@ -469,6 +513,7 @@ function toPublicAct(row: ActRow): PublicAct {
       fontFamily: row.font_family,
     },
   };
+  return { ...act, performerName: actIdentity(act).primary };
 }
 
 /**
@@ -477,10 +522,18 @@ function toPublicAct(row: ActRow): PublicAct {
  * that never receives the description cannot leak it, and a hall of phones
  * never downloads artwork the act did not publish.
  */
-function toAudienceAct(row: ActRow): PublicAct {
-  const act = toPublicAct(row);
+function toAudienceAct(
+  sql: SqlStorage,
+  showIdentifier: string,
+  row: ActRow,
+): PublicAct {
+  const act = toPublicAct(sql, showIdentifier, row);
+  const identity = actIdentity(act, { surface: "audience" });
   return {
     ...act,
+    performerName: identity.primary,
+    performers:
+      row.show_full_member_list_to_audience === 1 ? (act.performers ?? []) : [],
     publicDescription:
       row.show_description_to_audience === 1 ? act.publicDescription : "",
     publicImageAssetId:
@@ -952,9 +1005,8 @@ function openAudienceVoting(sql: SqlStorage, show: ShowRow): void {
 }
 
 /**
- * Closing voting mints a close revision. Phones that were holding a selection
- * submit it against this identifier inside the grace window; nothing else can
- * be accepted after the close.
+ * Closing voting is authoritative. The revision helps clients recognise the
+ * transition, but never authorises a late or automatic submission.
  */
 function closeAudienceVoting(sql: SqlStorage, show: ShowRow): void {
   sql.exec(
@@ -1389,8 +1441,8 @@ function executeTransition(
       return { accepted: true, changes: ["audience_voting"] };
     case "CLOSE_AUDIENCE_VOTING":
       if (show.audience_vote_state === "CLOSED") {
-        // Closing twice must not mint a second revision: the first close's
-        // grace window is the only one phones were told about.
+        // Closing twice is an idempotent no-op. The close revision is a
+        // transition marker only; it never authorises a late vote.
         return { accepted: true, changes: [] };
       }
       closeAudienceVoting(sql, show);
@@ -1989,7 +2041,9 @@ export function projectShowState(
   const runtime = ensureRuntime(storage.sql, show.id);
   const persisted = persistedShow(show);
   const active = activeAct(storage.sql, show);
-  const publicActive = active ? toPublicAct(active) : null;
+  const publicActive = active
+    ? toPublicAct(storage.sql, show.id, active)
+    : null;
   const revealed = persisted.resultRevealState === "REVEALED";
 
   if (role.kind === "audience") {
@@ -2008,7 +2062,7 @@ export function projectShowState(
         audienceVoteState: persisted.audienceVoteState,
         revision: persisted.revision,
       },
-      activeAct: active ? toAudienceAct(active) : null,
+      activeAct: active ? toAudienceAct(storage.sql, show.id, active) : null,
       revealedResult: revealedFinalScore(
         storage.sql,
         show.id,
@@ -2160,10 +2214,11 @@ export function projectShowState(
     )
     .toArray()
     .map((row) => ({
-      ...toPublicAct(row),
+      ...toPublicAct(storage.sql, show.id, row),
       internalNotes: row.internal_notes,
       showDescriptionToAudience: row.show_description_to_audience === 1,
       showImageToAudience: row.show_image_to_audience === 1,
+      showFullMemberListToAudience: row.show_full_member_list_to_audience === 1,
       presentation: toActPresentation(storage.sql, show.id, row),
       cues: loadCues(storage.sql, show.id, row.id),
     }));

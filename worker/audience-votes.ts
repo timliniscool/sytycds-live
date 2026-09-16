@@ -1,9 +1,9 @@
 import { audienceWeight, isValidAudienceScore } from "../shared/scoring";
 import { isRecord } from "../shared/trust";
 import { isVoteMilestone, recordAuditEvent } from "./audit";
+import { isUniqueViolation } from "./schema";
 import {
   actId,
-  VOTE_CLOSE_GRACE_MS,
   type AudienceAggregate,
   type AudienceScore,
   type ShowRevision,
@@ -55,11 +55,7 @@ export type AudienceVoteResult =
 export interface AudienceVoteRequest {
   actIdentifier: string;
   score: AudienceScore;
-  /**
-   * Present when this submission is the phone's automatic response to the
-   * operator closing voting: it names the close it is answering. Absent for
-   * an ordinary LOCK IN.
-   */
+  /** Legacy field accepted syntactically but never authorises a late vote. */
   closeRevision?: string;
 }
 
@@ -122,31 +118,19 @@ export function parseAudienceVoteRequest(
   };
 }
 
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    error instanceof Error && /UNIQUE constraint failed/u.test(error.message)
-  );
-}
-
 /**
- * Whether a submission that arrived after CLOSE may still count. Only a phone
- * answering *this* close, for *this* act, inside the grace window qualifies;
- * an ordinary late LOCK IN never does, and a later act or a re-opened and
- * re-closed vote supersedes the identifier entirely.
+ * Kept as a compatibility export for older callers. Selection is never a vote,
+ * so no post-close grace path exists.
  */
 export function withinCloseGrace(
   show: Pick<ShowRow, "vote_close_revision" | "vote_closed_at">,
   request: AudienceVoteRequest,
   now: number,
 ): boolean {
-  return (
-    request.closeRevision !== undefined &&
-    show.vote_close_revision !== null &&
-    show.vote_closed_at !== null &&
-    request.closeRevision === show.vote_close_revision &&
-    now - show.vote_closed_at >= 0 &&
-    now - show.vote_closed_at <= VOTE_CLOSE_GRACE_MS
-  );
+  void show;
+  void request;
+  void now;
+  return false;
 }
 
 /** The complete hot path: no historical vote scan and one durable transaction. */
@@ -170,10 +154,7 @@ export function submitAudienceVote(
     if (!show) {
       return { ok: false, code: "BAD_REQUEST" };
     }
-    if (
-      show.audience_vote_state !== "OPEN" &&
-      !withinCloseGrace(show, request, now)
-    ) {
+    if (show.audience_vote_state !== "OPEN") {
       return { ok: false, code: "VOTING_CLOSED" };
     }
     if (!show.active_act_id || show.active_act_id !== request.actIdentifier) {

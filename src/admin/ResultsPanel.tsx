@@ -2,10 +2,10 @@ import type { AdminCommandType } from "../../shared/admin-command";
 import type {
   AdminRanking,
   DisplayMode,
-  RankingExclusionReason,
   ResultsStage,
 } from "../../shared/domain";
 import { rankGroups } from "../../shared/ranking";
+import { exclusionLabel, whyNothingIsEligible } from "./results-view";
 
 export interface ResultsPanelProps {
   ranking: AdminRanking;
@@ -40,6 +40,10 @@ export function ResultsPanel({
   const groups = rankGroups(ranking.ranked);
   const onScreen = displayMode === "FINAL_RESULTS";
   const nothingRanked = ranking.ranked.length === 0;
+  // A disabled control that says nothing is the worst thing to meet mid-show,
+  // so when the ranking is empty the panel states the reason and the next
+  // action instead of leaving the operator to infer it from the table below.
+  const blocked = nothingRanked ? whyNothingIsEligible(ranking) : null;
 
   return (
     <section className="results-panel" aria-labelledby="results-title">
@@ -51,9 +55,10 @@ export function ResultsPanel({
             : `${ranking.ranked.length} ranked · public stage ${stage.replaceAll("_", " ")}`}
         </h2>
         <span>
-          {onScreen
-            ? "The projector is on FINAL RESULTS."
-            : "The projector is not showing results; the stage only applies once it is."}
+          {blocked ??
+            (onScreen
+              ? "The projector is on FINAL RESULTS."
+              : "The projector is not showing results; the stage only applies once it is.")}
         </span>
       </div>
 
@@ -65,6 +70,7 @@ export function ResultsPanel({
             className={stage === entry.stage ? "is-active" : ""}
             aria-pressed={stage === entry.stage}
             disabled={entry.stage !== "HIDDEN" && nothingRanked}
+            {...(entry.stage !== "HIDDEN" && blocked ? { title: blocked } : {})}
             onClick={() => send("SET_RESULTS_STAGE", { stage: entry.stage })}
           >
             {entry.label}
@@ -74,6 +80,10 @@ export function ResultsPanel({
           <button
             type="button"
             className="results-panel__show"
+            // An empty results board in front of an audience is worse than no
+            // results board, so this stays shut until something can be shown.
+            disabled={nothingRanked}
+            {...(blocked ? { title: blocked } : {})}
             onClick={() => send("SET_DISPLAY_MODE", { mode: "FINAL_RESULTS" })}
           >
             PUT FINAL RESULTS ON PROJECTOR
@@ -207,23 +217,4 @@ export function ResultsPanel({
       </table>
     </section>
   );
-}
-
-/** Exactly why an act is not in the ranking, in one line the operator can act on. */
-function exclusionLabel(
-  reason: RankingExclusionReason,
-  missingJudgeSlots: readonly number[],
-): string {
-  switch (reason) {
-    case "NOT_FINALISED":
-      return "scoring complete — press FINALISE";
-    case "AUDIENCE_RESULT_INCOMPLETE":
-      return "audience result incomplete";
-    case "JUDGE_SCORE_MISSING":
-      return missingJudgeSlots.length === 1
-        ? `judge ${missingJudgeSlots[0]} has not scored`
-        : `judges ${missingJudgeSlots.join(", ")} have not scored`;
-    case "JUDGES_NOT_CONFIGURED":
-      return "no judge panel configured";
-  }
 }

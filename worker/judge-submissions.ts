@@ -1,5 +1,6 @@
 import { parseJudgeScore, transformJudgeScore } from "../shared/scoring";
 import { recordAuditEvent } from "./audit";
+import { isUniqueViolation } from "./schema";
 import {
   actId,
   judgeId,
@@ -114,12 +115,6 @@ function permissionIsOpen(
     )
     .toArray()[0];
   return runtime?.global_judge_permission === "OPEN";
-}
-
-function isUniqueViolation(error: unknown): boolean {
-  return (
-    error instanceof Error && /UNIQUE constraint failed/u.test(error.message)
-  );
 }
 
 /**

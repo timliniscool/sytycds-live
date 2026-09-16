@@ -191,6 +191,15 @@ export class ProjectorMediaEngine {
    */
   private freshSession = true;
   private held = false;
+  /**
+   * The arming probe in flight. Reconciles wait for it so a cue that loads
+   * while the operator is pressing ENABLE AUDIO cannot yank the element's
+   * source out from under the probe (which would both fail the probe and
+   * leave the freshly loaded track unloaded).
+   */
+  private arming: Promise<void> | null = null;
+  /** The probe plays the element silently; its events are not real playback. */
+  private probing = false;
 
   constructor(
     private readonly options: MediaEngineOptions,
@@ -228,25 +237,39 @@ export class ProjectorMediaEngine {
    * it, which is exactly the "works on the second click" symptom.
    */
   async arm(): Promise<boolean> {
+    // A second press while the first probe is still running has no gesture of
+    // its own to spend; it simply reports the first probe's answer.
+    if (this.arming) {
+      await this.arming;
+      return this.armed;
+    }
     const contextAttempt = this.resumeAudioContext();
     const elementAttempt = this.unlockAudioElement();
-    const [context, element] = await Promise.all([
-      contextAttempt,
-      elementAttempt,
-    ]);
-    if (!context.ok || !element.ok) {
-      this.armed = false;
-      this.error = context.ok
-        ? element.detail
-        : element.ok
-          ? context.detail
-          : `${context.detail}; ${element.detail}`;
+    const settled = Promise.all([contextAttempt, elementAttempt]);
+    this.arming = settled.then(
+      () => undefined,
+      () => undefined,
+    );
+    // Anything queued behind this point waits for the probe to finish.
+    void this.enqueue(() => this.arming ?? Promise.resolve());
+    try {
+      const [context, element] = await settled;
+      if (!context.ok || !element.ok) {
+        this.armed = false;
+        this.error = context.ok
+          ? element.detail
+          : element.ok
+            ? context.detail
+            : `${context.detail}; ${element.detail}`;
+        this.emit();
+        return false;
+      }
+      this.armed = true;
+      if (this.error === ARM_REQUIRED) this.error = null;
       this.emit();
-      return false;
+    } finally {
+      this.arming = null;
     }
-    this.armed = true;
-    if (this.error === ARM_REQUIRED) this.error = null;
-    this.emit();
     if (this.lastTarget) {
       const { runtime, cues } = this.lastTarget;
       void this.reconcile(runtime, cues);
@@ -313,9 +336,12 @@ export class ProjectorMediaEngine {
     // interrupted to prove it again.
     if (!element.paused && !element.ended)
       return Promise.resolve({ ok: true, detail: "already playing" });
-    const loadedSource = this.audioAssetId !== null;
+    const sourceAtStart = this.audioAssetId;
+    const loadedSource = sourceAtStart !== null;
     const restoreTime = element.currentTime;
     const restoreVolume = element.volume;
+    const restoreState = this.audioState;
+    this.probing = true;
     element.muted = false;
     element.volume = 0;
     if (!loadedSource) element.src = SILENT_WAV;
@@ -330,24 +356,39 @@ export class ProjectorMediaEngine {
     }
     const restore = () => {
       element.volume = restoreVolume;
+      // The probe's own playing/pause events were suppressed; the state the
+      // engine reports is the state before the probe.
+      this.audioState = restoreState;
+      this.probing = false;
+    };
+    // Only detach the probe's silent source if nothing real replaced it
+    // meanwhile; a track loaded during the probe must survive it.
+    const detachProbeSource = () => {
+      if (this.audioAssetId !== null) return;
+      element.removeAttribute("src");
+      element.load();
     };
     return played.then(
       () => {
-        element.pause();
+        // A real track that is meant to be playing stays playing; otherwise
+        // the probe is undone completely.
+        const shouldKeepPlaying =
+          loadedSource &&
+          this.audioAssetId === sourceAtStart &&
+          this.lastTarget?.runtime.audioTransport === "PLAYING" &&
+          !this.freshSession;
+        if (!shouldKeepPlaying) element.pause();
         if (loadedSource) {
-          element.currentTime = restoreTime;
+          if (!shouldKeepPlaying) element.currentTime = restoreTime;
         } else {
-          element.removeAttribute("src");
-          element.load();
+          detachProbeSource();
         }
         restore();
+        if (shouldKeepPlaying) this.audioState = "PLAYING";
         return { ok: true, detail: "media element unlocked" };
       },
       (error: unknown) => {
-        if (!loadedSource) {
-          element.removeAttribute("src");
-          element.load();
-        }
+        if (!loadedSource) detachProbeSource();
         restore();
         return {
           ok: false,
@@ -556,6 +597,7 @@ export class ProjectorMediaEngine {
   ): Promise<void> {
     if (this.disposed) return;
     this.lastTarget = { runtime, cues };
+    if (this.arming) await this.arming;
     this.black = runtime.blackScreen;
     this.held = false;
     let failure: string | null = null;
@@ -599,6 +641,17 @@ export class ProjectorMediaEngine {
       }
     }
 
+    // Staged audio that no cue of this act refers to any more belongs to a
+    // previous act; drop it so an act change leaves nothing stale behind.
+    if (
+      this.stagedAudio &&
+      !cues.some((cue) => cue.audio?.sourceKey === this.stagedAudio?.assetId)
+    ) {
+      this.stagedAudio.element.removeAttribute("src");
+      this.stagedAudio.element.load();
+      this.stagedAudio = null;
+    }
+
     const audioCue =
       cues.find((cue) => cue.id === runtime.activeAudioCueId) ?? null;
     if (!audioCue?.audio || runtime.audioTransport === "STOPPED") {
@@ -639,6 +692,14 @@ export class ProjectorMediaEngine {
       try {
         await element.play();
       } catch (error: unknown) {
+        // The browser withdrew playback permission (a new document, a
+        // consumed activation): the engine is no longer armed, whatever it
+        // believed, and says so rather than reporting a phantom PLAYING.
+        if ((error as { name?: string } | null)?.name === "NotAllowedError") {
+          this.armed = false;
+          report(ARM_REQUIRED);
+          return;
+        }
         report(error instanceof Error ? error.message : "playback refused");
       }
       return;
@@ -673,6 +734,11 @@ export class ProjectorMediaEngine {
     }
     if (cue.audio && this.audioAssetId !== cue.audio.sourceKey) {
       if (this.stagedAudio?.assetId !== cue.audio.sourceKey) {
+        // One staged element at a time; the previous one gives up its download.
+        if (this.stagedAudio) {
+          this.stagedAudio.element.removeAttribute("src");
+          this.stagedAudio.element.load();
+        }
         const element = new Audio();
         element.preload = "auto";
         element.src = assetUrl(cue.audio.sourceKey);
@@ -777,13 +843,14 @@ export class ProjectorMediaEngine {
   private bindAudio(): void {
     const audio = this.audio;
     audio.addEventListener("playing", () => {
-      if (this.audioAssetId) this.setAudio("PLAYING");
+      if (this.audioAssetId && !this.probing) this.setAudio("PLAYING");
     });
     audio.addEventListener("pause", () => {
-      if (this.audioAssetId) this.setAudio(audio.ended ? "ENDED" : "PAUSED");
+      if (this.audioAssetId && !this.probing)
+        this.setAudio(audio.ended ? "ENDED" : "PAUSED");
     });
     audio.addEventListener("ended", () => {
-      if (!this.audioAssetId) return;
+      if (!this.audioAssetId || this.probing) return;
       this.setAudio("ENDED");
       if (this.playbackExecutionId)
         this.ack(this.playbackExecutionId, true, "ENDED");

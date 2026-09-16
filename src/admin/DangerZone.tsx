@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 
 import type { TestShowGeneration } from "../../shared/domain";
-import { DEFAULT_EVENT_NAME } from "../../shared/platform";
 
 interface OrphanReport {
   assets: readonly {
@@ -122,7 +121,7 @@ export function DangerZone({ eventTitle, testShow }: DangerZoneProps) {
     }
     // Never report a clean bucket that is not clean.
     setFailed(!result.mediaCleanupComplete);
-    const summary = `${result.clearedActs} act${result.clearedActs === 1 ? "" : "s"} and ${result.objectsDeleted} media file${result.objectsDeleted === 1 ? "" : "s"} removed. The show is back to its defaults: “${DEFAULT_EVENT_NAME}”, four judges, 50:50 weighting, default theme. Re-pair the projector and reissue judge links.`;
+    const summary = `${result.clearedActs} act${result.clearedActs === 1 ? "" : "s"} and ${result.objectsDeleted} media file${result.objectsDeleted === 1 ? "" : "s"} removed. Event identity, appearance, judge setup, weighting, show-flow preferences, public messages and paired projector sessions were retained.`;
     setNotice(
       result.mediaCleanupComplete
         ? `Show reset. ${summary}`
@@ -225,18 +224,14 @@ export function DangerZone({ eventTitle, testShow }: DangerZoneProps) {
         <div className="danger-zone__copy">
           <h3>Reset entire show</h3>
           <p>
-            Returns this event to the default show. Clears every act, cue,
-            uploaded and generated file, vote, judge score and result; the event
-            name, short name and tagline; the theme and typeface; the judge
-            panel and weighting; the GO behaviour; the public text; and the
-            projector pairing. Afterwards the show is{" "}
-            <b>“{DEFAULT_EVENT_NAME}”</b> with four judges named Judge 1–4,
-            50:50 weighting and the default theme, ready to set up from scratch.
+            Clears every act, cue, uploaded and generated file, vote, judge
+            score, result and temporary projector pairing code. The stage
+            returns to a safe empty lobby.
           </p>
           <p>
-            <b>Not</b> a factory reset: your operator sign-in, deployment
-            secrets, Cloudflare configuration and cached typefaces are
-            untouched.
+            <b>Kept:</b> event name and text, theme and typeface, judge panel
+            and links, weighting, GO behaviour, public messages, reactions,
+            paired projector sessions, operator sign-in and deployment setup.
           </p>
         </div>
         {!open ? (
@@ -378,7 +373,6 @@ function TestShowPanel({
 }) {
   const [status, setStatus] = useState<TestShowStatus | null>(null);
   const [open, setOpen] = useState(false);
-  const [phrase, setPhrase] = useState("");
   const [seed, setSeed] = useState("");
   const [scenario, setScenario] = useState("");
   const [last, setLast] = useState<TestShowSummary | null>(null);
@@ -402,7 +396,6 @@ function TestShowPanel({
     });
     setBusy(false);
     setOpen(false);
-    setPhrase("");
     if ("error" in result) {
       report(result.error, true);
       return;
@@ -449,12 +442,24 @@ function TestShowPanel({
           GENERATE TEST SHOW…
         </button>
       ) : (
-        <div className="danger-zone__confirm" role="alertdialog">
-          <strong>
+        <div
+          className="danger-zone__confirm"
+          role="alertdialog"
+          aria-labelledby="test-show-confirm-title"
+        >
+          <strong id="test-show-confirm-title">
             {status?.showDataExists
               ? "This replaces the show data that exists now. It cannot be undone."
               : "This fills the empty show with generated data."}
           </strong>
+          <p className="danger-zone__explain">
+            {status?.showDataExists
+              ? "Every act, media file, vote, judge score and result in the show is removed and replaced by a generated evening. "
+              : "A generated evening of acts, media, votes, judge scores and results is written into the show. "}
+            Your event name, theme and GO behaviour are kept; the judge panel
+            becomes the scenario's. RESET ENTIRE SHOW removes everything
+            generated.
+          </p>
           <div className="test-show__options">
             <label>
               Seed (optional, 8 hex characters)
@@ -488,32 +493,23 @@ function TestShowPanel({
               </select>
             </label>
           </div>
-          <label htmlFor="test-show-phrase">
-            Type <b>GENERATE TEST SHOW</b> to confirm
-          </label>
-          <input
-            id="test-show-phrase"
-            type="text"
-            autoComplete="off"
-            value={phrase}
-            onChange={(event) => setPhrase(event.target.value)}
-          />
           <div className="danger-zone__confirm-actions">
             <button
               type="button"
               className="danger-zone__fire"
-              disabled={busy || phrase.trim() !== "GENERATE TEST SHOW"}
+              disabled={busy}
               onClick={() => void generate()}
             >
-              {busy ? "GENERATING…" : "GENERATE TEST SHOW"}
+              {busy
+                ? "GENERATING…"
+                : status?.showDataExists
+                  ? "REPLACE SHOW DATA WITH A TEST SHOW"
+                  : "GENERATE TEST SHOW"}
             </button>
             <button
               type="button"
               disabled={busy}
-              onClick={() => {
-                setOpen(false);
-                setPhrase("");
-              }}
+              onClick={() => setOpen(false)}
             >
               CANCEL
             </button>

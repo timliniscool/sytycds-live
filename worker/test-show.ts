@@ -577,6 +577,12 @@ export async function generateTestShow(
 function baseActInput(act: TestActPlan) {
   const parsed = parseActInput({
     performerName: act.performerName,
+    performers: act.performers.map((name, index) => ({
+      id: `performer-${index + 1}`,
+      name,
+    })),
+    groupName: act.groupName,
+    performerDisplayMode: "AUTOMATIC",
     schoolYear: act.schoolYear,
     actName: act.actName,
     actType: act.actType,

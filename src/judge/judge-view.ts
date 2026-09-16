@@ -10,12 +10,20 @@ export type JudgeInputStatus = "empty" | "invalid" | "too_long" | "valid";
 
 export interface JudgeInputPreview {
   status: JudgeInputStatus;
+  /**
+   * The Effective Score: the number the entry evaluates to, before the show's
+   * scoring transformation. Null for infinite or unreadable entries.
+   */
+  evaluated: number | null;
+  /** The value that will count after the transformation. */
   effectiveScore: number | null;
   /**
    * Present only when the number that will count differs from the text typed.
    * An ordinary `8` deliberately produces nothing to read.
    */
   transform: string | null;
+  /** Why an entry was refused, in the judge's terms. */
+  detail: string | null;
 }
 
 /** Restrained hints; the field accepts far more than these four. */
@@ -33,30 +41,42 @@ export const JUDGE_EXAMPLES: readonly string[] = [
 export function previewJudgeInput(raw: string): JudgeInputPreview {
   const trimmed = raw.trim();
   if (trimmed.length === 0) {
-    return { status: "empty", effectiveScore: null, transform: null };
+    return {
+      status: "empty",
+      evaluated: null,
+      effectiveScore: null,
+      transform: null,
+      detail: null,
+    };
   }
   const parsed = parseJudgeScore(raw);
   if (!parsed.ok) {
     return {
       status: parsed.reason === "TOO_LONG" ? "too_long" : "invalid",
+      evaluated: null,
       effectiveScore: null,
       transform: null,
+      detail: parsed.detail,
     };
   }
   const effectiveScore = transformJudgeScore(parsed.parsed);
   if (parsed.parsed.classification !== "FINITE") {
     return {
       status: "valid",
+      evaluated: null,
       effectiveScore,
-      transform: `effective ${effectiveScore.toFixed(3)}`,
+      transform: `counts as ${effectiveScore.toFixed(3)}`,
+      detail: null,
     };
   }
   const finiteValue = parsed.parsed.finiteValue;
   if (Math.abs(effectiveScore - finiteValue) > 0.0005) {
     return {
       status: "valid",
+      evaluated: finiteValue,
       effectiveScore,
-      transform: `effective ${effectiveScore.toFixed(3)}`,
+      transform: `counts as ${effectiveScore.toFixed(3)}`,
+      detail: null,
     };
   }
   // The taper left the value alone, so only a different spelling is worth
@@ -64,11 +84,19 @@ export function previewJudgeInput(raw: string): JudgeInputPreview {
   if (String(finiteValue) !== trimmed) {
     return {
       status: "valid",
+      evaluated: finiteValue,
       effectiveScore,
       transform: trimNumber(finiteValue),
+      detail: null,
     };
   }
-  return { status: "valid", effectiveScore, transform: null };
+  return {
+    status: "valid",
+    evaluated: finiteValue,
+    effectiveScore,
+    transform: null,
+    detail: null,
+  };
 }
 
 function trimNumber(value: number): string {

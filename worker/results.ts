@@ -1,5 +1,6 @@
 import { calculateFinalScore } from "../shared/scoring";
 import { type OperationalResult } from "../shared/domain";
+import { actIdentity } from "../shared/act-identity";
 
 interface ResultInputRow extends Record<string, SqlStorageValue> {
   id: string;
@@ -131,22 +132,47 @@ export function finaliseResult(
     const identity = sql
       .exec<{
         performer_name: string;
+        group_name: string;
+        performer_display_mode: string;
         act_name: string;
         school_year: string;
         act_type: string;
       }>(
-        "SELECT performer_name, act_name, school_year, act_type FROM acts WHERE show_id = ? AND id = ?",
+        `SELECT performer_name, group_name, performer_display_mode,
+                act_name, school_year, act_type
+         FROM acts WHERE show_id = ? AND id = ?`,
         showIdentifier,
         actIdentifier,
       )
       .toArray()[0];
     if (!identity) return { ok: false, reason: "The act no longer exists" };
+    const performers = sql
+      .exec<{ id: string; display_name: string }>(
+        `SELECT id, display_name FROM act_performers
+         WHERE show_id = ? AND act_id = ? ORDER BY position`,
+        showIdentifier,
+        actIdentifier,
+      )
+      .toArray()
+      .map((performer) => ({ id: performer.id, name: performer.display_name }));
+    const frozenIdentity = actIdentity({
+      performerName: identity.performer_name,
+      performers,
+      performerCount: performers.length || 1,
+      groupName: identity.group_name,
+      performerDisplayMode: identity.performer_display_mode as
+        | "AUTOMATIC"
+        | "GROUP_NAME_ONLY"
+        | "GROUP_NAME_AND_MEMBERS"
+        | "MEMBER_NAMES"
+        | "PERFORMER_COUNT",
+    });
     sql.exec(
       `INSERT INTO finalised_results_v2 (
         show_id, act_id, audience_mean, judge_scores_json, audience_weight,
         judge_weight, active_judge_ids_json, formula_version, final_score, finalised_at,
-        performer_name, act_name, school_year, act_type, rank_policy
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, 'DENSE_EXACT')`,
+        performer_name, performer_subtitle, act_name, school_year, act_type, rank_policy
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 2, ?, ?, ?, ?, ?, ?, ?, 'DENSE_EXACT')`,
       showIdentifier,
       actIdentifier,
       audienceMean,
@@ -156,7 +182,8 @@ export function finaliseResult(
       JSON.stringify(judgeIds),
       existing.value,
       timestamp,
-      identity.performer_name,
+      frozenIdentity.primary,
+      frozenIdentity.secondary,
       identity.act_name,
       identity.school_year,
       identity.act_type,

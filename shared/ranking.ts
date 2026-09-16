@@ -10,6 +10,8 @@ import type {
 /** One act as the ranking sees it: identity plus its frozen final score, if any. */
 export interface RankingInput {
   act: PublicAct;
+  /** Frozen supporting identity, when the result stored one. */
+  performerSubtitle?: string | null;
   /** Only a finalised score ranks. Provisional live values never enter here. */
   finalScore: number | null;
   /** Why this act has no frozen score yet, for the operator's missing list. */
@@ -63,6 +65,7 @@ export function rankActs(inputs: readonly RankingInput[]): AdminRanking {
           sameFinalScore(next.finalScore, input.finalScore)),
       finalScore: input.finalScore,
       performerName: input.act.performerName,
+      performerSubtitle: input.performerSubtitle ?? null,
       actName: input.act.actName,
       schoolYear: input.act.schoolYear,
       actType: input.act.actType,
@@ -117,6 +120,7 @@ export function publicResultsFor(
         entries: ranked,
         pendingGroups: 0,
         totalGroups: groups.length,
+        totalEntries: ranked.length,
       };
     case "STAGED": {
       const shown = Math.min(Math.max(revealedGroups, 0), groups.length);
@@ -127,6 +131,7 @@ export function publicResultsFor(
         entries: ranked.filter((entry) => visibleRanks.has(entry.rank)),
         pendingGroups: groups.length - shown,
         totalGroups: groups.length,
+        totalEntries: ranked.length,
       };
     }
     case "TOP_THREE":
@@ -135,6 +140,7 @@ export function publicResultsFor(
         entries: ranked.filter((entry) => entry.rank <= PODIUM_RANKS),
         pendingGroups: 0,
         totalGroups: groups.length,
+        totalEntries: ranked.length,
       };
     case "WINNER":
       return {
@@ -142,6 +148,7 @@ export function publicResultsFor(
         entries: ranked.filter((entry) => entry.rank === 1),
         pendingGroups: 0,
         totalGroups: groups.length,
+        totalEntries: ranked.length,
       };
   }
 }

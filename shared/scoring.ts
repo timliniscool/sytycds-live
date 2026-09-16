@@ -1,4 +1,10 @@
 import {
+  evaluateMathExpression,
+  isSimpleValue,
+  parseMathExpression,
+  type MathNode,
+} from "./math-expression";
+import {
   isAudienceScore,
   type AudienceScore,
   type EffectiveJudgeScore,
@@ -65,16 +71,22 @@ const NEGATIVE_INFINITY = /^-(?:inf|infinity)$/iu;
 
 export type JudgeScoreParseResult =
   | { ok: true; parsed: ParsedJudgeScore }
-  | { ok: false; reason: "INVALID" | "TOO_LONG" };
+  | { ok: false; reason: "INVALID" | "TOO_LONG"; detail: string };
 
-/** Parses a deliberately limited numerical language; it never evaluates code. */
+/**
+ * Parses a judge's entry. Plain numbers, π and ∞ take the fast path; anything
+ * else is read by the closed expression language in `math-expression.ts`,
+ * which never evaluates code. A value that overflows to ±∞ is classified as
+ * infinite on purpose, so "10^400" counts the same as "infinity"; NaN is
+ * refused rather than stored.
+ */
 export function parseJudgeScore(raw: string): JudgeScoreParseResult {
   if (raw.length > MAX_JUDGE_INPUT_LENGTH) {
-    return { ok: false, reason: "TOO_LONG" };
+    return { ok: false, reason: "TOO_LONG", detail: "That entry is too long" };
   }
   const value = raw.trim();
   if (value.length === 0) {
-    return { ok: false, reason: "INVALID" };
+    return { ok: false, reason: "INVALID", detail: "Enter a score" };
   }
   if (POSITIVE_INFINITY.test(value)) {
     return {
@@ -97,13 +109,46 @@ export function parseJudgeScore(raw: string): JudgeScoreParseResult {
       },
     };
   }
-  if (!FINITE_NUMBER.test(value)) {
-    return { ok: false, reason: "INVALID" };
+  if (FINITE_NUMBER.test(value)) {
+    const finiteValue = Number(value);
+    return Number.isFinite(finiteValue)
+      ? { ok: true, parsed: { classification: "FINITE", finiteValue } }
+      : {
+          ok: false,
+          reason: "INVALID",
+          detail: "That number is too large to store",
+        };
   }
-  const finiteValue = Number(value);
-  return Number.isFinite(finiteValue)
-    ? { ok: true, parsed: { classification: "FINITE", finiteValue } }
-    : { ok: false, reason: "INVALID" };
+  const parsed = parseMathExpression(value);
+  if (!parsed.ok)
+    return { ok: false, reason: "INVALID", detail: parsed.detail };
+  const evaluated = evaluateMathExpression(parsed.node);
+  if (!evaluated.ok)
+    return { ok: false, reason: "INVALID", detail: evaluated.detail };
+  return { ok: true, parsed: classifyValue(evaluated.value) };
+}
+
+/** Maps an evaluated number onto the persisted classification. */
+export function classifyValue(value: number): ParsedJudgeScore {
+  if (value === Infinity)
+    return { classification: "POSITIVE_INFINITY", finiteValue: null };
+  if (value === -Infinity)
+    return { classification: "NEGATIVE_INFINITY", finiteValue: null };
+  // -0 would round-trip through SQLite and JSON as 0 anyway; say so up front.
+  return { classification: "FINITE", finiteValue: value === 0 ? 0 : value };
+}
+
+/**
+ * How an entered score should be shown: a plain number or single constant
+ * reads best exactly as typed; anything richer is typeset from its tree.
+ */
+export function describeJudgeEntry(
+  raw: string,
+): { kind: "plain"; text: string } | { kind: "expression"; node: MathNode } {
+  const text = raw.trim();
+  const parsed = parseMathExpression(text);
+  if (!parsed.ok || isSimpleValue(parsed.node)) return { kind: "plain", text };
+  return { kind: "expression", node: parsed.node };
 }
 
 export function transformJudgeScore(

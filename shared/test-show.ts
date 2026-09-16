@@ -168,7 +168,12 @@ export interface TestActMediaPlan {
 
 export interface TestActPlan {
   actName: string;
+  /** The identity line the legacy single-performer field would carry. */
   performerName: string;
+  /** Every person on stage, in running order; one entry for a soloist. */
+  performers: readonly string[];
+  /** Empty for soloists and for groups that go by their members' names. */
+  groupName: string;
   schoolYear: string;
   actType: string;
   publicDescription: string;
@@ -335,11 +340,44 @@ function between(random: () => number, low: number, high: number): number {
   return low + Math.floor(random() * (high - low + 1));
 }
 
-function performerName(random: () => number, group: boolean): string {
-  if (group) {
-    return `The ${pick(random, ACT_ADJECTIVES)} ${pick(random, GROUP_WORDS)}`;
-  }
+function personName(random: () => number): string {
   return `${pick(random, FIRST_NAMES)} ${pick(random, SURNAMES)}`;
+}
+
+function groupTitle(random: () => number): string {
+  return `The ${pick(random, ACT_ADJECTIVES)} ${pick(random, GROUP_WORDS)}`;
+}
+
+/**
+ * Who is on stage. Roughly half the acts are soloists; the rest split between
+ * named groups and groups that go by their members' names, so every identity
+ * shape the real show can contain appears in a generated one. `long` forces a
+ * large named group with hyphenated names to stress the layouts.
+ */
+function performersFor(
+  random: () => number,
+  long: boolean,
+): { performers: string[]; groupName: string } {
+  if (long) {
+    const size = between(random, 9, 14);
+    return {
+      performers: Array.from(
+        { length: size },
+        () =>
+          `${pick(random, FIRST_NAMES)}-${pick(random, FIRST_NAMES)} ${pick(random, SURNAMES)}-${pick(random, SURNAMES)}`,
+      ),
+      groupName: `${groupTitle(random)} featuring ${personName(random)}`,
+    };
+  }
+  const roll = random();
+  if (roll < 0.5) return { performers: [personName(random)], groupName: "" };
+  const size = roll < 0.9 ? between(random, 2, 5) : between(random, 6, 16);
+  const performers = Array.from({ length: size }, () => personName(random));
+  // Named group, or an unnamed group that is known by its members.
+  return {
+    performers,
+    groupName: random() < 0.6 ? groupTitle(random) : "",
+  };
 }
 
 function actName(random: () => number): string {
@@ -493,13 +531,14 @@ export function generateTestShowPlan(
         ? audienceScores(random, votesPerAct())
         : [];
 
+    const cast = performersFor(random, long);
     acts.push({
       actName: long
         ? `${actName(random)} ${actName(random)} ${actName(random)} (Extended Ensemble Version)`
         : actName(random),
-      performerName: long
-        ? `${performerName(random, true)} featuring ${performerName(random, false)} and ${performerName(random, false)}`
-        : performerName(random, random() < 0.3),
+      performerName: cast.groupName || cast.performers[0]!,
+      performers: cast.performers,
+      groupName: cast.groupName,
       schoolYear: pick(random, YEARS),
       actType: pick(random, ACT_TYPES),
       publicDescription: description(random, long),

@@ -184,10 +184,34 @@ export interface MediaAsset {
   referenced: boolean;
 }
 
+/** One real person attached to an act. IDs remain stable while names are edited. */
+export interface Performer {
+  id: string;
+  name: string;
+}
+
+/** Operator override for the identity line used on hall-facing graphics. */
+export type PerformerDisplayMode =
+  | "AUTOMATIC"
+  | "GROUP_NAME_ONLY"
+  | "GROUP_NAME_AND_MEMBERS"
+  | "MEMBER_NAMES"
+  | "PERFORMER_COUNT";
+
 export interface PublicAct {
   id: ActId;
   order: number;
+  /**
+   * Compatibility display label. New code should use `actIdentity()` so every
+   * surface applies the same solo/group and readability policy.
+   */
   performerName: string;
+  /** Explicit members. Audience projections may redact this list. */
+  performers?: readonly Performer[];
+  /** Real count retained even when an audience projection redacts member rows. */
+  performerCount?: number;
+  groupName?: string;
+  performerDisplayMode?: PerformerDisplayMode;
   schoolYear: string;
   actName: string;
   actType: string;
@@ -224,6 +248,7 @@ export const INHERITED_APPEARANCE: ActAppearance = {
 export interface ActAudienceVisibility {
   showDescriptionToAudience: boolean;
   showImageToAudience: boolean;
+  showFullMemberListToAudience?: boolean;
 }
 
 /** The automatic performance screen, or a custom visual that replaces it. */
@@ -348,15 +373,10 @@ export interface ShowRuntimeState {
   resultsRevealedGroups: number;
   flow: ShowFlowState;
   /**
-   * Identifies the most recent CLOSE of audience voting. A phone that was
-   * holding a selection when voting closed may submit it against this
-   * identifier for a short, bounded grace interval.
+   * Identifies the most recent CLOSE transition for client reconciliation.
    */
   voteCloseRevision: string | null;
 }
-
-/** How long after CLOSE a phone's automatic submission may still be accepted. */
-export const VOTE_CLOSE_GRACE_MS = 8_000;
 
 /** Live connection facts the coordinator knows for certain about its sockets. */
 export interface LivePresence {
@@ -500,6 +520,8 @@ export interface RankingEntry {
   tied: boolean;
   finalScore: number;
   performerName: string;
+  /** Frozen supporting identity, normally a member line or performer count. */
+  performerSubtitle?: string | null;
   actName: string;
   schoolYear: string;
   actType: string;
@@ -515,6 +537,11 @@ export interface PublicResults {
   entries: readonly RankingEntry[];
   pendingGroups: number;
   totalGroups: number;
+  /**
+   * Every ranked act, shown or not. The projector sizes the results board
+   * from this so a staged reveal never resizes its rows as places appear.
+   */
+  totalEntries: number;
 }
 
 /** Why an act is absent from the ranking, in the operator's own terms. */
