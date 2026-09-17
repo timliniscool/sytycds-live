@@ -288,8 +288,14 @@ function aggregateRow(state: DurableObjectState, actId: string) {
     .toArray()[0];
 }
 
+/**
+ * Tiers up to a 5000-phone hall. The largest tier is what a full auditorium
+ * with everyone on their phone looks like; the smaller ones show the curve.
+ */
+const LOAD_TIERS = [100, 500, 1000, 5000] as const;
+
 describe("audience vote path under load", () => {
-  for (const voters of [100, 500, 1000]) {
+  for (const voters of LOAD_TIERS) {
     it(`accepts ${voters} distinct votes, rejects replays, and keeps the aggregate exact`, async () => {
       const { stub, command } = await coordinator(`load-votes-${voters}`);
       expect(await command("OPEN_AUDIENCE_VOTING")).toBe("accepted");
@@ -446,7 +452,7 @@ describe("audience vote path under load", () => {
 });
 
 describe("realtime fan-out under load", () => {
-  for (const phones of [100, 500, 1_000]) {
+  for (const phones of LOAD_TIERS) {
     it(`connects ${phones} phones, fans out one state change, and survives a reconnect storm`, async () => {
       const { stub, cookie } = await coordinator(`load-sockets-${phones}`);
       const admin = await connect(

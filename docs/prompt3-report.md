@@ -276,3 +276,34 @@ Six operator reports after the first hand-over, each addressed and verified:
   and result behind a typed confirmation (`CLEAR`), via
   `POST /api/admin/acts/:id/scoring/reset`. The show-wide reset remains in
   Danger. Both are covered by `test/scoring-reset.test.ts`.
+
+---
+
+## 5000-user stress run (2026-09-17)
+
+Two independent measurements, both against the current code.
+
+**In-process harness** (`npm run test:load`, now with a 5000 tier; the
+coordinator runs in workerd with no dev-server bridge in the way):
+
+| Scenario                              | Result                                                                                               |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| 5000 distinct HTTP votes              | all 5000 stored, aggregate exact, 50 replays refused; p50 93 ms, p95 452 ms, max 1.45 s; 199 votes/s |
+| 5000 audience WebSockets              | all connected (64 s wall in batches of 50); one state change fanned out to all 5000 in **164 ms**    |
+| 100-vote burst while 5000 listen      | coalesced into 2 aggregate updates                                                                   |
+| Reconnect storm, 5000 drop and return | every socket re-snapshotted; 279 coalesced connection-count messages (limit 1250)                    |
+
+**External run** (`stress.mjs`: Node driving real WebSockets and HTTP through
+the Vite dev server on this machine): 4298 of 5000 sockets connected (connect
+p50 4.3 s under the batch load), one state change reached every connected
+phone with p50 264 ms and max 365 ms, 4414 of 5000 votes stored with p50
+3.0 s. The 586 missing votes and the 702 missing sockets were all
+`fetch failed` from the Vite → workerd bridge, and after the reconnect storm
+even `/api/health` returned that error: the local development runtime, not the
+application, is the ceiling at this scale. No application-level error was
+recorded; every vote that reached the coordinator was stored exactly once and
+replays were refused.
+
+Production runs on Cloudflare's edge with hibernating WebSockets and no
+bridge, so the in-process numbers are the ones that describe the coordinator;
+a rehearsal against the deployed URL is the only true test of the network path.
